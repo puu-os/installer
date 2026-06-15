@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+
+[package]
+name = "puu-installer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-2.0-or-later"
+description = "Standalone installer for bootc-based OSs"
+authors = ["Jarkko Sakkinen <jarkko.sakkinen@opinsys.fi>"]
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+argh = "0.1"
+blkid = "1"
+crossterm = "0.28"
+efivar = "2"
+fatfs = "0.3"
+fscommon = "0.1"
+gptman = { version = "3", features = ["nix"] }
+hex = "0.4"
+libc = "0.2"
+nix = { version = "0.29", features = [
+    "mount", "ioctl", "reboot", "fs", "user", "signal", "process",
+] }
+ostree = "0.20"
+ratatui = "0.29"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha-crypt = "0.6"
+sha2 = "0.10"
+toml = "0.8"
+udev = "0.9"
+strum = { version = "0.26", features = ["derive"] }
