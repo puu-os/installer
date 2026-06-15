@@ -380,10 +380,10 @@ impl Runner {
         steps: &[Step],
         selection: &StepSelection,
         mut is_cancelled: impl FnMut() -> bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         for (i, step) in steps.iter().enumerate() {
             if is_cancelled() {
-                break;
+                return Ok(false);
             }
             if !selection.includes(i, step, self.ctx.secure_boot) {
                 continue;
@@ -396,7 +396,7 @@ impl Runner {
             (step.fn_)(self)?;
             self.progress(1.0, step.title);
         }
-        Ok(())
+        Ok(true)
     }
 }
 

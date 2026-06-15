@@ -264,15 +264,14 @@ impl Installer {
                 })
                 .ok();
                 if let Ok(Event::Key(key)) = event::read() {
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('c')
-                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            return ScreenAction::Quit;
-                        }
-                        _ => continue,
+                    if matches!(key.code, KeyCode::Esc)
+                        || (matches!(key.code, KeyCode::Char('c'))
+                            && key.modifiers.contains(KeyModifiers::CONTROL))
+                    {
+                        return ScreenAction::Quit;
                     }
                 }
+                continue;
             }
 
             term.draw(|f| {
@@ -972,6 +971,13 @@ impl Installer {
                 states[idx] = InstallStepState::Skipped;
             }
         }
+        if !self.ctx.secure_boot {
+            for (i, step) in steps.iter().enumerate() {
+                if step.requires_secure_boot {
+                    states[i] = InstallStepState::Skipped;
+                }
+            }
+        }
 
         let mut worker = crate::app::InstallTask::start(&self.ctx, start_index, &skip_indices);
 
@@ -984,7 +990,7 @@ impl Installer {
         let mut failed = false;
         let mut complete = false;
 
-        while running {
+        loop {
             while let Ok(evt) = worker.events_rx.try_recv() {
                 match evt {
                     crate::app::TaskEvent::Log(line) => {
@@ -1156,13 +1162,6 @@ impl Installer {
                     }
                 }
             }
-        }
-
-        worker.join();
-        if complete {
-            ScreenAction::Reboot
-        } else {
-            ScreenAction::Menu
         }
     }
 

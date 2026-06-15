@@ -94,8 +94,22 @@ impl InstallTask {
             };
 
             match runner.execute(steps, &selection, || cancel_rx.try_recv().is_ok()) {
-                Ok(()) => {
+                Ok(true) => {
                     let _ = events_tx.send(TaskEvent::Done);
+                }
+                Ok(false) => {
+                    let failed_at = runner.step_index;
+                    pipeline::rollback(&mut {
+                        let tx = events_tx.clone();
+                        let log: LogFn = Box::new(move |line: String| {
+                            let _ = tx.send(TaskEvent::Log(line));
+                        });
+                        log
+                    });
+                    let _ = events_tx.send(TaskEvent::Failed {
+                        at: failed_at,
+                        error: "installation cancelled".to_string(),
+                    });
                 }
                 Err(e) => {
                     let failed_at = runner.step_index;
