@@ -10,6 +10,8 @@ license = "GPL-2.0-or-later"
 description = "Standalone installer for bootc-based OSs"
 authors = ["Jarkko Sakkinen <jarkko.sakkinen@opinsys.fi>"]
 readme = "README.md"
+homepage = "https://codeberg.org/puu/puu-installer"
+repository = "https://codeberg.org/puu/puu-installer"
 
 [dependencies]
 anyhow = "1"
