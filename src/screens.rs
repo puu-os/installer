@@ -10,7 +10,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Paragraph},
 };
 
 use crate::app::{Installer, ScreenAction, Trap};
@@ -50,6 +50,17 @@ const REBOOT_DELAY: u64 = 30;
 const MIN_SCREEN_COLS: u16 = 80;
 const MIN_SCREEN_ROWS: u16 = 23;
 const INSTALL_LOG_Y: u16 = 13;
+
+// Nord palette (https://www.nordtheme.com/).
+const BG: Color = Color::Rgb(0x2E, 0x34, 0x40); // nord0  Polar Night
+const PANEL: Color = Color::Rgb(0x3B, 0x42, 0x52); // nord1  Polar Night
+const TITLE_BG: Color = Color::Rgb(0x5E, 0x81, 0xAC); // nord10 Frost
+const FG: Color = Color::Rgb(0xE5, 0xE9, 0xF0); // nord5  Snow Storm
+const ACCENT: Color = Color::Rgb(0x88, 0xC0, 0xD0); // nord8  Frost
+const ON_ACCENT: Color = Color::Rgb(0x2E, 0x34, 0x40); // nord0  on accent
+const ERR: Color = Color::Rgb(0xBF, 0x61, 0x6A); // nord11 Aurora
+const WARN: Color = Color::Rgb(0xEB, 0xCB, 0x8B); // nord13 Aurora
+const OK: Color = Color::Rgb(0xA3, 0xBE, 0x8C); // nord14 Aurora
 
 const WELCOME_CHOICES: &[(ScreenAction, &str)] = &[
     (ScreenAction::Install, "Install"),
@@ -91,12 +102,12 @@ impl InstallStepState {
 
     fn style(self) -> Style {
         match self {
-            Self::Active => Style::default().fg(Color::Black).bg(Color::Cyan),
+            Self::Active => Style::default().fg(ON_ACCENT).bg(ACCENT),
             Self::Done => Style::default()
-                .fg(Color::Green)
+                .fg(OK)
                 .add_modifier(Modifier::BOLD),
-            Self::Failed => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            Self::Skipped => Style::default().fg(Color::Cyan),
+            Self::Failed => Style::default().fg(ERR).add_modifier(Modifier::BOLD),
+            Self::Skipped => Style::default().fg(ACCENT),
             Self::Pending => Style::default(),
         }
     }
@@ -194,22 +205,25 @@ impl Installer {
 
     pub(crate) fn draw_frame(f: &mut Frame, title: &str, subtitle: &str, footer: &str) {
         let area = f.area();
-        let block = Block::default()
-            .title(title)
-            .title_style(
+
+        // Fill the whole screen with the Nord background.
+        f.render_widget(Block::default().style(Style::default().fg(FG).bg(BG)), area);
+
+        // Full-width title bar.
+        f.render_widget(
+            Paragraph::new(format!(" {title}")).style(
                 Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Blue)
+                    .fg(FG)
+                    .bg(TITLE_BG)
                     .add_modifier(Modifier::BOLD),
-            )
-            .borders(Borders::TOP | Borders::BOTTOM)
-            .style(Style::default().fg(Color::White).bg(Color::Blue));
-        f.render_widget(block, area);
+            ),
+            Rect::new(0, 0, area.width, 1),
+        );
 
         if !subtitle.is_empty() {
             let sub_area = Rect::new(0, 1, area.width, 1);
             f.render_widget(
-                Paragraph::new(subtitle).style(Style::default().fg(Color::Cyan)),
+                Paragraph::new(format!(" {subtitle}")).style(Style::default().fg(ACCENT)),
                 sub_area,
             );
         }
@@ -217,7 +231,8 @@ impl Installer {
         if !footer.is_empty() {
             let foot_area = Rect::new(0, area.height.saturating_sub(1), area.width, 1);
             f.render_widget(
-                Paragraph::new(footer).style(Style::default().fg(Color::Cyan)),
+                Paragraph::new(format!(" {footer}"))
+                    .style(Style::default().fg(ACCENT).bg(PANEL)),
                 foot_area,
             );
         }
@@ -260,7 +275,7 @@ impl Installer {
                         "Current size {}x{}; minimum {}x{}",
                         area.width, area.height, MIN_SCREEN_COLS, MIN_SCREEN_ROWS
                     ))
-                    .style(Style::default().fg(Color::Yellow));
+                    .style(Style::default().fg(WARN));
                     f.render_widget(msg, Rect::new(2, 3, area.width.saturating_sub(4), 3));
                 })
                 .ok();
@@ -288,8 +303,8 @@ impl Installer {
                     let marker = if i == selected { ">" } else { " " };
                     let style = if i == selected {
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
+                            .fg(ON_ACCENT)
+                            .bg(ACCENT)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
@@ -348,7 +363,7 @@ impl Installer {
                 let area = f.area();
 
                 let body_style = if danger {
-                    Style::default().fg(Color::Red)
+                    Style::default().fg(ERR)
                 } else {
                     Style::default()
                 };
@@ -364,8 +379,8 @@ impl Installer {
                 for (i, choice) in ["No", "Yes"].iter().enumerate() {
                     let sel_style = if i == selected {
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
+                            .fg(ON_ACCENT)
+                            .bg(ACCENT)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
@@ -470,8 +485,8 @@ impl Installer {
                     let marker = if idx == selected { ">" } else { " " };
                     let style = if idx == selected {
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
+                            .fg(ON_ACCENT)
+                            .bg(ACCENT)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
@@ -499,9 +514,9 @@ impl Installer {
                 }
 
                 let status_style = if status.contains("Failed") || status.contains("busy") {
-                    Style::default().fg(Color::Red)
+                    Style::default().fg(ERR)
                 } else {
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(ACCENT)
                 };
                 f.render_widget(
                     Paragraph::new(status.as_str()).style(status_style),
@@ -592,8 +607,8 @@ impl Installer {
                     let idx = top + row;
                     let style = if idx == selected {
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
+                            .fg(ON_ACCENT)
+                            .bg(ACCENT)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
@@ -675,8 +690,8 @@ impl Installer {
                     let selected = i == field_idx;
                     let style = if selected {
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
+                            .fg(ON_ACCENT)
+                            .bg(ACCENT)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
@@ -705,7 +720,7 @@ impl Installer {
                     f.render_widget(
                         Paragraph::new("Password reveal is on").style(
                             Style::default()
-                                .fg(Color::Yellow)
+                                .fg(WARN)
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Rect::new(4, 13, area.width, 1),
@@ -714,7 +729,7 @@ impl Installer {
 
                 if !status.is_empty() {
                     f.render_widget(
-                        Paragraph::new(status.as_str()).style(Style::default().fg(Color::Red)),
+                        Paragraph::new(status.as_str()).style(Style::default().fg(ERR)),
                         Rect::new(4, 15, area.width, 1),
                     );
                 }
@@ -824,7 +839,7 @@ impl Installer {
                 f.render_widget(
                     Paragraph::new("This writes firmware Secure Boot variables.").style(
                         Style::default()
-                            .fg(Color::Yellow)
+                            .fg(WARN)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Rect::new(4, 7, area.width.saturating_sub(8), 1),
@@ -832,8 +847,8 @@ impl Installer {
                 for (i, choice) in ["Back", "Enroll keys"].iter().enumerate() {
                     let style = if i == selected {
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
+                            .fg(ON_ACCENT)
+                            .bg(ACCENT)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
@@ -904,7 +919,7 @@ impl Installer {
                     f.render_widget(
                         Paragraph::new(*line).style(
                             Style::default()
-                                .fg(Color::Yellow)
+                                .fg(WARN)
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Rect::new(4, 5 + i as u16, area.width.saturating_sub(8), 1),
@@ -915,8 +930,8 @@ impl Installer {
                 for (i, choice) in choices.iter().enumerate() {
                     let style = if i == selected {
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
+                            .fg(ON_ACCENT)
+                            .bg(ACCENT)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
@@ -1077,10 +1092,10 @@ impl Installer {
                 let rw = area.width.saturating_sub(rx + 2).max(20);
 
                 let st_style = if failed {
-                    Style::default().fg(Color::Red)
+                    Style::default().fg(ERR)
                 } else if complete {
                     Style::default()
-                        .fg(Color::Green)
+                        .fg(OK)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -1205,7 +1220,7 @@ impl Installer {
                 );
                 f.render_widget(
                     Paragraph::new("Remove the installation media before rebooting.")
-                        .style(Style::default().fg(Color::Cyan)),
+                        .style(Style::default().fg(ACCENT)),
                     Rect::new(4, 7, area.width.saturating_sub(8), 1),
                 );
                 let countdown_line = if countdown {
@@ -1220,8 +1235,8 @@ impl Installer {
                 for (i, choice) in ["Shell", "Reboot"].iter().enumerate() {
                     let style = if i == selected {
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
+                            .fg(ON_ACCENT)
+                            .bg(ACCENT)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
@@ -1269,7 +1284,7 @@ impl Installer {
                 Self::draw_frame(f, "Network", "", "");
                 f.render_widget(
                     Paragraph::new("No network CLI found. Expected nmtui, nmcli, or iwctl.")
-                        .style(Style::default().fg(Color::Red)),
+                        .style(Style::default().fg(ERR)),
                     Rect::new(4, 5, f.area().width.saturating_sub(8), 1),
                 );
                 f.render_widget(
