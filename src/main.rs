@@ -33,7 +33,8 @@ use crate::pipeline::Context;
 /// Puu system installer.
 #[derive(FromArgs)]
 struct Args {
-    /// path to the YAML configuration file (overrides `PUU_INSTALLER_CONFIG`)
+    /// path to the YAML configuration file (overrides `PUU_INSTALLER_CONFIG`;
+    /// defaults to /usr/share/puu/machine.yaml)
     #[argh(option)]
     config: Option<PathBuf>,
 
@@ -93,10 +94,7 @@ fn main() -> Result<()> {
     let config_path = args
         .config
         .or_else(|| std::env::var_os("PUU_INSTALLER_CONFIG").map(PathBuf::from))
-        .unwrap_or_else(|| {
-            eprintln!("no configuration given; pass --config or set PUU_INSTALLER_CONFIG.");
-            std::process::exit(1);
-        });
+        .unwrap_or_else(|| PathBuf::from("/usr/share/puu/machine.yaml"));
 
     let cfg = Config::load(&config_path)?;
 
