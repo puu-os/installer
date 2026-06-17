@@ -202,7 +202,8 @@ impl Installer {
                     .bg(Color::Blue)
                     .add_modifier(Modifier::BOLD),
             )
-            .borders(Borders::TOP | Borders::BOTTOM);
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .style(Style::default().fg(Color::White).bg(Color::Blue));
         f.render_widget(block, area);
 
         if !subtitle.is_empty() {
