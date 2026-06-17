@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -113,22 +112,6 @@ pub fn derive_partitions(drive: &str) -> DerivedPartitions {
             ..Default::default()
         }
     }
-}
-
-pub fn parse_identity(path: &str) -> HashMap<String, String> {
-    let mut result = HashMap::new();
-    if let Ok(content) = std::fs::read_to_string(path) {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((key, value)) = line.split_once('=') {
-                result.insert(key.to_string(), value.to_string());
-            }
-        }
-    }
-    result
 }
 
 fn read_manifest(source_image: &Path) -> Option<serde_json::Value> {

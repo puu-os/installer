@@ -75,13 +75,19 @@ impl Default for Image {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Identity {
-    pub config_path: String,
+    pub keymap: String,
+    pub locale: String,
+    pub timezone: String,
+    pub hostname: String,
 }
 
 impl Default for Identity {
     fn default() -> Self {
         Self {
-            config_path: "/usr/share/puu/identity.conf".into(),
+            keymap: "us".into(),
+            locale: "C.UTF-8".into(),
+            timezone: "UTC".into(),
+            hostname: "puu".into(),
         }
     }
 }

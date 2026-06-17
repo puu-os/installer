@@ -31,7 +31,10 @@ image:
   sourceLabel: PAYLOAD
   sourceMount: /run/puu-installer/payload
 identity:
-  configPath: /usr/share/puu/identity.conf
+  keymap: us
+  locale: C.UTF-8
+  timezone: UTC
+  hostname: puu
 flatpak:
   manifestPath: /usr/share/puu/flatpaks.list
   syncHelper: /usr/libexec/puu/flatpak-sync

@@ -417,29 +417,20 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
 }
 
 fn step_firstboot(r: &mut Runner) -> Result<()> {
-    let ident = pipeline::parse_identity(&r.ctx.config.identity.config_path);
+    let ident = &r.ctx.config.identity;
     let keymap = if r.ctx.keymap.is_empty() {
-        ident.get("KEYMAP").cloned().unwrap_or_else(|| "us".into())
+        ident.keymap.clone()
     } else {
         r.ctx.keymap.clone()
     };
     let locale = if r.ctx.locale.is_empty() {
-        ident
-            .get("LOCALE")
-            .cloned()
-            .unwrap_or_else(|| "C.UTF-8".into())
+        ident.locale.clone()
     } else {
         r.ctx.locale.clone()
     };
 
-    let timezone = ident
-        .get("TIMEZONE")
-        .cloned()
-        .unwrap_or_else(|| "UTC".into());
-    let hostname = ident
-        .get("HOSTNAME")
-        .cloned()
-        .unwrap_or_else(|| "puu".into());
+    let timezone = ident.timezone.clone();
+    let hostname = ident.hostname.clone();
 
     r.run_cmd(
         &[
