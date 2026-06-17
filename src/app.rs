@@ -7,7 +7,7 @@ use std::io::{self, stdout};
 type ProgressCb = Box<dyn FnMut(usize, &str, f64) + Send>;
 use std::sync::mpsc;
 
-use crossterm::terminal::{self, LeaveAlternateScreen};
+use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
 
 use crate::pipeline::{self, Context, Runner, StepSelection};
@@ -172,6 +172,8 @@ impl Installer {
             eprintln!("Terminal error (Terminal::new): {e}");
             std::process::exit(1);
         });
+
+        let _ = crossterm::execute!(terminal.backend_mut(), EnterAlternateScreen);
 
         let result = self.run_screens(&mut terminal);
 

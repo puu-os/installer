@@ -103,9 +103,7 @@ impl InstallStepState {
     fn style(self) -> Style {
         match self {
             Self::Active => Style::default().fg(ON_ACCENT).bg(ACCENT),
-            Self::Done => Style::default()
-                .fg(OK)
-                .add_modifier(Modifier::BOLD),
+            Self::Done => Style::default().fg(OK).add_modifier(Modifier::BOLD),
             Self::Failed => Style::default().fg(ERR).add_modifier(Modifier::BOLD),
             Self::Skipped => Style::default().fg(ACCENT),
             Self::Pending => Style::default(),
@@ -231,8 +229,7 @@ impl Installer {
         if !footer.is_empty() {
             let foot_area = Rect::new(0, area.height.saturating_sub(1), area.width, 1);
             f.render_widget(
-                Paragraph::new(format!(" {footer}"))
-                    .style(Style::default().fg(ACCENT).bg(PANEL)),
+                Paragraph::new(format!(" {footer}")).style(Style::default().fg(ACCENT).bg(PANEL)),
                 foot_area,
             );
         }
@@ -467,8 +464,11 @@ impl Installer {
                 let area = f.area();
 
                 f.render_widget(
-                    Paragraph::new("  Device              Size       Bus      Status")
-                        .style(Style::default().add_modifier(Modifier::BOLD)),
+                    Paragraph::new(format!(
+                        "  {:<19} {:<10} {:<8} {:<20} {}",
+                        "Device", "Size", "Bus", "Model", "Status"
+                    ))
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
                     Rect::new(0, 4, area.width, 1),
                 );
                 f.render_widget(
@@ -491,26 +491,15 @@ impl Installer {
                     } else {
                         Style::default()
                     };
+                    let model: String = dev.model.chars().take(20).collect();
                     let line = format!(
-                        "{marker} {:<19} {:<10} {:<8} {status_text}",
+                        "{marker} {:<19} {:<10} {:<8} {model:<20} {status_text}",
                         dev.path, dev.size, dev.transport
                     );
                     f.render_widget(
                         Paragraph::new(line).style(style),
                         Rect::new(0, 6 + row as u16, area.width, 1),
                     );
-                    let model_x = 44u16.min(area.width.saturating_sub(30));
-                    if model_x > 0 {
-                        f.render_widget(
-                            Paragraph::new(dev.model.as_str()).style(style),
-                            Rect::new(
-                                model_x,
-                                6 + row as u16,
-                                area.width.saturating_sub(model_x),
-                                1,
-                            ),
-                        );
-                    }
                 }
 
                 let status_style = if status.contains("Failed") || status.contains("busy") {
@@ -718,11 +707,8 @@ impl Installer {
 
                 if reveal {
                     f.render_widget(
-                        Paragraph::new("Password reveal is on").style(
-                            Style::default()
-                                .fg(WARN)
-                                .add_modifier(Modifier::BOLD),
-                        ),
+                        Paragraph::new("Password reveal is on")
+                            .style(Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
                         Rect::new(4, 13, area.width, 1),
                     );
                 }
@@ -772,15 +758,17 @@ impl Installer {
                         _ => {}
                     },
                     KeyCode::Enter => {
-                        if field_idx < 3 {
-                            field_idx += 1;
-                        }
-                        status = validate_account(&username, &password, &password2);
-                        if status.is_empty() {
+                        let result = validate_account(&username, &password, &password2);
+                        if result.is_empty() {
                             self.ctx.username = username.trim().to_string();
                             self.ctx.user_password.clone_from(&password);
                             self.ctx.user_shell = SHELLS[shell_idx].1.to_string();
                             return ScreenAction::Continue;
+                        }
+                        if field_idx < 3 {
+                            field_idx += 1;
+                        } else {
+                            status = result;
                         }
                     }
                     KeyCode::Char(c) if field_idx < 3 && c.is_ascii() && c >= ' ' => {
@@ -837,11 +825,8 @@ impl Installer {
                     Rect::new(4, 5, area.width.saturating_sub(8), 1),
                 );
                 f.render_widget(
-                    Paragraph::new("This writes firmware Secure Boot variables.").style(
-                        Style::default()
-                            .fg(WARN)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Paragraph::new("This writes firmware Secure Boot variables.")
+                        .style(Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
                     Rect::new(4, 7, area.width.saturating_sub(8), 1),
                 );
                 for (i, choice) in ["Back", "Enroll keys"].iter().enumerate() {
@@ -917,11 +902,8 @@ impl Installer {
                 let lines: Vec<&str> = body.lines().collect();
                 for (i, line) in lines.iter().enumerate() {
                     f.render_widget(
-                        Paragraph::new(*line).style(
-                            Style::default()
-                                .fg(WARN)
-                                .add_modifier(Modifier::BOLD),
-                        ),
+                        Paragraph::new(*line)
+                            .style(Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
                         Rect::new(4, 5 + i as u16, area.width.saturating_sub(8), 1),
                     );
                 }
@@ -1094,9 +1076,7 @@ impl Installer {
                 let st_style = if failed {
                     Style::default().fg(ERR)
                 } else if complete {
-                    Style::default()
-                        .fg(OK)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(OK).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };

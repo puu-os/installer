@@ -141,11 +141,14 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
+    let target_imgref = pipeline::load_target_imgref(source_image.as_deref(), &cfg);
+    let image_version = pipeline::load_image_version(source_image.as_deref());
+
     let ctx = Context {
         config: cfg,
         source_image,
-        target_imgref: String::new(),
-        image_version: String::new(),
+        target_imgref,
+        image_version,
         drive: args.drive.unwrap_or_default(),
         drive_label: String::new(),
         username: String::new(),
