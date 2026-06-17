@@ -471,7 +471,7 @@ fn step_firstboot(r: &mut Runner) -> Result<()> {
 }
 
 fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
-    if r.ctx.k3s_role == "server" && r.ctx.k3s_node_name.is_empty() {
+    if r.ctx.config.k3s.role == "server" && r.ctx.config.k3s.node_name.is_empty() {
         r.log("k3s cluster: using image default server configuration");
         return Ok(());
     }
@@ -479,13 +479,13 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
     let mut argv: Vec<String> = vec![
         "chroot".into(),
         TARGET_MOUNT.into(),
-        "/usr/libexec/puu/configure-k3s-cluster".into(),
+        r.ctx.config.k3s.helper.clone(),
         "--role".into(),
-        r.ctx.k3s_role.clone(),
+        r.ctx.config.k3s.role.clone(),
     ];
-    if !r.ctx.k3s_server_url.is_empty() {
+    if !r.ctx.config.k3s.server_url.is_empty() {
         argv.push("--server-url".into());
-        argv.push(r.ctx.k3s_server_url.clone());
+        argv.push(r.ctx.config.k3s.server_url.clone());
     }
     if !r.ctx.k3s_token.is_empty() {
         let token_path = Path::new(TARGET_MOUNT).join("etc/rancher/k3s/puu-token");
@@ -500,15 +500,15 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
         argv.push("--token-file".into());
         argv.push("/etc/rancher/k3s/puu-token".into());
     }
-    if !r.ctx.k3s_node_name.is_empty() {
+    if !r.ctx.config.k3s.node_name.is_empty() {
         argv.push("--node-name".into());
-        argv.push(r.ctx.k3s_node_name.clone());
+        argv.push(r.ctx.config.k3s.node_name.clone());
     }
     let args_ref: Vec<&str> = argv.iter().map(std::string::String::as_str).collect();
     r.run_cmd(&args_ref, None, None, None)?;
     r.log(&format!(
         "k3s cluster: staged {} configuration",
-        r.ctx.k3s_role
+        r.ctx.config.k3s.role
     ));
     Ok(())
 }

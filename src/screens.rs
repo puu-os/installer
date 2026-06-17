@@ -460,8 +460,7 @@ impl Installer {
                     Rect::new(0, 5, area.width, 1),
                 );
 
-                for (row, dev) in devices[top..top.min(devices.len()).max(top)
-                    + visible.min(devices.len().saturating_sub(top))]
+                for (row, dev) in devices[top..(top + visible).min(devices.len())]
                     .iter()
                     .enumerate()
                 {
@@ -682,8 +681,11 @@ impl Installer {
                         Style::default()
                     };
 
+                    let count = fields[i].chars().count();
                     let value = if (i == 1 || i == 2) && !reveal {
-                        "*".repeat(fields[i].len())
+                        "*".repeat(count.min(32))
+                    } else if count > 32 {
+                        fields[i].chars().skip(count - 32).collect()
                     } else {
                         fields[i].clone()
                     };
@@ -1138,7 +1140,8 @@ impl Installer {
                             log_scroll = (log_scroll + 10).min(logs.len().saturating_sub(1));
                         }
                         KeyCode::Esc | KeyCode::Char('c')
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                            if (key.code != KeyCode::Char('c')
+                                || key.modifiers.contains(KeyModifiers::CONTROL))
                                 && running
                                 && self.confirm(
                                     term,
@@ -1173,15 +1176,18 @@ impl Installer {
         #[allow(clippy::cast_possible_wrap)]
         let mut remaining = REBOOT_DELAY as i64;
         let mut last_tick = Instant::now();
+        let mut countdown = true;
 
         loop {
-            let now = Instant::now();
-            if now.duration_since(last_tick) >= Duration::from_secs(1) {
-                remaining -= 1;
-                last_tick = now;
-            }
-            if remaining <= 0 {
-                return Trap::Reboot;
+            if countdown {
+                let now = Instant::now();
+                if now.duration_since(last_tick) >= Duration::from_secs(1) {
+                    remaining -= 1;
+                    last_tick = now;
+                }
+                if remaining <= 0 {
+                    return Trap::Reboot;
+                }
             }
 
             term.draw(|f| {
@@ -1201,8 +1207,13 @@ impl Installer {
                         .style(Style::default().fg(Color::Cyan)),
                     Rect::new(4, 7, area.width.saturating_sub(8), 1),
                 );
+                let countdown_line = if countdown {
+                    format!("Auto-reboot in {remaining}s")
+                } else {
+                    "Auto-reboot cancelled; select an option.".to_string()
+                };
                 f.render_widget(
-                    Paragraph::new(format!("Auto-reboot in {remaining}s")),
+                    Paragraph::new(countdown_line),
                     Rect::new(4, 9, area.width.saturating_sub(8), 1),
                 );
                 for (i, choice) in ["Shell", "Reboot"].iter().enumerate() {
@@ -1224,6 +1235,7 @@ impl Installer {
 
             if event::poll(Duration::from_millis(200)).unwrap_or(false) {
                 if let Ok(Event::Key(key)) = event::read() {
+                    countdown = false;
                     match key.code {
                         KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
                             selected = 1 - selected;
@@ -1237,7 +1249,6 @@ impl Installer {
                                 let _ = std::process::Command::new(&shell).status();
                                 tui_or_exit(terminal::enable_raw_mode(), "enable_raw_mode");
                                 crossterm::execute!(term.backend_mut(), EnterAlternateScreen).ok();
-                                last_tick = Instant::now();
                             } else {
                                 return Trap::Reboot;
                             }

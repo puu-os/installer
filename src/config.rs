@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Config {
     pub partitions: Partitions,
     pub labels: Labels,
@@ -21,7 +21,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Partitions {
     pub efi: String,
     pub root_min: String,
@@ -39,7 +39,7 @@ impl Default for Partitions {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Labels {
     pub root: String,
     pub home: String,
@@ -55,9 +55,9 @@ impl Default for Labels {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Image {
-    pub target_imgref: String,
+    pub target_img_ref: String,
     pub source_label: String,
     pub source_mount: String,
 }
@@ -65,7 +65,7 @@ pub struct Image {
 impl Default for Image {
     fn default() -> Self {
         Self {
-            target_imgref: "quay.io/puu/puu:latest".into(),
+            target_img_ref: "quay.io/puu/puu:latest".into(),
             source_label: "PAYLOAD".into(),
             source_mount: "/run/puu-installer/payload".into(),
         }
@@ -73,7 +73,7 @@ impl Default for Image {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Identity {
     pub config_path: String,
 }
@@ -87,7 +87,7 @@ impl Default for Identity {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Flatpak {
     pub manifest_path: String,
     pub sync_helper: String,
@@ -103,21 +103,27 @@ impl Default for Flatpak {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct K3s {
     pub helper: String,
+    pub role: String,
+    pub server_url: String,
+    pub node_name: String,
 }
 
 impl Default for K3s {
     fn default() -> Self {
         Self {
             helper: "/usr/libexec/puu/configure-k3s-cluster".into(),
+            role: "server".into(),
+            server_url: String::new(),
+            node_name: String::new(),
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Homed {
     pub groups: Vec<String>,
 }
@@ -146,7 +152,7 @@ impl Default for Homed {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Kernel {
     pub extra_arm64_args: Vec<String>,
 }
@@ -163,7 +169,7 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
-        let cfg: Config = toml::from_str(&text)
+        let cfg: Config = serde_norway::from_str(&text)
             .with_context(|| format!("failed to parse config {}", path.display()))?;
         Ok(cfg)
     }

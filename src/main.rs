@@ -33,9 +33,9 @@ use crate::pipeline::Context;
 /// Puu system installer.
 #[derive(FromArgs)]
 struct Args {
-    /// path to the TOML configuration file
-    #[argh(positional)]
-    config: PathBuf,
+    /// path to the YAML configuration file (overrides `PUU_INSTALLER_CONFIG`)
+    #[argh(option)]
+    config: Option<PathBuf>,
 
     /// pre-select the target drive (e.g. /dev/nvme0n1)
     #[argh(option)]
@@ -53,21 +53,9 @@ struct Args {
     #[argh(option)]
     skip: Option<String>,
 
-    /// k3s cluster role: server or agent
-    #[argh(option, default = "String::from(\"server\")")]
-    k3s_role: String,
-
-    /// k3s server URL for agent joins
-    #[argh(option)]
-    k3s_server_url: Option<String>,
-
     /// read the k3s cluster token from this file
     #[argh(option)]
     k3s_token_file: Option<PathBuf>,
-
-    /// optional explicit k3s node name
-    #[argh(option)]
-    k3s_node_name: Option<String>,
 }
 
 fn parse_step_list(value: &str, step_count: usize) -> Result<Vec<usize>> {
@@ -102,7 +90,15 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let cfg = Config::load(&args.config)?;
+    let config_path = args
+        .config
+        .or_else(|| std::env::var_os("PUU_INSTALLER_CONFIG").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            eprintln!("no configuration given; pass --config or set PUU_INSTALLER_CONFIG.");
+            std::process::exit(1);
+        });
+
+    let cfg = Config::load(&config_path)?;
 
     let source_image = match args.source_image {
         Some(p) => Some(p),
@@ -134,8 +130,16 @@ fn main() -> Result<()> {
         None => String::new(),
     };
 
-    if args.k3s_role == "agent" && (args.k3s_server_url.is_none() || k3s_token.is_empty()) {
-        eprintln!("--k3s-role agent requires --k3s-server-url and --k3s-token-file.");
+    if cfg.k3s.role != "server" && cfg.k3s.role != "agent" {
+        eprintln!(
+            "k3s.role must be \"server\" or \"agent\", got \"{}\".",
+            cfg.k3s.role
+        );
+        std::process::exit(1);
+    }
+
+    if cfg.k3s.role == "agent" && (cfg.k3s.server_url.is_empty() || k3s_token.is_empty()) {
+        eprintln!("k3s.role agent requires k3s.serverUrl and --k3s-token-file.");
         std::process::exit(1);
     }
 
@@ -152,10 +156,7 @@ fn main() -> Result<()> {
         keymap: String::new(),
         locale: String::new(),
         secure_boot: true,
-        k3s_role: args.k3s_role,
-        k3s_server_url: args.k3s_server_url.unwrap_or_default(),
         k3s_token,
-        k3s_node_name: args.k3s_node_name.unwrap_or_default(),
         last_error: String::new(),
         start_from: args.start_from,
         skip_steps,

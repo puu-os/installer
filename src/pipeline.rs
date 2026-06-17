@@ -139,16 +139,16 @@ fn read_manifest(source_image: &Path) -> Option<serde_json::Value> {
 #[allow(clippy::manual_strip)]
 pub fn load_target_imgref(source_image: Option<&Path>, config: &crate::config::Config) -> String {
     let Some(img) = source_image else {
-        return config.image.target_imgref.clone();
+        return config.image.target_img_ref.clone();
     };
     let Some(json) = read_manifest(img) else {
-        return config.image.target_imgref.clone();
+        return config.image.target_img_ref.clone();
     };
     json.get("target_imgref")
         .or_else(|| json.get("imgref"))
         .and_then(|v| v.as_str())
         .map_or_else(
-            || config.image.target_imgref.clone(),
+            || config.image.target_img_ref.clone(),
             std::string::ToString::to_string,
         )
 }
@@ -305,10 +305,7 @@ pub struct Context {
     pub keymap: String,
     pub locale: String,
     pub secure_boot: bool,
-    pub k3s_role: String,
-    pub k3s_server_url: String,
     pub k3s_token: String,
-    pub k3s_node_name: String,
     pub last_error: String,
     pub start_from: usize,
     pub skip_steps: Vec<usize>,
