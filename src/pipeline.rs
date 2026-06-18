@@ -929,8 +929,14 @@ const PART_WAIT_INTERVAL_MS: u64 = 500;
 pub fn wait_for_block_device(runner: &mut Runner, part: &str) -> Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(PART_WAIT_TIMEOUT_S);
     loop {
-        if Path::new(part).exists() {
-            return Ok(());
+        let openable =
+            Path::new(part).exists() && std::fs::OpenOptions::new().read(true).open(part).is_ok();
+        if openable {
+            std::thread::sleep(Duration::from_millis(PART_WAIT_INTERVAL_MS));
+            if Path::new(part).exists() && std::fs::OpenOptions::new().read(true).open(part).is_ok()
+            {
+                return Ok(());
+            }
         }
         if std::time::Instant::now() >= deadline {
             bail!(

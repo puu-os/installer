@@ -121,6 +121,12 @@ fn step_partition(r: &mut Runner) -> Result<()> {
     let efi = r.ctx.config.partitions.efi.clone();
     let home = r.ctx.config.partitions.home.clone();
     r.ctx.parts.layout = Some(pipeline::partition_drive(r, &drive, &efi, &home)?);
+    if crate::util::which_exists("blockdev") {
+        let _ = r.run_cmd(&["blockdev", "--rereadpt", &drive], None, None, None);
+    }
+    if crate::util::which_exists("udevadm") {
+        let _ = r.run_cmd(&["udevadm", "settle", "--timeout=30"], None, None, None);
+    }
 
     pipeline::wait_for_block_device(r, &r.ctx.parts.efi_part.clone())?;
     pipeline::wait_for_block_device(r, &r.ctx.parts.root_part.clone())?;
@@ -130,6 +136,7 @@ fn step_partition(r: &mut Runner) -> Result<()> {
 
 fn step_format_efi(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.efi_part.clone();
+    pipeline::wait_for_block_device(r, &part)?;
     r.run_cmd(&["mkfs.fat", "-F32", "-n", "EFI", &part], None, None, None)?;
     r.ctx.parts.efi_uuid = pipeline::capture_partuuid(&part)?;
     Ok(())
@@ -137,6 +144,7 @@ fn step_format_efi(r: &mut Runner) -> Result<()> {
 
 fn step_format_root(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.root_part.clone();
+    pipeline::wait_for_block_device(r, &part)?;
     r.run_cmd(
         &["mkfs.xfs", "-f", "-L", "puu-root", &part],
         None,
@@ -149,6 +157,7 @@ fn step_format_root(r: &mut Runner) -> Result<()> {
 
 fn step_format_home(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.home_part.clone();
+    pipeline::wait_for_block_device(r, &part)?;
     r.run_cmd(
         &[
             "mke2fs", "-t", "ext4", "-O", "encrypt", "-F", "-L", "puu-home", &part,
