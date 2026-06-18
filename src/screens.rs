@@ -208,6 +208,21 @@ fn progress_bar(fraction: f64, width: usize) -> Line<'static> {
     ])
 }
 
+fn format_elapsed(d: Duration) -> String {
+    let secs = d.as_secs();
+    format!("{:02}:{:02}", secs / 60, secs % 60)
+}
+
+fn spinner(frame: usize) -> &'static str {
+    if crate::util::terminal_is_utf8() {
+        const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+        FRAMES[frame % FRAMES.len()]
+    } else {
+        const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+        FRAMES[frame % FRAMES.len()]
+    }
+}
+
 impl Installer {
     pub(crate) fn title(&self) -> String {
         if self.ctx.image_version.is_empty() {
@@ -1005,8 +1020,12 @@ impl Installer {
         let mut running = true;
         let mut failed = false;
         let mut complete = false;
+        let mut frame: usize = 0;
+        let started = Instant::now();
+        let mut finished: Option<Instant> = None;
 
         loop {
+            frame = frame.wrapping_add(1);
             while let Ok(evt) = worker.events_rx.try_recv() {
                 match evt {
                     crate::app::TaskEvent::Log(line) => {
@@ -1034,11 +1053,13 @@ impl Installer {
                     crate::app::TaskEvent::Done => {
                         running = false;
                         complete = true;
+                        finished.get_or_insert_with(Instant::now);
                         state = "Install complete.".into();
                     }
                     crate::app::TaskEvent::Failed { at, error } => {
                         running = false;
                         failed = true;
+                        finished.get_or_insert_with(Instant::now);
                         if at < states.len() {
                             states[at] = InstallStepState::Failed;
                         }
@@ -1076,9 +1097,13 @@ impl Installer {
                 for (row, i) in
                     (step_start..steps.len().min(step_start + visible_steps)).enumerate()
                 {
-                    let state = states.get(i).copied().unwrap_or(InstallStepState::Pending);
-                    let marker = state.marker();
-                    let style = state.style();
+                    let st = states.get(i).copied().unwrap_or(InstallStepState::Pending);
+                    let marker = if running && matches!(st, InstallStepState::Active) {
+                        format!("{:<3}", spinner(frame))
+                    } else {
+                        st.marker().to_string()
+                    };
+                    let style = st.style();
                     f.render_widget(
                         Paragraph::new(format!("{marker} {:02} {}", i + 1, steps[i].title))
                             .style(style),
@@ -1101,8 +1126,13 @@ impl Installer {
                         .style(Style::default().add_modifier(Modifier::BOLD)),
                     Rect::new(rx, 4, rw, 1),
                 );
+                let status_line = if running {
+                    format!("{} {state}", spinner(frame))
+                } else {
+                    state.clone()
+                };
                 f.render_widget(
-                    Paragraph::new(state.as_str()).style(st_style),
+                    Paragraph::new(status_line).style(st_style),
                     Rect::new(rx, 5, rw, 1),
                 );
 
@@ -1126,8 +1156,32 @@ impl Installer {
                     Rect::new(rx, 10, rw, 1),
                 );
 
+                let elapsed = finished
+                    .unwrap_or_else(Instant::now)
+                    .duration_since(started);
                 f.render_widget(
-                    Paragraph::new("Log").style(Style::default().add_modifier(Modifier::BOLD)),
+                    Paragraph::new(format!("Elapsed {}", format_elapsed(elapsed)))
+                        .style(Style::default().fg(ACCENT)),
+                    Rect::new(rx, 11, rw, 1),
+                );
+
+                let log_header = if log_scroll > 0 {
+                    let arrow = if crate::util::terminal_is_utf8() {
+                        "↑"
+                    } else {
+                        "^"
+                    };
+                    format!("Log  {arrow}{log_scroll}  PgDn to follow")
+                } else {
+                    "Log".to_string()
+                };
+                let log_style = if log_scroll > 0 {
+                    Style::default().fg(WARN).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().add_modifier(Modifier::BOLD)
+                };
+                f.render_widget(
+                    Paragraph::new(log_header).style(log_style),
                     Rect::new(rx, 12, rw, 1),
                 );
                 let log_h = (area.height.saturating_sub(INSTALL_LOG_Y) as usize).max(1);

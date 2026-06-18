@@ -478,4 +478,3 @@ pub fn enroll_keys(keydir: &std::path::Path, owner_guid: &[u8; 16]) -> Result<()
 
     Ok(())
 }
-
