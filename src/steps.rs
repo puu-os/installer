@@ -161,10 +161,7 @@ fn step_format_home(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
-fn step_mount(r: &mut Runner) -> Result<()> {
-    let root_part = r.ctx.parts.root_part.clone();
-    pipeline::mount_target(r, &root_part, TARGET_MOUNT, "xfs", None)?;
-
+fn mount_efi(r: &mut Runner) -> Result<()> {
     let efi_part = r.ctx.parts.efi_part.clone();
     pipeline::mount_target(
         r,
@@ -172,8 +169,12 @@ fn step_mount(r: &mut Runner) -> Result<()> {
         TARGET_EFI_MOUNT,
         "vfat",
         Some("fmask=0077,dmask=0077"),
-    )?;
-    Ok(())
+    )
+}
+
+fn step_mount(r: &mut Runner) -> Result<()> {
+    let root_part = r.ctx.parts.root_part.clone();
+    pipeline::mount_target(r, &root_part, TARGET_MOUNT, "xfs", None)
 }
 
 fn step_mount_home(r: &mut Runner) -> Result<()> {
@@ -581,6 +582,7 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
 }
 
 fn step_nvram(r: &mut Runner) -> Result<()> {
+    mount_efi(r)?;
     let source = systemd_boot_source()?;
     let arch = efi_arch_suffix()?;
     let systemd_dir = Path::new(TARGET_EFI_MOUNT).join("EFI/systemd");
@@ -677,6 +679,7 @@ fn first_free_boot_id(order: &[u16], vars: &dyn efivar::VarManager) -> Result<u1
 }
 
 fn step_stage_esp_boot(r: &mut Runner) -> Result<()> {
+    mount_efi(r)?;
     let source_entries = Path::new(TARGET_MOUNT).join("boot/loader/entries");
     let source_ostree = Path::new(TARGET_MOUNT).join("boot/ostree");
     if !source_entries.is_dir() {

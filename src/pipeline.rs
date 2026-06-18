@@ -256,7 +256,6 @@ fn read_manifest(source_image: &Path) -> Option<serde_json::Value> {
     let data = std::fs::read_to_string(&manifest).ok()?;
     serde_json::from_str(&data).ok()
 }
-#[allow(clippy::manual_strip)]
 pub fn load_target_imgref(source_image: Option<&Path>, config: &crate::config::Config) -> String {
     let Some(img) = source_image else {
         return config.image.target_img_ref.clone();
@@ -265,7 +264,6 @@ pub fn load_target_imgref(source_image: Option<&Path>, config: &crate::config::C
         return config.image.target_img_ref.clone();
     };
     json.get("target_imgref")
-        .or_else(|| json.get("imgref"))
         .and_then(|v| v.as_str())
         .map_or_else(
             || config.image.target_img_ref.clone(),
@@ -540,13 +538,13 @@ const CHROOT_BIND_MOUNTS: &[(&str, &str)] = &[
 const TARGET_MOUNTS: &[&str] = &[TARGET_HOME_MOUNT, TARGET_EFI_MOUNT, TARGET_MOUNT];
 
 /// Mount points to tear down, in unmount order: chroot bind mounts (reversed)
-/// followed by the target filesystems (reversed).
+/// followed by the target filesystems from deepest to root.
 fn teardown_mount_points() -> Vec<String> {
     let mut points = Vec::new();
     for (_, rel) in CHROOT_BIND_MOUNTS.iter().rev() {
         points.push(format!("{TARGET_MOUNT}/{rel}"));
     }
-    for mp in TARGET_MOUNTS.iter().rev() {
+    for mp in TARGET_MOUNTS {
         points.push((*mp).to_string());
     }
     points

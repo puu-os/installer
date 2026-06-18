@@ -42,6 +42,16 @@ pub enum TaskEvent {
     },
 }
 
+fn clean_log_line(line: &str) -> String {
+    line.chars()
+        .filter_map(|c| match c {
+            '\t' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
 pub struct InstallTask {
     pub events_rx: mpsc::Receiver<TaskEvent>,
     cancel_tx: mpsc::Sender<()>,
@@ -62,7 +72,7 @@ impl InstallTask {
             let log: LogFn = {
                 let tx = events_tx.clone();
                 Box::new(move |line: String| {
-                    let _ = tx.send(TaskEvent::Log(line));
+                    let _ = tx.send(TaskEvent::Log(clean_log_line(&line)));
                 })
             };
 
@@ -93,7 +103,7 @@ impl InstallTask {
             let fail = |at: usize, error: String| {
                 let tx = events_tx.clone();
                 let mut log: LogFn = Box::new(move |line: String| {
-                    let _ = tx.send(TaskEvent::Log(line));
+                    let _ = tx.send(TaskEvent::Log(clean_log_line(&line)));
                 });
                 pipeline::rollback(&mut log);
                 let _ = events_tx.send(TaskEvent::Failed { at, error });
