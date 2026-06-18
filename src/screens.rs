@@ -179,17 +179,33 @@ fn validate_account(username: &str, password: &str, password2: &str) -> String {
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-fn progress_bar(fraction: f64, width: usize) -> String {
+fn progress_bar(fraction: f64, width: usize) -> Line<'static> {
     let bar_w = (width.saturating_sub(8)).clamp(10, 40);
     let fraction = fraction.clamp(0.0, 1.0);
-    let filled = (bar_w as f64 * fraction) as usize;
-    let empty = bar_w.saturating_sub(filled);
-    format!(
-        "[{}{}] {:3}%",
-        "#".repeat(filled),
-        "-".repeat(empty),
-        (fraction * 100.0) as usize
-    )
+    let percent = (fraction * 100.0) as usize;
+
+    let (filled, track) = if crate::util::terminal_is_utf8() {
+        let eighths = (bar_w as f64 * fraction * 8.0) as usize;
+        let full = eighths / 8;
+        let rem = eighths % 8;
+        let mut filled = "█".repeat(full);
+        let partial = rem > 0 && full < bar_w;
+        if partial {
+            filled.push(['▏', '▎', '▍', '▌', '▋', '▊', '▉'][rem - 1]);
+        }
+        let used = full + usize::from(partial);
+        (filled, "░".repeat(bar_w.saturating_sub(used)))
+    } else {
+        let filled = (bar_w as f64 * fraction) as usize;
+        ("#".repeat(filled), "-".repeat(bar_w.saturating_sub(filled)))
+    };
+
+    Line::from(vec![
+        Span::raw("["),
+        Span::styled(filled, Style::default().fg(ACCENT)),
+        Span::styled(track, Style::default().fg(FG).add_modifier(Modifier::DIM)),
+        Span::raw(format!("] {percent:3}%")),
+    ])
 }
 
 impl Installer {

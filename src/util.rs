@@ -15,6 +15,19 @@ pub fn human_size(size_b: u64) -> String {
     format!("{f:.1} PiB")
 }
 
+/// Whether the controlling terminal's locale advertises UTF-8.
+pub fn terminal_is_utf8() -> bool {
+    for var in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        if let Ok(value) = std::env::var(var) {
+            if !value.is_empty() {
+                let value = value.to_ascii_uppercase();
+                return value.contains("UTF-8") || value.contains("UTF8");
+            }
+        }
+    }
+    false
+}
+
 /// Check whether `path` points to an executable regular file.
 fn is_executable(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
