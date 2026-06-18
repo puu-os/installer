@@ -313,6 +313,41 @@ fn step_configure_mounts(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
+/// Read a single named entry from a tar archive, if present.
+fn read_archive_entry(src: &Path, name: &Path) -> Result<Option<Vec<u8>>> {
+    let file = std::fs::File::open(src)?;
+    let mut archive = tar::Archive::new(file);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if entry.path()?.as_ref() == name {
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut data)?;
+            return Ok(Some(data));
+        }
+    }
+    Ok(None)
+}
+
+/// Digest of the image manifest referenced by an OCI `index.json`.
+fn oci_index_manifest_digest(index: &[u8]) -> Result<String> {
+    let json: serde_json::Value = serde_json::from_slice(index)?;
+    json.get("manifests")
+        .and_then(|m| m.as_array())
+        .and_then(|m| m.first())
+        .and_then(|m| m.get("digest"))
+        .and_then(|d| d.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("OCI index.json has no manifest digest"))
+}
+
+/// Path of a blob inside an OCI archive for a `<algo>:<hex>` digest.
+fn oci_blob_path(digest: &str) -> Result<PathBuf> {
+    let (algo, hex) = digest
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("malformed OCI digest {digest}"))?;
+    Ok(Path::new("blobs").join(algo).join(hex))
+}
+
 fn step_verify_image(r: &mut Runner) -> Result<()> {
     let Some(src) = r.ctx.source_image.clone() else {
         r.log("using running bootc image as install source");
@@ -344,21 +379,24 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
                 manifest_path.display()
             )
         })?
+    } else if let Some(data) = read_archive_entry(&src, Path::new("manifest.json"))? {
+        data
     } else {
-        let file = std::fs::File::open(&src)?;
-        let mut archive = tar::Archive::new(file);
-        let mut raw = None;
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            let path = entry.path()?;
-            if path.as_ref() == Path::new("manifest.json") {
-                let mut data = Vec::new();
-                std::io::Read::read_to_end(&mut entry, &mut data)?;
-                raw = Some(data);
-                break;
-            }
-        }
-        raw.ok_or_else(|| anyhow::anyhow!("image archive {} has no manifest.json", src.display()))?
+        let index = read_archive_entry(&src, Path::new("index.json"))?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "image archive {} has neither manifest.json nor index.json",
+                src.display()
+            )
+        })?;
+        let digest = oci_index_manifest_digest(&index)?;
+        let blob = oci_blob_path(&digest)?;
+        read_archive_entry(&src, &blob)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "OCI archive {} is missing manifest blob {}",
+                src.display(),
+                blob.display()
+            )
+        })?
     };
 
     let actual = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&raw)));
