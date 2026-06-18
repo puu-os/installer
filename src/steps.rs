@@ -557,13 +557,21 @@ fn step_stage_homed_identity(r: &mut Runner) -> Result<()> {
         "imagePath": format!("/var/home/{name}.homedir"),
         "storage": "fscrypt",
         "preferredSessionLauncher": "gnome",
+        "enforcePasswordPolicy": false,
         "privileged": {
             "hashedPassword": [&hashed],
             "password": [&r.ctx.user_password],
         },
     });
 
-    let target = Path::new(TARGET_MOUNT).join("var/lib/puu/identity.json");
+    let deployment = pipeline::deployment_root()?;
+    let ostree_deploy_dir = deployment.parent().and_then(Path::parent).ok_or_else(|| {
+        anyhow::anyhow!(
+            "deployment root has unexpected path: {}",
+            deployment.display()
+        )
+    })?;
+    let target = ostree_deploy_dir.join("var/lib/puu/identity.json");
     {
         let parent = target
             .parent()
