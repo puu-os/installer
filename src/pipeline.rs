@@ -610,10 +610,47 @@ pub fn capture_uuid(device: &str) -> Result<String> {
 
 pub fn capture_partuuid(device: &str) -> Result<String> {
     let partuuid = probe_value(device, true, "PART_ENTRY_UUID")?;
-    if partuuid.is_empty() {
-        bail!("unable to determine PARTUUID for {device}");
+    if !partuuid.is_empty() {
+        return Ok(partuuid);
     }
-    Ok(partuuid)
+
+    let partuuid = probe_value(device, false, "PARTUUID")?;
+    if !partuuid.is_empty() {
+        return Ok(partuuid);
+    }
+
+    let name = Path::new(device)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid partition device '{device}'"))?;
+    let uevent = std::fs::read_to_string(format!("/sys/class/block/{name}/uevent"));
+    if let Ok(uevent) = uevent {
+        for line in uevent.lines() {
+            if let Some(partuuid) = line.strip_prefix("PARTUUID=") {
+                return Ok(partuuid.to_string());
+            }
+        }
+    }
+
+    let device_path = std::fs::canonicalize(device)
+        .map_err(|e| anyhow::anyhow!("failed to canonicalize {device}: {e}"))?;
+    for entry in std::fs::read_dir("/dev/disk/by-partuuid")
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let entry_path = entry.path();
+        let target = std::fs::canonicalize(&entry_path);
+        if target.as_ref().ok() != Some(&device_path) {
+            continue;
+        }
+
+        if let Some(partuuid) = entry_path.file_name().and_then(|name| name.to_str()) {
+            return Ok(partuuid.to_string());
+        }
+    }
+
+    bail!("unable to determine PARTUUID for {device}");
 }
 
 pub fn drive_size_bytes(drive: &str) -> Result<u64> {
