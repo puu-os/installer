@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use std::io::{self, stdout};
-use std::sync::mpsc;
+use std::io::{self, Write, stdout};
+use std::sync::{Arc, Mutex, mpsc};
 
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
 
 use crate::pipeline::{self, Context, ProgressCb, Runner, StepSelection};
 use crate::subproc::LogFn;
+
+const INSTALL_LOG_PATH: &str = "/run/puu-installer/install.log";
 
 pub enum Trap {
     Quit,
@@ -43,13 +45,38 @@ pub enum TaskEvent {
 }
 
 fn clean_log_line(line: &str) -> String {
-    line.chars()
+    let visible = line.rsplit('\r').next().unwrap_or(line);
+    visible
+        .chars()
         .filter_map(|c| match c {
             '\t' => Some(' '),
             c if c.is_control() => None,
             c => Some(c),
         })
         .collect()
+}
+
+fn open_install_log() -> Option<std::fs::File> {
+    std::fs::create_dir_all("/run/puu-installer").ok()?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(INSTALL_LOG_PATH)
+        .ok()
+}
+
+fn send_log(
+    tx: &mpsc::Sender<TaskEvent>,
+    log_file: &Arc<Mutex<Option<std::fs::File>>>,
+    line: &str,
+) {
+    let line = clean_log_line(line);
+    if let Ok(mut file) = log_file.lock() {
+        if let Some(file) = file.as_mut() {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+    let _ = tx.send(TaskEvent::Log(line));
 }
 
 pub struct InstallTask {
@@ -69,11 +96,11 @@ impl InstallTask {
         let skip = skip_indices.to_vec();
 
         let thread = std::thread::spawn(move || {
+            let log_file = Arc::new(Mutex::new(open_install_log()));
             let log: LogFn = {
                 let tx = events_tx.clone();
-                Box::new(move |line: String| {
-                    let _ = tx.send(TaskEvent::Log(clean_log_line(&line)));
-                })
+                let log_file = log_file.clone();
+                Box::new(move |line: String| send_log(&tx, &log_file, &line))
             };
 
             let progress: ProgressCb = {
@@ -102,9 +129,8 @@ impl InstallTask {
 
             let fail = |at: usize, error: String| {
                 let tx = events_tx.clone();
-                let mut log: LogFn = Box::new(move |line: String| {
-                    let _ = tx.send(TaskEvent::Log(clean_log_line(&line)));
-                });
+                let log_file = log_file.clone();
+                let mut log: LogFn = Box::new(move |line: String| send_log(&tx, &log_file, &line));
                 pipeline::rollback(&mut log);
                 let _ = events_tx.send(TaskEvent::Failed { at, error });
             };
@@ -122,6 +148,9 @@ impl InstallTask {
                     } else {
                         e.to_string()
                     };
+                    for line in short.lines() {
+                        send_log(&events_tx, &log_file, &format!("error: {line}"));
+                    }
                     fail(runner.step_index, short);
                 }
             }

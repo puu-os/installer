@@ -103,7 +103,11 @@ pub fn mount_target(
     Ok(())
 }
 
-fn bind_mount(source: &str, target: &str) -> Result<()> {
+pub fn path_is_mount(path: impl AsRef<Path>) -> bool {
+    path.as_ref().is_mount()
+}
+
+pub fn bind_mount(source: &str, target: &str) -> Result<()> {
     nix::mount::mount(
         Some(source),
         target,

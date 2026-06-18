@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use efivar::boot::{
     BootEntry, BootEntryAttributes, EFIHardDrive, EFIHardDriveType, FilePath, FilePathList,
 };
@@ -183,6 +183,7 @@ fn step_mount_home(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn step_bootc_install(r: &mut Runner) -> Result<()> {
     let source_image = r.ctx.source_image.clone();
     let source_image = if source_image.is_none() {
@@ -211,6 +212,8 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
 
     let mut mounted_bootc_tmp = false;
     let mut remove_bootc_storage = false;
+    let mut mounted_bootc_image_storage = false;
+    let mut mounted_bootc_tmp_dir = false;
 
     let result = (|| -> Result<()> {
         if !Path::new(BOOTC_STORAGE_MOUNT).exists() {
@@ -222,9 +225,22 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
             std::fs::create_dir_all(dir)?;
         }
 
+        let bootc_tmp_dir = PathBuf::from(BOOTC_STORAGE_MOUNT).join("tmp");
+        std::fs::create_dir_all(&bootc_tmp_dir)?;
+
+        if !pipeline::path_is_mount(BOOTC_IMAGE_STORAGE) {
+            pipeline::bind_mount(BOOTC_IMAGE_STORAGE, BOOTC_IMAGE_STORAGE)?;
+            mounted_bootc_image_storage = true;
+        }
+        if !pipeline::path_is_mount(&bootc_tmp_dir) {
+            let bootc_tmp_dir = bootc_tmp_dir.to_string_lossy();
+            pipeline::bind_mount(&bootc_tmp_dir, &bootc_tmp_dir)?;
+            mounted_bootc_tmp_dir = true;
+        }
+
         mounted_bootc_tmp = pipeline::mount_bootc_vartmp(r)?;
 
-        let storage_conf = PathBuf::from(BOOTC_STORAGE_MOUNT).join("storage.conf");
+        let storage_conf = PathBuf::from("/run/puu-installer/bootc-storage.conf");
         std::fs::write(
             &storage_conf,
             format!(
@@ -285,6 +301,13 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
 
     if mounted_bootc_tmp {
         let _ = pipeline::unmount(BOOTC_VAR_TMP);
+    }
+    if mounted_bootc_tmp_dir {
+        let bootc_tmp_dir = PathBuf::from(BOOTC_STORAGE_MOUNT).join("tmp");
+        let _ = pipeline::unmount(&bootc_tmp_dir.to_string_lossy());
+    }
+    if mounted_bootc_image_storage {
+        let _ = pipeline::unmount(BOOTC_IMAGE_STORAGE);
     }
     if remove_bootc_storage {
         let _ = std::fs::remove_dir_all(BOOTC_STORAGE_MOUNT);
@@ -639,21 +662,33 @@ fn step_nvram(r: &mut Runner) -> Result<()> {
 }
 
 fn systemd_boot_source() -> Result<PathBuf> {
-    let dir = Path::new(TARGET_MOUNT).join("usr/lib/systemd/boot/efi");
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+    let dirs = [
+        Path::new(TARGET_MOUNT).join("usr/lib/systemd/boot/efi"),
+        PathBuf::from("/usr/lib/systemd/boot/efi"),
+    ];
+
+    for dir in dirs {
+        if !dir.is_dir() {
             continue;
-        };
-        let has_efi_extension = Path::new(name)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("efi"));
-        if name.starts_with("systemd-boot") && has_efi_extension {
-            return Ok(path);
+        }
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let has_efi_extension = Path::new(name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("efi"));
+            if name.starts_with("systemd-boot") && has_efi_extension {
+                return Ok(path);
+            }
         }
     }
-    bail!("systemd-boot EFI binary not found in {}", dir.display())
+
+    bail!("systemd-boot EFI binary not found")
 }
 
 fn efi_arch_suffix() -> Result<&'static str> {

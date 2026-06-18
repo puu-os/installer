@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -15,6 +16,8 @@ const SECRET_OPTIONS: &[&str] = &["--password", "--passphrase", "--secret", "--t
 const REDACTED: &str = "<redacted>";
 
 pub type LogFn = Box<dyn FnMut(String) + Send>;
+
+const OUTPUT_TAIL_LINES: usize = 12;
 
 fn format_argv(argv: &[String]) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(argv.len());
@@ -39,6 +42,30 @@ fn format_argv(argv: &[String]) -> String {
         parts.push(arg.clone());
     }
     parts.join(" ")
+}
+
+fn clean_stream_line(line: &str) -> String {
+    let visible = line.rsplit('\r').next().unwrap_or(line);
+    visible
+        .chars()
+        .filter_map(|c| match c {
+            '\t' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+fn push_tail(tail: &mut VecDeque<String>, line: String) {
+    if line.trim().is_empty() {
+        return;
+    }
+    if tail.len() >= OUTPUT_TAIL_LINES {
+        tail.pop_front();
+    }
+    tail.push_back(line);
 }
 
 /// Build a Command that creates a new session and merges stderr into stdout.
@@ -95,7 +122,7 @@ fn build_streaming_command(
 }
 
 /// Run a command, streaming merged stdout+stderr line-by-line to the log
-/// callback.  Returns the exit code.
+/// callback. Returns the exit code and a tail of command output.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     argv: &[String],
@@ -106,7 +133,7 @@ pub fn run(
     heartbeat_interval: Option<Duration>,
     heartbeat_msg: Option<&str>,
     chroot_dir: Option<&str>,
-) -> Result<i32> {
+) -> Result<(i32, Vec<String>)> {
     let display = format_argv(argv);
     (log)(format!("$ {display}"));
 
@@ -140,11 +167,16 @@ pub fn run(
     let started = Instant::now();
     let heartbeat_msg = heartbeat_msg.unwrap_or(&display);
     let mut last_heartbeat = Instant::now();
+    let mut output_tail = VecDeque::new();
 
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(line) => {
-                (log)(line);
+                let line = clean_stream_line(&line);
+                if !line.is_empty() {
+                    push_tail(&mut output_tail, line.clone());
+                    (log)(line);
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -161,7 +193,10 @@ pub fn run(
 
     let _ = reader_thread.join();
     let status = child.wait()?;
-    Ok(status.code().unwrap_or(-1))
+    Ok((
+        status.code().unwrap_or(-1),
+        output_tail.into_iter().collect(),
+    ))
 }
 
 /// Run a command, raising an error if the exit code is non-zero.
@@ -187,7 +222,7 @@ pub fn check_chroot(
     heartbeat_msg: Option<&str>,
     chroot_dir: Option<&str>,
 ) -> Result<()> {
-    let rc = run(
+    let (rc, output_tail) = run(
         argv,
         log,
         None,
@@ -198,7 +233,11 @@ pub fn check_chroot(
         chroot_dir,
     )?;
     if rc != 0 {
-        bail!("command failed (exit {rc}): {}", format_argv(argv));
+        let display = format_argv(argv);
+        if let Some(last_line) = output_tail.last() {
+            bail!("command failed (exit {rc}): {last_line}\ncommand: {display}");
+        }
+        bail!("command failed (exit {rc}): {display}");
     }
     Ok(())
 }
