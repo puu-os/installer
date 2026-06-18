@@ -903,11 +903,17 @@ pub fn install_kernel_args(root_uuid: &str, config: &crate::config::Config) -> V
         "threadirqs".into(),
         "preempt=full".into(),
     ];
-    for (mach, console) in &config.serial_console {
-        if machine == *mach {
-            args.push(console.clone());
-            break;
-        }
+    let serial_console = config
+        .serial_console
+        .get(machine)
+        .cloned()
+        .or_else(|| match machine {
+            "x86_64" => Some("console=ttyS0,115200".into()),
+            "aarch64" | "arm64" => Some("console=ttyAMA0,115200".into()),
+            _ => None,
+        });
+    if let Some(console) = serial_console {
+        args.push(console);
     }
     if machine == "aarch64" || machine == "arm64" {
         for a in &config.kernel.extra_arm64_args {
