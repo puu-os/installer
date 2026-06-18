@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use efivar::boot::{
+    BootEntry, BootEntryAttributes, EFIHardDrive, EFIHardDriveType, FilePath, FilePathList,
+};
 use sha2::Digest;
 
 use crate::pipeline::{
@@ -89,15 +92,14 @@ fn step_validate_drive(r: &mut Runner) -> Result<()> {
         }
     }
 
-    let out = Runner::capture_cmd(&["lsblk", "-nrpo", "NAME,TYPE,MOUNTPOINT", &drive], None)?;
-    for line in out.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 && !parts[2].is_empty() {
-            bail!("'{drive}' is busy: {} mounted at {}", parts[0], parts[2]);
+    match crate::block::disk_busy(&drive) {
+        Some(crate::block::BusyReason::Mounted { ident, mountpoint }) => {
+            bail!("'{drive}' is busy: {ident} mounted at {mountpoint}");
         }
-        if parts.len() >= 2 && matches!(parts[1], "crypt" | "raid" | "lvm") {
-            bail!("'{drive}' has active {} mapping {}", parts[1], parts[0]);
+        Some(crate::block::BusyReason::Mapping { kind, ident }) => {
+            bail!("'{drive}' has active {kind} mapping {ident}");
         }
+        None => {}
     }
 
     let size_b = pipeline::drive_size_bytes(&drive)?;
@@ -125,42 +127,9 @@ fn step_validate_drive(r: &mut Runner) -> Result<()> {
 
 fn step_partition(r: &mut Runner) -> Result<()> {
     let drive = r.ctx.drive.clone();
-    r.run_cmd(&["sgdisk", "-Z", &drive], None, None, None)?;
-    r.run_cmd(
-        &[
-            "sgdisk",
-            &format!("-n1:0:+{}", r.ctx.config.partitions.efi),
-            "-t1:ef00",
-            "-c1:EFI",
-            &drive,
-        ],
-        None,
-        None,
-        None,
-    )?;
-    r.run_cmd(
-        &[
-            "sgdisk",
-            &format!(
-                "-n3:-{}:0",
-                r.ctx.config.partitions.home.trim_start_matches('+')
-            ),
-            "-t3:8300",
-            "-c3:home",
-            &drive,
-        ],
-        None,
-        None,
-        None,
-    )?;
-    r.run_cmd(
-        &["sgdisk", "-n2:0:0", "-t2:8300", "-c2:root", &drive],
-        None,
-        None,
-        None,
-    )?;
-    r.run_cmd(&["partprobe", &drive], None, None, None)?;
-    r.run_cmd(&["udevadm", "settle"], None, None, None)?;
+    let efi = r.ctx.config.partitions.efi.clone();
+    let home = r.ctx.config.partitions.home.clone();
+    r.ctx.parts.layout = Some(pipeline::partition_drive(r, &drive, &efi, &home)?);
 
     pipeline::wait_for_block_device(r, &r.ctx.parts.efi_part.clone())?;
     pipeline::wait_for_block_device(r, &r.ctx.parts.root_part.clone())?;
@@ -203,34 +172,22 @@ fn step_format_home(r: &mut Runner) -> Result<()> {
 
 fn step_mount(r: &mut Runner) -> Result<()> {
     let root_part = r.ctx.parts.root_part.clone();
-    pipeline::mount_if_needed(
-        r,
-        TARGET_MOUNT,
-        &["mount", "-t", "xfs", &root_part, TARGET_MOUNT],
-    )?;
+    pipeline::mount_target(r, &root_part, TARGET_MOUNT, "xfs", None)?;
 
     let efi_part = r.ctx.parts.efi_part.clone();
-    pipeline::mount_if_needed(
+    pipeline::mount_target(
         r,
+        &efi_part,
         TARGET_EFI_MOUNT,
-        &[
-            "mount",
-            "-o",
-            "fmask=0077,dmask=0077",
-            &efi_part,
-            TARGET_EFI_MOUNT,
-        ],
+        "vfat",
+        Some("fmask=0077,dmask=0077"),
     )?;
     Ok(())
 }
 
 fn step_mount_home(r: &mut Runner) -> Result<()> {
     let home_part = r.ctx.parts.home_part.clone();
-    pipeline::mount_if_needed(
-        r,
-        TARGET_HOME_MOUNT,
-        &["mount", "-t", "ext4", &home_part, TARGET_HOME_MOUNT],
-    )?;
+    pipeline::mount_target(r, &home_part, TARGET_HOME_MOUNT, "ext4", None)?;
     Ok(())
 }
 
@@ -335,7 +292,7 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
     })();
 
     if mounted_bootc_tmp {
-        let _ = r.run_cmd(&["umount", BOOTC_VAR_TMP], None, None, None);
+        let _ = pipeline::unmount(BOOTC_VAR_TMP);
     }
     if remove_bootc_storage {
         let _ = std::fs::remove_dir_all(BOOTC_STORAGE_MOUNT);
@@ -393,25 +350,42 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
     r.log(&format!("expected image digest: {expected}"));
 
     if src.is_dir() {
-        let raw = Runner::capture_cmd(
-            &[
-                "skopeo",
-                "inspect",
-                "--raw",
-                &pipeline::image_source_ref(&src),
-            ],
-            None,
-        )?;
-        let actual = format!(
-            "sha256:{}",
-            hex::encode(sha2::Sha256::digest(raw.as_bytes()))
-        );
+        // A skopeo `dir:` layout stores the raw manifest as `manifest.json`;
+        // `skopeo inspect --raw` just emits that file, so hash it directly.
+        let manifest_path = src.join("manifest.json");
+        let raw = std::fs::read(&manifest_path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to read image manifest {}: {e}",
+                manifest_path.display()
+            )
+        })?;
+        let actual = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&raw)));
         if actual != expected {
             bail!("image digest mismatch: expected {expected}, got {actual}");
         }
         r.log(&format!("image digest verified: {actual}"));
     } else {
-        r.log("archive digest verification: skipping (not yet implemented)");
+        let file = std::fs::File::open(&src)?;
+        let mut archive = tar::Archive::new(file);
+        let mut raw = None;
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?;
+            if path.as_ref() == Path::new("manifest.json") {
+                let mut data = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut data)?;
+                raw = Some(data);
+                break;
+            }
+        }
+        let raw = raw.ok_or_else(|| {
+            anyhow::anyhow!("image archive {} has no manifest.json", src.display())
+        })?;
+        let actual = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&raw)));
+        if actual != expected {
+            bail!("image digest mismatch: expected {expected}, got {actual}");
+        }
+        r.log(&format!("image digest verified: {actual}"));
     }
     Ok(())
 }
@@ -432,19 +406,29 @@ fn step_firstboot(r: &mut Runner) -> Result<()> {
     let timezone = ident.timezone.clone();
     let hostname = ident.hostname.clone();
 
-    r.run_cmd(
-        &[
-            "systemd-firstboot",
-            "--root",
-            TARGET_MOUNT,
-            &format!("--timezone={timezone}"),
-            &format!("--hostname={hostname}"),
-            &format!("--locale={locale}"),
-        ],
-        None,
-        None,
-        None,
-    )?;
+    // Equivalent of `systemd-firstboot --root`: write the config files directly,
+    // and like firstboot, never overwrite values already present in the image.
+    let etc = Path::new(TARGET_MOUNT).join("etc");
+    std::fs::create_dir_all(&etc)?;
+    let write_if_absent = |path: PathBuf, contents: String| -> Result<()> {
+        if !path.exists() {
+            std::fs::write(&path, contents)?;
+            std::fs::set_permissions(&path, PermissionsExt::from_mode(0o644))?;
+        }
+        Ok(())
+    };
+    if !hostname.is_empty() {
+        write_if_absent(etc.join("hostname"), format!("{hostname}\n"))?;
+    }
+    if !locale.is_empty() {
+        write_if_absent(etc.join("locale.conf"), format!("LANG={locale}\n"))?;
+    }
+    if !timezone.is_empty() {
+        let link = etc.join("localtime");
+        if !link.exists() {
+            std::os::unix::fs::symlink(format!("../usr/share/zoneinfo/{timezone}"), &link)?;
+        }
+    }
 
     if !keymap.is_empty() {
         let vconsole = Path::new(TARGET_MOUNT).join("etc/vconsole.conf");
@@ -468,8 +452,6 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
     }
 
     let mut argv: Vec<String> = vec![
-        "chroot".into(),
-        TARGET_MOUNT.into(),
         r.ctx.config.k3s.helper.clone(),
         "--role".into(),
         r.ctx.config.k3s.role.clone(),
@@ -496,7 +478,7 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
         argv.push(r.ctx.config.k3s.node_name.clone());
     }
     let args_ref: Vec<&str> = argv.iter().map(std::string::String::as_str).collect();
-    r.run_cmd(&args_ref, None, None, None)?;
+    r.run_cmd_chroot(&args_ref, TARGET_MOUNT, None, None)?;
     r.log(&format!(
         "k3s cluster: staged {} configuration",
         r.ctx.config.k3s.role
@@ -513,18 +495,7 @@ fn step_stage_homed_identity(r: &mut Runner) -> Result<()> {
         bail!("password must not contain newline characters");
     }
 
-    let hashed = crate::subproc::capture(
-        &[
-            "openssl".into(),
-            "passwd".into(),
-            "-6".into(),
-            "-stdin".into(),
-        ],
-        Some(r.ctx.user_password.as_bytes()),
-        None,
-    )?
-    .trim()
-    .to_string();
+    let hashed = pipeline::hash_password_sha512(&r.ctx.user_password)?;
 
     let identity = serde_json::json!({
         "userName": name,
@@ -577,13 +548,9 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
         refs.len()
     ));
     let mounted = pipeline::mount_chroot_binds(r)?;
-    let result = r.run_cmd(
-        &[
-            "chroot",
-            TARGET_MOUNT,
-            &r.ctx.config.flatpak.sync_helper.clone(),
-        ],
-        None,
+    let result = r.run_cmd_chroot(
+        &[&r.ctx.config.flatpak.sync_helper.clone()],
+        TARGET_MOUNT,
         Some(Duration::from_secs(30)),
         Some("flatpak pre-seed still running; downloading apps"),
     );
@@ -597,20 +564,99 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
 }
 
 fn step_nvram(r: &mut Runner) -> Result<()> {
-    let esp_arg = format!("--esp-path={TARGET_EFI_MOUNT}");
-    let result = r.run_cmd(
-        &["bootctl", &esp_arg, "install", "--variables=yes"],
-        None,
-        None,
-        None,
-    );
-    match result {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            r.log(&format!("bootctl install failed; retrying as update: {e}"));
-            r.run_cmd(&["bootctl", &esp_arg, "update"], None, None, None)
+    let source = systemd_boot_source()?;
+    let arch = efi_arch_suffix()?;
+    let systemd_dir = Path::new(TARGET_EFI_MOUNT).join("EFI/systemd");
+    let fallback_dir = Path::new(TARGET_EFI_MOUNT).join("EFI/BOOT");
+    std::fs::create_dir_all(&systemd_dir)?;
+    std::fs::create_dir_all(&fallback_dir)?;
+
+    let systemd_target = systemd_dir.join(format!("systemd-boot{arch}.efi"));
+    let fallback_target = fallback_dir.join(format!("BOOT{arch}.EFI"));
+    std::fs::copy(&source, &systemd_target)?;
+    std::fs::copy(&source, &fallback_target)?;
+
+    let layout = r
+        .ctx
+        .parts
+        .layout
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("EFI partition layout metadata is missing"))?;
+    let partition_sig = uuid::Builder::from_bytes_le(layout.efi.unique_guid).into_uuid();
+    let file_path_list = FilePathList {
+        hard_drive: EFIHardDrive {
+            partition_number: layout.efi.number,
+            partition_start: layout.efi.starting_lba,
+            partition_size: layout.efi.ending_lba - layout.efi.starting_lba + 1,
+            partition_sig,
+            format: 2,
+            sig_type: EFIHardDriveType::Gpt,
+        },
+        file_path: FilePath {
+            path: format!(r"\EFI\systemd\systemd-boot{arch}.efi"),
+        },
+    };
+    let entry = BootEntry {
+        attributes: BootEntryAttributes::LOAD_OPTION_ACTIVE,
+        description: "puu".into(),
+        file_path_list: Some(file_path_list),
+        optional_data: Vec::new(),
+    };
+
+    let mut vars = efivar::system();
+    let old_order = vars.get_boot_order().unwrap_or_default();
+    let boot_id = first_free_boot_id(&old_order, vars.as_ref())?;
+    vars.add_boot_entry(boot_id, entry)
+        .map_err(|e| anyhow::anyhow!("failed to write Boot{boot_id:04X}: {e}"))?;
+
+    let mut new_order = vec![boot_id];
+    new_order.extend(old_order.into_iter().filter(|id| *id != boot_id));
+    vars.set_boot_order(new_order)
+        .map_err(|e| anyhow::anyhow!("failed to update BootOrder: {e}"))?;
+    r.log(&format!(
+        "installed systemd-boot and registered Boot{boot_id:04X}"
+    ));
+    Ok(())
+}
+
+fn systemd_boot_source() -> Result<PathBuf> {
+    let dir = Path::new(TARGET_MOUNT).join("usr/lib/systemd/boot/efi");
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let has_efi_extension = Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("efi"));
+        if name.starts_with("systemd-boot") && has_efi_extension {
+            return Ok(path);
         }
     }
+    bail!("systemd-boot EFI binary not found in {}", dir.display())
+}
+
+fn efi_arch_suffix() -> Result<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Ok("x64"),
+        "aarch64" => Ok("aa64"),
+        "arm" => Ok("arm"),
+        arch => bail!("unsupported EFI architecture: {arch}"),
+    }
+}
+
+fn first_free_boot_id(order: &[u16], vars: &dyn efivar::VarManager) -> Result<u16> {
+    for id in 0..=u16::MAX {
+        if order.contains(&id) {
+            continue;
+        }
+        let name = efivar::efi::Variable::new(&format!("Boot{id:04X}"));
+        if vars.read(&name).is_err() {
+            return Ok(id);
+        }
+    }
+    bail!("no free Boot#### variable ID found")
 }
 
 fn step_stage_esp_boot(r: &mut Runner) -> Result<()> {

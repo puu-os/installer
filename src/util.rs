@@ -15,12 +15,18 @@ pub fn human_size(size_b: u64) -> String {
     format!("{f:.1} PiB")
 }
 
-/// Check whether a command exists in `$PATH`.
+/// Check whether `path` points to an executable regular file.
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Check whether a command exists in `$PATH`, by searching `$PATH` directly
+/// instead of shelling out to `sh -c 'command -v'`.
 pub fn which_exists(cmd: &str) -> bool {
-    std::process::Command::new("sh")
-        .args(["-c", &format!("command -v {cmd}")])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    if cmd.contains('/') {
+        return is_executable(std::path::Path::new(cmd));
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| is_executable(&dir.join(cmd))))
 }

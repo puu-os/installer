@@ -42,12 +42,15 @@ fn format_argv(argv: &[String]) -> String {
 }
 
 /// Build a Command that creates a new session and merges stderr into stdout.
+/// When `chroot_dir` is set, the child chroots into it before exec, replacing
+/// the external `chroot` helper.
 fn build_streaming_command(
     argv: &[String],
     env: Option<&[(String, String)]>,
     cwd: Option<&str>,
     has_stdin: bool,
-) -> Command {
+    chroot_dir: Option<&str>,
+) -> Result<Command> {
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]).stdout(Stdio::piped());
 
@@ -66,20 +69,34 @@ fn build_streaming_command(
         }
     }
 
-    // setsid + dup2(stdout→stderr) so we read one merged stream.
+    let chroot_c = chroot_dir
+        .map(std::ffi::CString::new)
+        .transpose()
+        .context("chroot path contains an interior NUL")?;
+
+    // chroot (if requested), then setsid + dup2(stdout→stderr) for one merged stream.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
+            if let Some(ref dir) = chroot_c {
+                if libc::chroot(dir.as_ptr()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::chdir(c"/".as_ptr()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
             libc::setsid();
             libc::dup2(1, 2);
             Ok(())
         });
     }
 
-    command
+    Ok(command)
 }
 
 /// Run a command, streaming merged stdout+stderr line-by-line to the log
 /// callback.  Returns the exit code.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     argv: &[String],
     log: &mut LogFn,
@@ -88,11 +105,12 @@ pub fn run(
     cwd: Option<&str>,
     heartbeat_interval: Option<Duration>,
     heartbeat_msg: Option<&str>,
+    chroot_dir: Option<&str>,
 ) -> Result<i32> {
     let display = format_argv(argv);
     (log)(format!("$ {display}"));
 
-    let mut command = build_streaming_command(argv, env, cwd, stdin_data.is_some());
+    let mut command = build_streaming_command(argv, env, cwd, stdin_data.is_some(), chroot_dir)?;
     let mut child = command
         .spawn()
         .with_context(|| format!("failed to spawn {}", argv[0]))?;
@@ -155,7 +173,30 @@ pub fn check(
     heartbeat_interval: Option<Duration>,
     heartbeat_msg: Option<&str>,
 ) -> Result<()> {
-    let rc = run(argv, log, None, env, cwd, heartbeat_interval, heartbeat_msg)?;
+    check_chroot(argv, log, env, cwd, heartbeat_interval, heartbeat_msg, None)
+}
+
+/// Like [`check`], but the child chroots into `chroot_dir` before exec.
+#[allow(clippy::too_many_arguments)]
+pub fn check_chroot(
+    argv: &[String],
+    log: &mut LogFn,
+    env: Option<&[(String, String)]>,
+    cwd: Option<&str>,
+    heartbeat_interval: Option<Duration>,
+    heartbeat_msg: Option<&str>,
+    chroot_dir: Option<&str>,
+) -> Result<()> {
+    let rc = run(
+        argv,
+        log,
+        None,
+        env,
+        cwd,
+        heartbeat_interval,
+        heartbeat_msg,
+        chroot_dir,
+    )?;
     if rc != 0 {
         bail!("command failed (exit {rc}): {}", format_argv(argv));
     }

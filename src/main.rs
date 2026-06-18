@@ -19,7 +19,6 @@ mod steps;
 mod subproc;
 mod util;
 
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -169,8 +168,9 @@ fn main() -> Result<()> {
         match app.run() {
             app::Trap::Quit => return Ok(()),
             app::Trap::Reboot => {
-                let _ = Command::new("systemctl").arg("reboot").exec();
-                bail!("exec systemctl reboot failed");
+                unsafe { libc::sync() };
+                let _ = nix::sys::reboot::reboot(nix::sys::reboot::RebootMode::RB_AUTOBOOT);
+                bail!("reboot syscall failed");
             }
             app::Trap::Shell => {
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());

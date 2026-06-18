@@ -6,34 +6,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use nix::mount::MsFlags;
 
 use crate::subproc::{self, LogFn};
 
 pub use crate::steps::STEPS;
 
-pub const DEPENDENCIES: &[&str] = &[
-    "awk",
-    "blkid",
-    "bootc",
-    "bootctl",
-    "chroot",
-    "jq",
-    "lsblk",
-    "mke2fs",
-    "mkfs.fat",
-    "mkfs.xfs",
-    "mount",
-    "openssl",
-    "ostree",
-    "partprobe",
-    "podman",
-    "sbctl",
-    "sgdisk",
-    "skopeo",
-    "systemd-firstboot",
-    "udevadm",
-    "umount",
-];
+pub const DEPENDENCIES: &[&str] = &["bootc", "mke2fs", "mkfs.fat", "mkfs.xfs"];
 
 pub const TARGET_MOUNT: &str = "/run/puu-installer/target";
 pub const TARGET_EFI_MOUNT: &str = "/run/puu-installer/target/efi";
@@ -82,6 +61,164 @@ fn part_size_bytes(size: &str) -> Result<u64> {
         .map(|(_, m)| *m)
         .ok_or_else(|| anyhow::anyhow!("unsupported partition unit: {unit}"))?;
     Ok(num * multiplier)
+}
+
+// GPT partition type GUIDs, in on-disk (mixed-endian) byte order.
+// EFI System Partition: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+const PART_TYPE_ESP: [u8; 16] = [
+    0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
+];
+// Linux filesystem: 0FC63DAF-8483-4772-8E79-3D69D8477DE4
+const PART_TYPE_LINUX: [u8; 16] = [
+    0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47, 0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4,
+];
+
+fn random_bytes<const N: usize>() -> Result<[u8; N]> {
+    use std::io::Read;
+    let mut buf = [0u8; N];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+fn random_guid() -> Result<[u8; 16]> {
+    random_bytes::<16>()
+}
+
+/// Mount `source` at `target` via `mount(2)`, creating the mountpoint and
+/// skipping if it is already mounted. Replaces shelling out to `mount(8)`.
+pub fn mount_target(
+    runner: &mut Runner,
+    source: &str,
+    target: &str,
+    fstype: &str,
+    data: Option<&str>,
+) -> Result<()> {
+    std::fs::create_dir_all(target)?;
+    if Path::new(target).is_mount() {
+        runner.log(&format!("{target} is already mounted; reusing it"));
+        return Ok(());
+    }
+    nix::mount::mount(Some(source), target, Some(fstype), MsFlags::empty(), data)
+        .map_err(|e| anyhow::anyhow!("failed to mount {source} at {target}: {e}"))?;
+    Ok(())
+}
+
+fn bind_mount(source: &str, target: &str) -> Result<()> {
+    nix::mount::mount(
+        Some(source),
+        target,
+        None::<&str>,
+        MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to bind-mount {source} at {target}: {e}"))
+}
+
+pub fn unmount(target: &str) -> Result<()> {
+    nix::mount::umount(target).map_err(|e| anyhow::anyhow!("failed to unmount {target}: {e}"))
+}
+
+/// Produce a `$6$` SHA-512 crypt hash, replacing `openssl passwd -6 -stdin`.
+pub fn hash_password_sha512(password: &str) -> Result<String> {
+    use sha_crypt::{PasswordHasher, ShaCrypt};
+    // 12 raw bytes encode to a 16-character crypt salt, matching `openssl passwd`.
+    let salt = random_bytes::<12>()?;
+    let hash = ShaCrypt::SHA512
+        .hash_password_with_salt(password.as_bytes(), &salt)
+        .map_err(|e| anyhow::anyhow!("failed to hash password: {e}"))?;
+    Ok(hash.to_string())
+}
+
+/// Create a fresh GPT on `drive` with EFI, root and home partitions, using the
+/// `gptman` crate instead of shelling out to `sgdisk`/`partprobe`.
+///
+/// Layout mirrors the previous `sgdisk` calls: EFI (`efi_size`) at the front,
+/// home (`home_size`) pinned to the end of the disk, and root filling the gap.
+pub fn partition_drive(
+    runner: &mut Runner,
+    drive: &str,
+    efi_size: &str,
+    home_size: &str,
+) -> Result<PartitionLayout> {
+    let efi_bytes = part_size_bytes(efi_size)?;
+    let home_bytes = part_size_bytes(home_size)?;
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(drive)?;
+    let sector_size = gptman::linux::get_sector_size(&mut file).unwrap_or(512);
+
+    // A fresh GPT overwrites any existing partition table (equivalent to `sgdisk -Z`).
+    let mut gpt = gptman::GPT::new_from(&mut file, sector_size, random_guid()?)?;
+
+    let efi_sectors = efi_bytes.div_ceil(sector_size);
+    let home_sectors = home_bytes.div_ceil(sector_size);
+
+    let efi_start = gpt
+        .find_first_place(efi_sectors)
+        .ok_or_else(|| anyhow::anyhow!("no room for EFI partition on {drive}"))?;
+    gpt[1] = gptman::GPTPartitionEntry {
+        partition_type_guid: PART_TYPE_ESP,
+        unique_partition_guid: random_guid()?,
+        starting_lba: efi_start,
+        ending_lba: efi_start + efi_sectors - 1,
+        attribute_bits: 0,
+        partition_name: "EFI".into(),
+    };
+
+    // Pin home to the tail of the disk; it consumes everything up to the last usable sector.
+    let home_start = gpt
+        .find_last_place(home_sectors)
+        .ok_or_else(|| anyhow::anyhow!("no room for home partition on {drive}"))?;
+    let last_usable = gpt.header.last_usable_lba;
+    gpt[3] = gptman::GPTPartitionEntry {
+        partition_type_guid: PART_TYPE_LINUX,
+        unique_partition_guid: random_guid()?,
+        starting_lba: home_start,
+        ending_lba: last_usable,
+        attribute_bits: 0,
+        partition_name: "home".into(),
+    };
+
+    // Root fills the remaining free region between EFI and home.
+    let root_size = gpt.get_maximum_partition_size()?;
+    let root_start = gpt
+        .find_optimal_place(root_size)
+        .ok_or_else(|| anyhow::anyhow!("no room for root partition on {drive}"))?;
+    gpt[2] = gptman::GPTPartitionEntry {
+        partition_type_guid: PART_TYPE_LINUX,
+        unique_partition_guid: random_guid()?,
+        starting_lba: root_start,
+        ending_lba: root_start + root_size - 1,
+        attribute_bits: 0,
+        partition_name: "root".into(),
+    };
+
+    let part_bytes = |n: u32| (gpt[n].ending_lba - gpt[n].starting_lba + 1) * sector_size;
+    runner.log(&format!(
+        "wrote GPT to {drive}: EFI {}, root {}, home {}",
+        crate::util::human_size(part_bytes(1)),
+        crate::util::human_size(part_bytes(2)),
+        crate::util::human_size(part_bytes(3)),
+    ));
+
+    gptman::GPT::write_protective_mbr_into(&mut file, sector_size)?;
+    gpt.write_into(&mut file)?;
+    file.sync_all()?;
+
+    // Make the kernel pick up the new table (equivalent to `partprobe`).
+    gptman::linux::reread_partition_table(&mut file)
+        .map_err(|e| anyhow::anyhow!("failed to reread partition table on {drive}: {e}"))?;
+
+    Ok(PartitionLayout {
+        efi: PartitionInfo {
+            number: 1,
+            unique_guid: gpt[1].unique_partition_guid,
+            starting_lba: gpt[1].starting_lba,
+            ending_lba: gpt[1].ending_lba,
+        },
+    })
 }
 
 pub fn min_target_size_bytes(config: &crate::config::Config) -> u64 {
@@ -196,32 +333,33 @@ pub fn default_source_image(config: &crate::config::Config) -> Option<PathBuf> {
         return None;
     }
 
-    let output = std::process::Command::new("blkid")
-        .args(["-L", &config.image.source_label])
-        .output()
-        .ok()?;
-    let device = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if device.is_empty() {
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            if !stderr.is_empty() {
-                eprintln!(
-                    "unable to locate live payload label {}: {stderr}",
-                    config.image.source_label
-                );
-            }
-        }
+    // Resolve the payload label to a device node via libblkid (replaces `blkid -L`).
+    let cache = blkid::cache::Cache::new().ok()?;
+    cache.probe_all().ok()?;
+    let dev = cache
+        .find_dev_with_tag(blkid::tag::Tag::new(
+            blkid::tag::SuperblockTag::Label,
+            &config.image.source_label,
+        ))
+        .ok()??;
+    let device = dev.name().to_path_buf();
+    let device = device.to_str()?;
+
+    // mount(2) needs an explicit filesystem type; probe it (replaces `mount -o ro`).
+    let fstype = probe_value(device, false, "TYPE").ok()?;
+    if fstype.is_empty() {
         return None;
     }
 
     std::fs::create_dir_all(&mount).ok()?;
-    let mount_output = std::process::Command::new("mount")
-        .args(["-o", "ro", &device, &mount.to_string_lossy()])
-        .output()
-        .ok()?;
-    if !mount_output.status.success() {
-        return None;
-    }
+    nix::mount::mount(
+        Some(device),
+        mount.as_path(),
+        Some(fstype.as_str()),
+        MsFlags::MS_RDONLY,
+        None::<&str>,
+    )
+    .ok()?;
 
     if default_img.is_file() {
         Some(default_img)
@@ -232,17 +370,7 @@ pub fn default_source_image(config: &crate::config::Config) -> Option<PathBuf> {
 }
 
 fn unmount_default_source(config: &crate::config::Config, _reason: &str) -> Result<()> {
-    let output = std::process::Command::new("umount")
-        .arg(default_source_mount(config))
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to run umount: {e}"))?;
-    if !output.status.success() {
-        bail!(
-            "unable to unmount payload: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
+    unmount(&default_source_mount(config).to_string_lossy())
 }
 
 trait PathMountExt {
@@ -264,6 +392,19 @@ impl<P: AsRef<Path>> PathMountExt for P {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PartitionInfo {
+    pub number: u32,
+    pub unique_guid: [u8; 16],
+    pub starting_lba: u64,
+    pub ending_lba: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PartitionLayout {
+    pub efi: PartitionInfo,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DerivedPartitions {
     pub efi_part: String,
@@ -272,6 +413,7 @@ pub struct DerivedPartitions {
     pub root_uuid: String,
     pub home_part: String,
     pub home_uuid: String,
+    pub layout: Option<PartitionLayout>,
 }
 
 #[derive(Clone)]
@@ -350,6 +492,27 @@ impl Runner {
             heartbeat_msg,
         )
     }
+
+    /// Like [`Runner::run_cmd`], but the command runs chrooted into `chroot_dir`,
+    /// replacing the external `chroot` helper.
+    pub fn run_cmd_chroot(
+        &mut self,
+        argv: &[&str],
+        chroot_dir: &str,
+        heartbeat_interval: Option<Duration>,
+        heartbeat_msg: Option<&str>,
+    ) -> Result<()> {
+        let cmd_args: Vec<String> = argv.iter().map(std::string::ToString::to_string).collect();
+        subproc::check_chroot(
+            &cmd_args,
+            &mut self.log,
+            None,
+            None,
+            heartbeat_interval,
+            heartbeat_msg,
+            Some(chroot_dir),
+        )
+    }
     pub fn capture_cmd(argv: &[&str], stdin_data: Option<&[u8]>) -> Result<String> {
         let cmd_args: Vec<String> = argv.iter().map(std::string::ToString::to_string).collect();
         subproc::capture(&cmd_args, stdin_data, None)
@@ -389,22 +552,22 @@ const CHROOT_BIND_MOUNTS: &[(&str, &str)] = &[
 
 const TARGET_MOUNTS: &[&str] = &[TARGET_HOME_MOUNT, TARGET_EFI_MOUNT, TARGET_MOUNT];
 
-pub fn cleanup_mounts(runner: &mut Runner) -> Result<()> {
+pub fn cleanup_mounts(_runner: &mut Runner) -> Result<()> {
     for (_, rel) in CHROOT_BIND_MOUNTS.iter().rev() {
         let dst = format!("{TARGET_MOUNT}/{rel}");
         if Path::new(&dst).is_mount() {
-            runner.run_cmd(&["umount", &dst], None, None, None)?;
+            unmount(&dst)?;
         }
     }
     for mp in TARGET_MOUNTS.iter().rev() {
         if Path::new(mp).is_mount() {
-            runner.run_cmd(&["umount", mp], None, None, None)?;
+            unmount(mp)?;
         }
     }
     Ok(())
 }
 
-pub fn mount_chroot_binds(runner: &mut Runner) -> Result<Vec<String>> {
+pub fn mount_chroot_binds(_runner: &mut Runner) -> Result<Vec<String>> {
     let mut mounted = Vec::new();
     for (src, rel) in CHROOT_BIND_MOUNTS {
         let dst = format!("{TARGET_MOUNT}/{rel}");
@@ -412,23 +575,39 @@ pub fn mount_chroot_binds(runner: &mut Runner) -> Result<Vec<String>> {
         if Path::new(&dst).is_mount() {
             continue;
         }
-        runner.run_cmd(&["mount", "--bind", src, &dst], None, None, None)?;
+        bind_mount(src, &dst)?;
         mounted.push(dst);
     }
     Ok(mounted)
 }
 
-pub fn unmount_chroot_binds(runner: &mut Runner, mounted: &[String]) -> Result<()> {
+pub fn unmount_chroot_binds(_runner: &mut Runner, mounted: &[String]) -> Result<()> {
     for dst in mounted.iter().rev() {
-        runner.run_cmd(&["umount", dst], None, None, None)?;
+        unmount(dst)?;
     }
     Ok(())
 }
 
-pub fn capture_uuid(device: &str) -> Result<String> {
-    let uuid = Runner::capture_cmd(&["blkid", "-s", "UUID", "-o", "value", device], None)?
+fn probe_value(device: &str, partitions: bool, key: &str) -> Result<String> {
+    let probe = blkid::prober::Prober::new_from_filename(device)
+        .map_err(|e| anyhow::anyhow!("failed to probe {device}: {e}"))?;
+    if partitions {
+        probe
+            .enable_partitions(true)
+            .map_err(|e| anyhow::anyhow!("failed to enable partition probing for {device}: {e}"))?;
+    }
+    probe
+        .do_safe_probe()
+        .map_err(|e| anyhow::anyhow!("failed to probe {device}: {e}"))?;
+    Ok(probe
+        .lookup_value(key)
+        .unwrap_or_default()
         .trim()
-        .to_string();
+        .to_string())
+}
+
+pub fn capture_uuid(device: &str) -> Result<String> {
+    let uuid = probe_value(device, false, "UUID")?;
     if uuid.is_empty() {
         bail!("unable to determine UUID for {device}");
     }
@@ -436,9 +615,7 @@ pub fn capture_uuid(device: &str) -> Result<String> {
 }
 
 pub fn capture_partuuid(device: &str) -> Result<String> {
-    let partuuid = Runner::capture_cmd(&["blkid", "-s", "PARTUUID", "-o", "value", device], None)?
-        .trim()
-        .to_string();
+    let partuuid = probe_value(device, true, "PART_ENTRY_UUID")?;
     if partuuid.is_empty() {
         bail!("unable to determine PARTUUID for {device}");
     }
@@ -446,10 +623,17 @@ pub fn capture_partuuid(device: &str) -> Result<String> {
 }
 
 pub fn drive_size_bytes(drive: &str) -> Result<u64> {
-    let out = Runner::capture_cmd(&["lsblk", "-dnbo", "SIZE", drive], None)?;
-    out.trim()
-        .parse::<u64>()
-        .map_err(|_| anyhow::anyhow!("unable to determine size of target drive '{drive}'"))
+    // `/sys/class/block/<name>/size` is always expressed in 512-byte sectors.
+    let name = Path::new(drive)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid drive path '{drive}'"))?;
+    let sysfs = format!("/sys/class/block/{name}/size");
+    let sectors: u64 = std::fs::read_to_string(&sysfs)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("unable to determine size of target drive '{drive}'"))?;
+    Ok(sectors * 512)
 }
 
 const SBCTL_KEY_PATHS: &[&str] = &[
@@ -624,7 +808,7 @@ pub fn wait_for_block_device(runner: &mut Runner, part: &str) -> Result<()> {
         if std::time::Instant::now() >= deadline {
             bail!(
                 "partition {part} did not appear within {PART_WAIT_TIMEOUT_S}s \
-                 after partprobe"
+                 after writing the partition table"
             );
         }
         runner.log(&format!("waiting for {part} to appear..."));
@@ -632,16 +816,7 @@ pub fn wait_for_block_device(runner: &mut Runner, part: &str) -> Result<()> {
     }
 }
 
-pub fn mount_if_needed(runner: &mut Runner, mountpoint: &str, argv: &[&str]) -> Result<()> {
-    std::fs::create_dir_all(mountpoint)?;
-    if Path::new(mountpoint).is_mount() {
-        runner.log(&format!("{mountpoint} is already mounted; reusing it"));
-        return Ok(());
-    }
-    runner.run_cmd(argv, None, None, None)
-}
-
-pub fn mount_bootc_vartmp(runner: &mut Runner) -> Result<bool> {
+pub fn mount_bootc_vartmp(_runner: &mut Runner) -> Result<bool> {
     let bootc_tmp = PathBuf::from(BOOTC_STORAGE_MOUNT).join("tmp");
     std::fs::create_dir_all(&bootc_tmp)?;
     std::fs::set_permissions(&bootc_tmp, PermissionsExt::from_mode(0o1777))?;
@@ -652,35 +827,28 @@ pub fn mount_bootc_vartmp(runner: &mut Runner) -> Result<bool> {
     if Path::new(BOOTC_VAR_TMP).is_mount() {
         return Ok(false);
     }
-    runner.run_cmd(
-        &[
-            "mount",
-            "--bind",
-            &bootc_tmp.to_string_lossy(),
-            BOOTC_VAR_TMP,
-        ],
-        None,
-        None,
-        None,
-    )?;
+    bind_mount(&bootc_tmp.to_string_lossy(), BOOTC_VAR_TMP)?;
     Ok(true)
 }
 
 pub fn deployment_root() -> Result<PathBuf> {
-    let out = Runner::capture_cmd(
-        &[
-            "ostree",
-            "admin",
-            &format!("--sysroot={TARGET_MOUNT}"),
-            "--print-current-dir",
-        ],
-        None,
-    )?;
-    let path = out.trim();
-    if path.is_empty() {
-        bail!("ostree did not report the installed deployment root");
-    }
-    Ok(PathBuf::from(path))
+    use ostree::gio;
+    use ostree::prelude::*;
+
+    let sysroot = ostree::Sysroot::new(Some(&gio::File::for_path(TARGET_MOUNT)));
+    sysroot
+        .load(gio::Cancellable::NONE)
+        .map_err(|e| anyhow::anyhow!("failed to load ostree sysroot at {TARGET_MOUNT}: {e}"))?;
+    // The first deployment in boot order is the current one (as printed by
+    // `ostree admin --print-current-dir`); a fresh install has exactly one.
+    let deployment =
+        sysroot.deployments().into_iter().next().ok_or_else(|| {
+            anyhow::anyhow!("ostree did not report the installed deployment root")
+        })?;
+    sysroot
+        .deployment_directory(&deployment)
+        .path()
+        .ok_or_else(|| anyhow::anyhow!("ostree deployment directory has no path"))
 }
 
 pub fn flatpak_manifest_refs(path: &Path) -> Vec<String> {
@@ -716,21 +884,16 @@ pub fn copy_tree_files(src: &Path, dst: &Path) -> Result<()> {
     recurse(src, dst)
 }
 
-pub fn rollback(log: &mut LogFn) {
-    fn quiet(argv: &[&str], log: &mut LogFn) {
-        let cmd_args: Vec<String> = argv.iter().map(std::string::ToString::to_string).collect();
-        let _ = subproc::run(&cmd_args, log, None, None, None, None, None);
-    }
-
+pub fn rollback(_log: &mut LogFn) {
     for (_, rel) in CHROOT_BIND_MOUNTS.iter().rev() {
         let dst = format!("{TARGET_MOUNT}/{rel}");
         if Path::new(&dst).is_mount() {
-            quiet(&["umount", &dst], log);
+            let _ = unmount(&dst);
         }
     }
     for mp in TARGET_MOUNTS.iter().rev() {
         if Path::new(mp).is_mount() {
-            quiet(&["umount", mp], log);
+            let _ = unmount(mp);
         }
     }
 }

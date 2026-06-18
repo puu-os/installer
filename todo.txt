@@ -1,0 +1,6 @@
+x 2026-06-18 (A) 2026-06-18 Replace bootctl install/update in src/steps.rs step_nvram with efivarfs writes + loader copy: copy systemd-boot$ARCH.efi to ESP/EFI/systemd and ESP/EFI/BOOT/BOOT$ARCH.EFI, write Boot#### EFI_LOAD_OPTION and prepend BootOrder +native-migration
+x 2026-06-18 (B) 2026-06-18 Thread ESP partition GUID/number/start-LBA/size from pipeline::partition_drive into Context so step_nvram can build the HD() device-path node +native-migration
+(A) 2026-06-18 Replace sbctl in src/steps.rs (step_secureboot, step_sign) and pipeline::ensure_sbctl_keys: native create-keys (RSA + self-signed X.509), enroll-keys (authenticated PK/KEK/db EFI vars), Authenticode-sign PE binaries +native-migration
+x 2026-06-18 (B) 2026-06-18 Decide bootc install (src/steps.rs step_bootc_install): keep as sanctioned external (recommended) or scope libostree-based reimplementation as a separate effort +native-migration
+x 2026-06-18 (C) 2026-06-18 Document mkfs.fat/mkfs.xfs/mke2fs and bootc as sanctioned external commands in README; reconcile DEPENDENCIES list in src/pipeline.rs (awk/jq/ostree/podman no longer invoked) +docs
+x 2026-06-18 (C) 2026-06-18 Implement archive (non-dir) image digest verification in src/steps.rs step_verify_image instead of skipping +native-migration

@@ -16,7 +16,7 @@ The k3s cluster token is the only k3s setting passed on the command line, via
 `--k3s-token-file` (the file's first line is used). All other k3s settings live
 in the configuration file.
 
-All keys are optional; the values below are the defaults.
+The defaults configuration is the following:
 
 ```yaml
 partitions:
@@ -64,6 +64,12 @@ kernel:
   extraArm64Args:
     - cma=256M
 ```
+
+## External commands
+
+- `bootc`, for installing the bootc image to the target filesystem. Replacing
+  this with `libostree/container-storage` code is a separate effort.
+- `mkfs.fat`, `mkfs.xfs` and `mke2fs`, for creating the target filesystems.
 
 ## Licensing
 
