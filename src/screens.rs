@@ -10,7 +10,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Paragraph},
+    widgets::{Block, Clear, Paragraph},
 };
 
 use crate::app::{Installer, ScreenAction, Trap};
@@ -18,6 +18,9 @@ use crate::block;
 use crate::firmware::{self, SetupModeStatus};
 use crate::pipeline;
 
+fn clip_chars(s: &str, width: u16) -> String {
+    s.chars().take(width as usize).collect()
+}
 const LANGUAGES: &[(&str, &str)] = &[
     ("English (US)", "en_US.UTF-8"),
     ("English (UK)", "en_GB.UTF-8"),
@@ -1132,7 +1135,7 @@ impl Installer {
                     state.clone()
                 };
                 f.render_widget(
-                    Paragraph::new(status_line).style(st_style),
+                    Paragraph::new(clip_chars(&status_line, rw)).style(st_style),
                     Rect::new(rx, 5, rw, 1),
                 );
 
@@ -1185,11 +1188,13 @@ impl Installer {
                     Rect::new(rx, 12, rw, 1),
                 );
                 let log_h = (area.height.saturating_sub(INSTALL_LOG_Y) as usize).max(1);
+                let log_area = Rect::new(rx, INSTALL_LOG_Y, rw, log_h as u16);
+                f.render_widget(Clear, log_area);
                 let end = logs.len().saturating_sub(log_scroll);
                 let start = end.saturating_sub(log_h);
                 for (row, line) in logs[start..end].iter().enumerate() {
                     f.render_widget(
-                        Paragraph::new(line.as_str()),
+                        Paragraph::new(clip_chars(line, rw)),
                         Rect::new(rx, INSTALL_LOG_Y + row as u16, rw, 1),
                     );
                 }

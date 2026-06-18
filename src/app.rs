@@ -45,15 +45,30 @@ pub enum TaskEvent {
 }
 
 fn clean_log_line(line: &str) -> String {
+    let mut out = String::new();
     let visible = line.rsplit('\r').next().unwrap_or(line);
-    visible
-        .chars()
-        .filter_map(|c| match c {
-            '\t' => Some(' '),
-            c if c.is_control() => None,
-            c => Some(c),
-        })
-        .collect()
+    let mut chars = visible.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        match c {
+            '\t' => out.push(' '),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+
+    out
 }
 
 fn open_install_log() -> Option<std::fs::File> {
