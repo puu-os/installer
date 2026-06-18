@@ -39,3 +39,8 @@ udev = "0.9"
 strum = { version = "0.26", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 tar = "0.4"
+x509-cert = { version = "0.2.5", features = ["builder"] }
+cms = { version = "0.2.3", features = ["builder"] }
+authenticode = { version = "0.6.0", features = ["object"] }
+object = { version = "0.39.1", default-features = false, features = ["read_core", "pe"] }
+openssl = "0.10.81"

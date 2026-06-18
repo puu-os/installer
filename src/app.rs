@@ -2,15 +2,12 @@
 // Copyright (C) Opinsys Oy 2026
 
 use std::io::{self, stdout};
-#[allow(clippy::doc_markdown)]
-/// Progress callback: (step_index, status_text, fraction)
-type ProgressCb = Box<dyn FnMut(usize, &str, f64) + Send>;
 use std::sync::mpsc;
 
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
 
-use crate::pipeline::{self, Context, Runner, StepSelection};
+use crate::pipeline::{self, Context, ProgressCb, Runner, StepSelection};
 use crate::subproc::LogFn;
 
 pub enum Trap {
@@ -93,42 +90,29 @@ impl InstallTask {
                 skip_indices: skip,
             };
 
+            let fail = |at: usize, error: String| {
+                let tx = events_tx.clone();
+                let mut log: LogFn = Box::new(move |line: String| {
+                    let _ = tx.send(TaskEvent::Log(line));
+                });
+                pipeline::rollback(&mut log);
+                let _ = events_tx.send(TaskEvent::Failed { at, error });
+            };
+
             match runner.execute(steps, &selection, || cancel_rx.try_recv().is_ok()) {
                 Ok(true) => {
                     let _ = events_tx.send(TaskEvent::Done);
                 }
                 Ok(false) => {
-                    let failed_at = runner.step_index;
-                    pipeline::rollback(&mut {
-                        let tx = events_tx.clone();
-                        let log: LogFn = Box::new(move |line: String| {
-                            let _ = tx.send(TaskEvent::Log(line));
-                        });
-                        log
-                    });
-                    let _ = events_tx.send(TaskEvent::Failed {
-                        at: failed_at,
-                        error: "installation cancelled".to_string(),
-                    });
+                    fail(runner.step_index, "installation cancelled".to_string());
                 }
                 Err(e) => {
-                    let failed_at = runner.step_index;
                     let short = if e.to_string().starts_with("missing dependencies:") {
                         "missing required tools".to_string()
                     } else {
                         e.to_string()
                     };
-                    pipeline::rollback(&mut {
-                        let tx = events_tx.clone();
-                        let log: LogFn = Box::new(move |line: String| {
-                            let _ = tx.send(TaskEvent::Log(line));
-                        });
-                        log
-                    });
-                    let _ = events_tx.send(TaskEvent::Failed {
-                        at: failed_at,
-                        error: short,
-                    });
+                    fail(runner.step_index, short);
                 }
             }
         });

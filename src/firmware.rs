@@ -17,7 +17,7 @@ fn efi_variable_path(name: &str, root: &Path) -> Option<PathBuf> {
     if exact.exists() {
         return Some(exact);
     }
-    let _pattern = format!("{name}-*");
+    let prefix = format!("{name}-");
     let mut matches: Vec<PathBuf> = std::fs::read_dir(root)
         .ok()?
         .filter_map(std::result::Result::ok)
@@ -25,7 +25,7 @@ fn efi_variable_path(name: &str, root: &Path) -> Option<PathBuf> {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with(&format!("{name}-")))
+                .is_some_and(|n| n.starts_with(&prefix))
         })
         .collect();
     matches.sort();

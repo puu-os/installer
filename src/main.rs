@@ -15,6 +15,7 @@ mod config;
 mod firmware;
 mod pipeline;
 mod screens;
+mod secureboot;
 mod steps;
 mod subproc;
 mod util;

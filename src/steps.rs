@@ -18,16 +18,7 @@ use crate::pipeline::{
 };
 
 fn step_dependencies(r: &mut Runner) -> Result<()> {
-    let deps: Vec<&str> = if r.ctx.secure_boot {
-        DEPENDENCIES.to_vec()
-    } else {
-        DEPENDENCIES
-            .iter()
-            .filter(|d| **d != "sbctl")
-            .copied()
-            .collect()
-    };
-    let missing: Vec<&str> = deps
+    let missing: Vec<&str> = DEPENDENCIES
         .iter()
         .copied()
         .filter(|d| !crate::util::which_exists(d))
@@ -39,7 +30,7 @@ fn step_dependencies(r: &mut Runner) -> Result<()> {
         }
         bail!("missing dependencies: {}", missing.join(", "));
     }
-    r.log(&format!("all {} dependencies present", deps.len()));
+    r.log(&format!("all {} dependencies present", DEPENDENCIES.len()));
     Ok(())
 }
 
@@ -323,16 +314,10 @@ fn step_configure_mounts(r: &mut Runner) -> Result<()> {
 }
 
 fn step_verify_image(r: &mut Runner) -> Result<()> {
-    if r.ctx.source_image.is_none() {
+    let Some(src) = r.ctx.source_image.clone() else {
         r.log("using running bootc image as install source");
         return Ok(());
-    }
-    let src = r
-        .ctx
-        .source_image
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("source image is None"))?
-        .clone();
+    };
     let manifest = pipeline::image_manifest_metadata(&src);
     if manifest.is_null() {
         r.log("no image manifest found, skipping digest verification");
@@ -349,21 +334,16 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
     }
     r.log(&format!("expected image digest: {expected}"));
 
-    if src.is_dir() {
+    let raw = if src.is_dir() {
         // A skopeo `dir:` layout stores the raw manifest as `manifest.json`;
         // `skopeo inspect --raw` just emits that file, so hash it directly.
         let manifest_path = src.join("manifest.json");
-        let raw = std::fs::read(&manifest_path).map_err(|e| {
+        std::fs::read(&manifest_path).map_err(|e| {
             anyhow::anyhow!(
                 "failed to read image manifest {}: {e}",
                 manifest_path.display()
             )
-        })?;
-        let actual = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&raw)));
-        if actual != expected {
-            bail!("image digest mismatch: expected {expected}, got {actual}");
-        }
-        r.log(&format!("image digest verified: {actual}"));
+        })?
     } else {
         let file = std::fs::File::open(&src)?;
         let mut archive = tar::Archive::new(file);
@@ -378,15 +358,14 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
                 break;
             }
         }
-        let raw = raw.ok_or_else(|| {
-            anyhow::anyhow!("image archive {} has no manifest.json", src.display())
-        })?;
-        let actual = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&raw)));
-        if actual != expected {
-            bail!("image digest mismatch: expected {expected}, got {actual}");
-        }
-        r.log(&format!("image digest verified: {actual}"));
+        raw.ok_or_else(|| anyhow::anyhow!("image archive {} has no manifest.json", src.display()))?
+    };
+
+    let actual = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&raw)));
+    if actual != expected {
+        bail!("image digest mismatch: expected {expected}, got {actual}");
     }
+    r.log(&format!("image digest verified: {actual}"));
     Ok(())
 }
 
@@ -701,21 +680,16 @@ fn step_stage_esp_boot(r: &mut Runner) -> Result<()> {
 
 fn step_secureboot(r: &mut Runner) -> Result<()> {
     pipeline::ensure_sbctl_keys(r)?;
-    let argv = pipeline::target_sbctl_argv(&["enroll-keys", "--yes-this-might-brick-my-machine"])?;
-    let args_ref: Vec<&str> = argv.iter().map(std::string::String::as_str).collect();
-    match r.run_cmd(&args_ref, None, None, None) {
-        Ok(()) => Ok(()),
+    let keydir = pipeline::sbctl_keydir();
+    let owner = pipeline::sbctl_owner_guid();
+    match crate::secureboot::enroll_keys(&keydir, &owner) {
+        Ok(()) => {
+            r.log("enrolled Secure Boot PK/KEK/db keys");
+            Ok(())
+        }
         Err(e) => {
-            r.log(&format!(
-                "sbctl enroll-keys failed; checking current status: {e}"
-            ));
-            let status_argv = pipeline::target_sbctl_argv(&["status"])?;
-            let status_cmd_args: Vec<&str> = status_argv
-                .iter()
-                .map(std::string::String::as_str)
-                .collect();
-            let status = Runner::capture_cmd(&status_cmd_args, None)?;
-            if status.contains("Setup Mode") && status.contains("Disabled") {
+            // If the firmware already left Setup Mode, keys are likely enrolled.
+            if crate::firmware::detect_setup_mode().setup_mode == Some(false) {
                 r.log("Secure Boot keys appear to be enrolled already");
                 Ok(())
             } else {
@@ -731,22 +705,29 @@ fn step_sign(r: &mut Runner) -> Result<()> {
     if efi_binaries.is_empty() {
         bail!("no EFI binaries found under {TARGET_EFI_MOUNT}");
     }
+    let keydir = pipeline::sbctl_keydir();
+    let db_key = std::fs::read_to_string(keydir.join("db/db.key"))?;
+    let db_cert = std::fs::read_to_string(keydir.join("db/db.pem"))?;
+
     for binary in &efi_binaries {
-        let argv = pipeline::target_sbctl_argv(&["sign", &binary.to_string_lossy()])?;
-        let args_ref: Vec<&str> = argv.iter().map(std::string::String::as_str).collect();
-        r.run_cmd(&args_ref, None, None, None)?;
+        let image = std::fs::read(binary)?;
+        if crate::secureboot::verify_pe(&image, &db_cert).unwrap_or(false) {
+            continue;
+        }
+        let signed = crate::secureboot::sign_pe(&image, &db_key, &db_cert)?;
+        std::fs::write(binary, &signed)?;
     }
     r.log(&format!(
         "signed {} EFI binaries on target ESP",
         efi_binaries.len()
     ));
-    let verify_argv = pipeline::target_sbctl_argv(&["verify"])?;
-    let verify_cmd_args: Vec<&str> = verify_argv
-        .iter()
-        .map(std::string::String::as_str)
-        .collect();
-    let env = pipeline::target_sbctl_env();
-    r.run_cmd(&verify_cmd_args, Some(&env), None, None)?;
+
+    for binary in &efi_binaries {
+        let image = std::fs::read(binary)?;
+        if !crate::secureboot::verify_pe(&image, &db_cert)? {
+            bail!("signature verification failed for {}", binary.display());
+        }
+    }
     Ok(())
 }
 

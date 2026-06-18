@@ -20,9 +20,9 @@ pub const TARGET_HOME_MOUNT: &str = "/run/puu-installer/target/var/home";
 
 #[allow(clippy::doc_markdown)]
 /// Progress callback: (step_index, status_text, fraction)
-type ProgressCb = Box<dyn FnMut(usize, &str, f64) + Send>;
+pub type ProgressCb = Box<dyn FnMut(usize, &str, f64) + Send>;
 
-const _MANIFEST_FILENAME: &str = "image.manifest";
+const MANIFEST_FILENAME: &str = "image.manifest";
 
 pub fn default_source_image_path(config: &crate::config::Config) -> PathBuf {
     PathBuf::from(&config.image.source_mount).join("image.tar")
@@ -252,7 +252,7 @@ pub fn derive_partitions(drive: &str) -> DerivedPartitions {
 }
 
 fn read_manifest(source_image: &Path) -> Option<serde_json::Value> {
-    let manifest = source_image.parent()?.join(_MANIFEST_FILENAME);
+    let manifest = source_image.parent()?.join(MANIFEST_FILENAME);
     let data = std::fs::read_to_string(&manifest).ok()?;
     serde_json::from_str(&data).ok()
 }
@@ -304,20 +304,11 @@ pub fn image_source_ref(source_image: &Path) -> String {
     }
     let metadata = image_manifest_metadata(source_image);
     let ref_name = source_image_ref_name(&metadata);
-    if !ref_name.is_empty() {
-        let oci_prefix = "oci:";
-        if ref_name.starts_with(oci_prefix) {
-            return format!(
-                "oci-archive:{}:{}",
-                source_image.display(),
-                ref_name
-                    .strip_prefix(oci_prefix)
-                    .unwrap_or(ref_name.as_str())
-            );
-        }
-        return format!("oci-archive:{}:{}", source_image.display(), ref_name);
+    if ref_name.is_empty() {
+        return format!("oci-archive:{}", source_image.display());
     }
-    format!("oci-archive:{}", source_image.display())
+    let name = ref_name.strip_prefix("oci:").unwrap_or(&ref_name);
+    format!("oci-archive:{}:{}", source_image.display(), name)
 }
 
 pub fn default_source_image(config: &crate::config::Config) -> Option<PathBuf> {
@@ -327,7 +318,7 @@ pub fn default_source_image(config: &crate::config::Config) -> Option<PathBuf> {
     }
     let mount = default_source_mount(config);
     if mount.is_mount() {
-        let _ = unmount_default_source(config, "stale");
+        let _ = unmount_default_source(config);
     }
     if running_in_container() {
         return None;
@@ -364,12 +355,12 @@ pub fn default_source_image(config: &crate::config::Config) -> Option<PathBuf> {
     if default_img.is_file() {
         Some(default_img)
     } else {
-        let _ = unmount_default_source(config, "invalid");
+        let _ = unmount_default_source(config);
         None
     }
 }
 
-fn unmount_default_source(config: &crate::config::Config, _reason: &str) -> Result<()> {
+fn unmount_default_source(config: &crate::config::Config) -> Result<()> {
     unmount(&default_source_mount(config).to_string_lossy())
 }
 
@@ -513,10 +504,6 @@ impl Runner {
             Some(chroot_dir),
         )
     }
-    pub fn capture_cmd(argv: &[&str], stdin_data: Option<&[u8]>) -> Result<String> {
-        let cmd_args: Vec<String> = argv.iter().map(std::string::ToString::to_string).collect();
-        subproc::capture(&cmd_args, stdin_data, None)
-    }
 
     pub fn execute(
         &mut self,
@@ -552,16 +539,23 @@ const CHROOT_BIND_MOUNTS: &[(&str, &str)] = &[
 
 const TARGET_MOUNTS: &[&str] = &[TARGET_HOME_MOUNT, TARGET_EFI_MOUNT, TARGET_MOUNT];
 
-pub fn cleanup_mounts(_runner: &mut Runner) -> Result<()> {
+/// Mount points to tear down, in unmount order: chroot bind mounts (reversed)
+/// followed by the target filesystems (reversed).
+fn teardown_mount_points() -> Vec<String> {
+    let mut points = Vec::new();
     for (_, rel) in CHROOT_BIND_MOUNTS.iter().rev() {
-        let dst = format!("{TARGET_MOUNT}/{rel}");
-        if Path::new(&dst).is_mount() {
-            unmount(&dst)?;
-        }
+        points.push(format!("{TARGET_MOUNT}/{rel}"));
     }
     for mp in TARGET_MOUNTS.iter().rev() {
-        if Path::new(mp).is_mount() {
-            unmount(mp)?;
+        points.push((*mp).to_string());
+    }
+    points
+}
+
+pub fn cleanup_mounts(_runner: &mut Runner) -> Result<()> {
+    for mp in teardown_mount_points() {
+        if Path::new(&mp).is_mount() {
+            unmount(&mp)?;
         }
     }
     Ok(())
@@ -647,52 +641,23 @@ fn target_sbctl_keys_exist() -> bool {
     SBCTL_KEY_PATHS.iter().all(|p| target.join(p).is_file())
 }
 
-const SBCTL_CONFIG: &str = "/run/puu-installer/sbctl-target.conf";
-
 fn target_sbctl_dir() -> PathBuf {
     let path = Path::new(TARGET_MOUNT).join("var/lib/sbctl");
     let _ = std::fs::create_dir_all(&path);
     path
 }
 
-fn write_target_sbctl_config() -> Result<PathBuf> {
-    let sbctl_dir = target_sbctl_dir();
-    let config = Path::new(SBCTL_CONFIG);
-    let parent = config
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("sbctl config path has no parent"))?;
-    std::fs::create_dir_all(parent)?;
-    let content = format!(
-        "landlock: false\nkeydir: {}\nguid: {}\nfiles_db: {}\nbundles_db: {}\n",
-        sbctl_dir.join("keys").display(),
-        sbctl_dir.join("GUID").display(),
-        sbctl_dir.join("files.json").display(),
-        sbctl_dir.join("bundles.json").display(),
-    );
-    std::fs::write(config, &content)?;
-    std::fs::set_permissions(config, PermissionsExt::from_mode(0o600))?;
-    Ok(config.to_path_buf())
+/// Directory holding the generated PK/KEK/db key pairs.
+pub fn sbctl_keydir() -> PathBuf {
+    target_sbctl_dir().join("keys")
 }
 
-pub fn target_sbctl_argv(args: &[&str]) -> Result<Vec<String>> {
-    let config = write_target_sbctl_config()?;
-    let mut cmd = vec![
-        "sbctl".to_string(),
-        "--disable-landlock".to_string(),
-        "--config".to_string(),
-        config.to_string_lossy().to_string(),
-    ];
-    for a in args {
-        cmd.push((*a).to_string());
-    }
-    Ok(cmd)
-}
-
-pub fn target_sbctl_env() -> Vec<(String, String)> {
-    vec![
-        ("SYSTEMD_ESP_PATH".into(), TARGET_EFI_MOUNT.into()),
-        ("ESP_PATH".into(), TARGET_EFI_MOUNT.into()),
-    ]
+/// Signature owner GUID (from the generated GUID file) in EFI byte order.
+pub fn sbctl_owner_guid() -> [u8; 16] {
+    let contents = std::fs::read_to_string(target_sbctl_dir().join("GUID")).unwrap_or_default();
+    uuid::Uuid::parse_str(contents.trim())
+        .unwrap_or(uuid::Uuid::nil())
+        .to_bytes_le()
 }
 
 pub fn target_efi_binaries() -> Vec<PathBuf> {
@@ -733,24 +698,89 @@ fn walkdir_like(root: &Path, glob: &str) -> Vec<PathBuf> {
     results
 }
 
+fn random_uuid() -> Result<String> {
+    let b = random_bytes::<16>()?;
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
+    ))
+}
+
+/// Generate an RSA-2048 key and a self-signed X.509 certificate for a Secure
+/// Boot key (PK/KEK/db), returning their PEM encodings. Replaces the keygen
+/// side of `sbctl create-keys`.
+pub(crate) fn generate_sb_key(common_name: &str) -> Result<(String, String)> {
+    use openssl::asn1::Asn1Time;
+    use openssl::bn::{BigNum, MsbOption};
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::PKey;
+    use openssl::rsa::Rsa;
+    use openssl::x509::{X509, X509NameBuilder};
+
+    let rsa = Rsa::generate(2048)?;
+    let pkey = PKey::from_rsa(rsa)?;
+
+    let mut name = X509NameBuilder::new()?;
+    name.append_entry_by_text("CN", common_name)?;
+    let name = name.build();
+
+    let mut builder = X509::builder()?;
+    builder.set_version(2)?; // X.509 v3
+    let mut serial = BigNum::new()?;
+    serial.rand(159, MsbOption::MAYBE_ZERO, false)?;
+    let serial = serial.to_asn1_integer()?;
+    builder.set_serial_number(&serial)?;
+    builder.set_subject_name(&name)?;
+    builder.set_issuer_name(&name)?;
+    builder.set_pubkey(&pkey)?;
+    let not_before = Asn1Time::days_from_now(0)?;
+    let not_after = Asn1Time::days_from_now(3650)?;
+    builder.set_not_before(&not_before)?;
+    builder.set_not_after(&not_after)?;
+    builder.sign(&pkey, MessageDigest::sha256())?;
+    let cert = builder.build();
+
+    let key_pem = String::from_utf8(pkey.private_key_to_pem_pkcs8()?)?;
+    let cert_pem = String::from_utf8(cert.to_pem()?)?;
+    Ok((key_pem, cert_pem))
+}
+
 pub fn ensure_sbctl_keys(runner: &mut Runner) -> Result<()> {
     if target_sbctl_keys_exist() {
         runner.log("Secure Boot signing keys already exist; reusing them");
         return Ok(());
     }
-    let sbctl_argv = target_sbctl_argv(&["create-keys", "--keytype", "file"])?;
-    let cmd_args: Vec<&str> = sbctl_argv.iter().map(std::string::String::as_str).collect();
-    match runner.run_cmd(&cmd_args, None, None, None) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            if target_sbctl_keys_exist() {
-                runner.log("Secure Boot signing keys already exist after create-keys");
-                Ok(())
-            } else {
-                Err(e)
-            }
-        }
+    let keydir = target_sbctl_dir().join("keys");
+    for kind in ["PK", "KEK", "db"] {
+        let dir = keydir.join(kind);
+        std::fs::create_dir_all(&dir)?;
+        let (key_pem, cert_pem) = generate_sb_key(kind)?;
+        let key_path = dir.join(format!("{kind}.key"));
+        std::fs::write(&key_path, key_pem)?;
+        std::fs::set_permissions(&key_path, PermissionsExt::from_mode(0o600))?;
+        std::fs::write(dir.join(format!("{kind}.pem")), cert_pem)?;
     }
+    let guid_path = target_sbctl_dir().join("GUID");
+    if !guid_path.exists() {
+        std::fs::write(&guid_path, format!("{}\n", random_uuid()?))?;
+    }
+    runner.log("generated Secure Boot PK/KEK/db keys");
+    Ok(())
 }
 
 pub fn merge_fstab(existing: &str, efi_uuid: &str, home_uuid: &str) -> String {
@@ -885,15 +915,9 @@ pub fn copy_tree_files(src: &Path, dst: &Path) -> Result<()> {
 }
 
 pub fn rollback(_log: &mut LogFn) {
-    for (_, rel) in CHROOT_BIND_MOUNTS.iter().rev() {
-        let dst = format!("{TARGET_MOUNT}/{rel}");
-        if Path::new(&dst).is_mount() {
-            let _ = unmount(&dst);
-        }
-    }
-    for mp in TARGET_MOUNTS.iter().rev() {
-        if Path::new(mp).is_mount() {
-            let _ = unmount(mp);
+    for mp in teardown_mount_points() {
+        if Path::new(&mp).is_mount() {
+            let _ = unmount(&mp);
         }
     }
 }
