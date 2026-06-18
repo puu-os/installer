@@ -189,6 +189,29 @@ impl InstallTask {
     }
 }
 
+struct ConsoleLogLevelGuard {
+    original: Option<String>,
+}
+
+impl ConsoleLogLevelGuard {
+    fn quiet() -> Self {
+        let path = "/proc/sys/kernel/printk";
+        let original = std::fs::read_to_string(path).ok();
+        if original.is_some() {
+            let _ = std::fs::write(path, "1\n");
+        }
+        Self { original }
+    }
+}
+
+impl Drop for ConsoleLogLevelGuard {
+    fn drop(&mut self) {
+        if let Some(original) = &self.original {
+            let _ = std::fs::write("/proc/sys/kernel/printk", original);
+        }
+    }
+}
+
 pub struct Installer {
     pub ctx: Context,
 }
@@ -204,6 +227,7 @@ impl Installer {
 
     pub fn run(&mut self) -> Trap {
         Self::tui_enable();
+        let _console_log_level = ConsoleLogLevelGuard::quiet();
         let backend = CrosstermBackend::new(stdout());
         let mut terminal = Terminal::new(backend).unwrap_or_else(|e| {
             let _ = terminal::disable_raw_mode();

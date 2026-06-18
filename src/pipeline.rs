@@ -543,20 +543,72 @@ const TARGET_MOUNTS: &[&str] = &[TARGET_HOME_MOUNT, TARGET_EFI_MOUNT, TARGET_MOU
 
 /// Mount points to tear down, in unmount order: chroot bind mounts (reversed)
 /// followed by the target filesystems from deepest to root.
-fn teardown_mount_points() -> Vec<String> {
+fn decode_mountinfo_path(path: &str) -> String {
+    let mut out = String::new();
+    let mut chars = path.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            let octal: String = chars.by_ref().take(3).collect();
+            if octal.len() == 3 {
+                if let Ok(value) = u8::from_str_radix(&octal, 8) {
+                    out.push(value as char);
+                    continue;
+                }
+            }
+            out.push('\\');
+            out.push_str(&octal);
+        } else {
+            out.push(c);
+        }
+    }
+
+    out
+}
+
+fn mounted_target_points() -> Vec<String> {
     let mut points = Vec::new();
+    let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return points;
+    };
+
+    for line in mountinfo.lines() {
+        let Some(mount_point) = line.split_whitespace().nth(4) else {
+            continue;
+        };
+        let mount_point = decode_mountinfo_path(mount_point);
+        if mount_point == TARGET_MOUNT
+            || mount_point.starts_with(&format!("{TARGET_MOUNT}/"))
+            || mount_point == BOOTC_VAR_TMP
+        {
+            points.push(mount_point);
+        }
+    }
+
+    points
+}
+
+fn teardown_mount_points() -> Vec<String> {
+    let mut points = mounted_target_points();
+    if Path::new(BOOTC_VAR_TMP).is_mount() {
+        points.push(BOOTC_VAR_TMP.to_string());
+    }
     for (_, rel) in CHROOT_BIND_MOUNTS.iter().rev() {
         points.push(format!("{TARGET_MOUNT}/{rel}"));
     }
     for mp in TARGET_MOUNTS {
         points.push((*mp).to_string());
     }
+
+    points.sort_by_key(|point| std::cmp::Reverse(point.len()));
+    points.dedup();
     points
 }
 
-pub fn cleanup_mounts(_runner: &mut Runner) -> Result<()> {
+pub fn cleanup_mounts(runner: &mut Runner) -> Result<()> {
     for mp in teardown_mount_points() {
         if Path::new(&mp).is_mount() {
+            runner.log(&format!("unmounting {mp}"));
             unmount(&mp)?;
         }
     }
@@ -953,9 +1005,10 @@ pub fn copy_tree_files(src: &Path, dst: &Path) -> Result<()> {
     recurse(src, dst)
 }
 
-pub fn rollback(_log: &mut LogFn) {
+pub fn rollback(log: &mut LogFn) {
     for mp in teardown_mount_points() {
         if Path::new(&mp).is_mount() {
+            log(format!("rollback: unmounting {mp}"));
             let _ = unmount(&mp);
         }
     }

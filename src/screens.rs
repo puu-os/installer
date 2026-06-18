@@ -10,7 +10,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Clear, Paragraph},
+    widgets::{Block, Paragraph},
 };
 
 use crate::app::{Installer, ScreenAction, Trap};
@@ -1095,7 +1095,7 @@ impl Installer {
                     Paragraph::new("Steps").style(Style::default().add_modifier(Modifier::BOLD)),
                     Rect::new(2, 4, 40, 1),
                 );
-                let visible_steps = (area.height.saturating_sub(INSTALL_LOG_Y) as usize).max(1);
+                let visible_steps = area.height.saturating_sub(6).max(1) as usize;
                 let step_start = current_step.saturating_sub(visible_steps / 2);
                 for (row, i) in
                     (step_start..steps.len().min(step_start + visible_steps)).enumerate()
@@ -1187,9 +1187,12 @@ impl Installer {
                     Paragraph::new(log_header).style(log_style),
                     Rect::new(rx, 12, rw, 1),
                 );
-                let log_h = (area.height.saturating_sub(INSTALL_LOG_Y) as usize).max(1);
+                let log_h = area.height.saturating_sub(INSTALL_LOG_Y + 1).max(1) as usize;
                 let log_area = Rect::new(rx, INSTALL_LOG_Y, rw, log_h as u16);
-                f.render_widget(Clear, log_area);
+                f.render_widget(
+                    Block::default().style(Style::default().fg(FG).bg(BG)),
+                    log_area,
+                );
                 let end = logs.len().saturating_sub(log_scroll);
                 let start = end.saturating_sub(log_h);
                 for (row, line) in logs[start..end].iter().enumerate() {
