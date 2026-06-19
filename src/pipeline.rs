@@ -60,7 +60,8 @@ fn part_size_bytes(size: &str) -> Result<u64> {
         .find(|(u, _)| *u == unit)
         .map(|(_, m)| *m)
         .ok_or_else(|| anyhow::anyhow!("unsupported partition unit: {unit}"))?;
-    Ok(num * multiplier)
+    num.checked_mul(multiplier)
+        .ok_or_else(|| anyhow::anyhow!("partition size is too large: {size}"))
 }
 
 // GPT partition type GUIDs, in on-disk (mixed-endian) byte order.
@@ -225,12 +226,49 @@ pub fn partition_drive(
     })
 }
 
-pub fn min_target_size_bytes(config: &crate::config::Config) -> u64 {
+fn partition_info(number: u32, entry: &gptman::GPTPartitionEntry) -> PartitionInfo {
+    PartitionInfo {
+        number,
+        unique_guid: entry.unique_partition_guid,
+        starting_lba: entry.starting_lba,
+        ending_lba: entry.ending_lba,
+    }
+}
+
+/// Read the EFI partition layout metadata from an existing GPT on `drive`.
+pub fn load_partition_layout(drive: &str) -> Result<PartitionLayout> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .open(drive)
+        .map_err(|e| anyhow::anyhow!("failed to open {drive}: {e}"))?;
+    let gpt = gptman::GPT::find_from(&mut file)
+        .map_err(|e| anyhow::anyhow!("failed to read GPT from {drive}: {e}"))?;
+
+    for number in 1..=gpt.header.number_of_partition_entries {
+        let entry = &gpt[number];
+        if entry.is_used() && entry.partition_type_guid == PART_TYPE_ESP {
+            return Ok(PartitionLayout {
+                efi: partition_info(number, entry),
+            });
+        }
+    }
+
+    Err(anyhow::anyhow!("no EFI partition found on {drive}"))
+}
+
+/// Return the minimum target disk size required by the configured partition sizes.
+pub fn min_target_size_bytes(config: &crate::config::Config) -> Result<u64> {
     let efi = format!("+{}", config.partitions.efi);
     let root = format!("+{}", config.partitions.root_min);
     let home = format!("+{}", config.partitions.home);
     let sizes = [efi.as_str(), root.as_str(), home.as_str(), "+1G"];
-    sizes.iter().map(|s| part_size_bytes(s).unwrap_or(0)).sum()
+
+    sizes.iter().try_fold(0u64, |total, size| {
+        let bytes = part_size_bytes(size)?;
+        total
+            .checked_add(bytes)
+            .ok_or_else(|| anyhow::anyhow!("minimum target size is too large"))
+    })
 }
 
 pub fn running_in_container() -> bool {
@@ -260,52 +298,30 @@ fn read_manifest(source_image: &Path) -> Option<serde_json::Value> {
     let data = std::fs::read_to_string(&manifest).ok()?;
     serde_json::from_str(&data).ok()
 }
+
+fn manifest_field(source_image: Option<&Path>, key: &str) -> Option<String> {
+    let json = read_manifest(source_image?)?;
+    json.get(key).and_then(|v| v.as_str()).map(str::to_string)
+}
+
 pub fn load_target_imgref(source_image: Option<&Path>, config: &crate::config::Config) -> String {
-    let Some(img) = source_image else {
-        return config.image.target_img_ref.clone();
-    };
-    let Some(json) = read_manifest(img) else {
-        return config.image.target_img_ref.clone();
-    };
-    json.get("target_imgref")
-        .and_then(|v| v.as_str())
-        .map_or_else(
-            || config.image.target_img_ref.clone(),
-            std::string::ToString::to_string,
-        )
+    manifest_field(source_image, "target_imgref")
+        .unwrap_or_else(|| config.image.target_img_ref.clone())
 }
 
 pub fn load_image_version(source_image: Option<&Path>) -> String {
-    let Some(img) = source_image else {
-        return String::new();
-    };
-    let Some(json) = read_manifest(img) else {
-        return String::new();
-    };
-    json.get("version")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
+    manifest_field(source_image, "version").unwrap_or_default()
 }
 
 pub fn image_manifest_metadata(source_image: &Path) -> serde_json::Value {
     read_manifest(source_image).unwrap_or(serde_json::Value::Null)
 }
 
-fn source_image_ref_name(metadata: &serde_json::Value) -> String {
-    metadata
-        .get("imgref")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
 pub fn image_source_ref(source_image: &Path) -> String {
     if source_image.is_dir() {
         return format!("dir:{}", source_image.display());
     }
-    let metadata = image_manifest_metadata(source_image);
-    let ref_name = source_image_ref_name(&metadata);
+    let ref_name = manifest_field(Some(source_image), "imgref").unwrap_or_default();
     if ref_name.is_empty() {
         return format!("oci-archive:{}", source_image.display());
     }
@@ -790,26 +806,9 @@ fn walkdir_like(root: &Path, glob: &str) -> Vec<PathBuf> {
 }
 
 fn random_uuid() -> Result<String> {
-    let b = random_bytes::<16>()?;
-    Ok(format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0],
-        b[1],
-        b[2],
-        b[3],
-        b[4],
-        b[5],
-        b[6],
-        b[7],
-        b[8],
-        b[9],
-        b[10],
-        b[11],
-        b[12],
-        b[13],
-        b[14],
-        b[15]
-    ))
+    Ok(uuid::Builder::from_random_bytes(random_bytes::<16>()?)
+        .into_uuid()
+        .to_string())
 }
 
 /// Generate an RSA-2048 key and a self-signed X.509 certificate for a Secure

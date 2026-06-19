@@ -44,33 +44,6 @@ pub enum TaskEvent {
     },
 }
 
-fn clean_log_line(line: &str) -> String {
-    let mut out = String::new();
-    let visible = line.rsplit('\r').next().unwrap_or(line);
-    let mut chars = visible.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for c in chars.by_ref() {
-                    if ('@'..='~').contains(&c) {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        match c {
-            '\t' => out.push(' '),
-            c if c.is_control() => {}
-            c => out.push(c),
-        }
-    }
-
-    out
-}
-
 fn open_install_log() -> Option<std::fs::File> {
     std::fs::create_dir_all("/run/puu-installer").ok()?;
     std::fs::OpenOptions::new()
@@ -85,13 +58,12 @@ fn send_log(
     log_file: &Arc<Mutex<Option<std::fs::File>>>,
     line: &str,
 ) {
-    let line = clean_log_line(line);
     if let Ok(mut file) = log_file.lock() {
         if let Some(file) = file.as_mut() {
             let _ = writeln!(file, "{line}");
         }
     }
-    let _ = tx.send(TaskEvent::Log(line));
+    let _ = tx.send(TaskEvent::Log(line.to_string()));
 }
 
 pub struct InstallTask {
@@ -216,6 +188,17 @@ pub struct Installer {
     pub ctx: Context,
 }
 
+#[derive(Clone, Copy)]
+enum InstallFlowStep {
+    Target,
+    WipeConfirm,
+    Identity,
+    Timezone,
+    SecureBoot,
+    Review,
+    Install,
+}
+
 impl Installer {
     pub fn new(ctx: Context) -> Self {
         Self { ctx }
@@ -280,42 +263,57 @@ impl Installer {
     }
 
     fn install_flow(&mut self, term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Option<Trap> {
-        match self.target_screen(term) {
-            ScreenAction::Continue => {}
-            _ => return None,
-        }
+        let mut step = InstallFlowStep::Target;
 
-        if !self.confirm(
-            term,
-            "Wipe target disk?",
-            &format!(
-                "{}\nAll data on this disk will be destroyed.",
-                self.ctx.drive_label
-            ),
-            true,
-        ) {
-            return None;
-        }
-
-        match self.language_screen(term) {
-            ScreenAction::Continue => {}
-            _ => return None,
-        }
-
-        match self.account_screen(term) {
-            ScreenAction::Continue => {}
-            _ => return None,
-        }
-
-        match self.secureboot_screen(term) {
-            ScreenAction::Install => {}
-            ScreenAction::Reboot => return Some(Trap::Reboot),
-            _ => return None,
-        }
-
-        match self.install_screen(term) {
-            ScreenAction::Reboot => Some(self.reboot_screen(term)),
-            _ => None,
+        loop {
+            step = match step {
+                InstallFlowStep::Target => match self.target_screen(term) {
+                    ScreenAction::Continue => InstallFlowStep::WipeConfirm,
+                    _ => return None,
+                },
+                InstallFlowStep::WipeConfirm => {
+                    if self.confirm(
+                        term,
+                        "Wipe target disk?",
+                        &format!(
+                            "{}\nAll data on this disk will be destroyed.",
+                            self.ctx.drive_label
+                        ),
+                        true,
+                    ) {
+                        InstallFlowStep::Identity
+                    } else {
+                        InstallFlowStep::Target
+                    }
+                }
+                InstallFlowStep::Identity => match self.identity_screen(term) {
+                    ScreenAction::Continue => InstallFlowStep::Timezone,
+                    ScreenAction::Back => InstallFlowStep::WipeConfirm,
+                    _ => return None,
+                },
+                InstallFlowStep::Timezone => match self.timezone_screen(term) {
+                    ScreenAction::Continue => InstallFlowStep::SecureBoot,
+                    ScreenAction::Back => InstallFlowStep::Identity,
+                    _ => return None,
+                },
+                InstallFlowStep::SecureBoot => match self.secureboot_screen(term) {
+                    ScreenAction::Install => InstallFlowStep::Review,
+                    ScreenAction::Back => InstallFlowStep::Timezone,
+                    ScreenAction::Reboot => return Some(Trap::Reboot),
+                    _ => return None,
+                },
+                InstallFlowStep::Review => match self.review_screen(term) {
+                    ScreenAction::Install => InstallFlowStep::Install,
+                    ScreenAction::Back => InstallFlowStep::SecureBoot,
+                    _ => return None,
+                },
+                InstallFlowStep::Install => {
+                    return match self.install_screen(term) {
+                        ScreenAction::Reboot => Some(self.reboot_screen(term)),
+                        _ => None,
+                    };
+                }
+            };
         }
     }
 }

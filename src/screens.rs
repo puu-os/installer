@@ -49,6 +49,17 @@ const KEYMAPS: &[(&str, &str)] = &[
 
 const SHELLS: &[(&str, &str)] = &[("bash", "/bin/bash"), ("zsh", "/bin/zsh")];
 
+const TIMEZONES: &[&str] = &[
+    "UTC",
+    "Europe/Helsinki",
+    "Europe/Stockholm",
+    "Europe/Oslo",
+    "Europe/Copenhagen",
+    "Europe/Berlin",
+    "Europe/Paris",
+    "Europe/London",
+];
+
 const REBOOT_DELAY: u64 = 30;
 const MIN_SCREEN_COLS: u16 = 80;
 const MIN_SCREEN_ROWS: u16 = 23;
@@ -114,6 +125,26 @@ impl InstallStepState {
     }
 }
 
+fn highlight_style(selected: bool) -> Style {
+    if selected {
+        Style::default()
+            .fg(ON_ACCENT)
+            .bg(ACCENT)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    }
+}
+
+fn button_row(f: &mut Frame, choices: &[&str], selected: usize, y: u16, width: u16) {
+    for (i, choice) in choices.iter().enumerate() {
+        f.render_widget(
+            Paragraph::new(format!("[ {choice} ]")).style(highlight_style(i == selected)),
+            Rect::new(4 + i as u16 * width, y, width, 1),
+        );
+    }
+}
+
 fn keymap_for_locale(locale: &str) -> &str {
     KEYMAPS
         .iter()
@@ -160,6 +191,14 @@ fn valid_username(name: &str) -> bool {
         }
     }
     true
+}
+
+fn validate_identity(hostname: &str, username: &str, password: &str, password2: &str) -> String {
+    if !crate::util::valid_hostname(hostname.trim()) {
+        return "Hostname must contain letters, digits or hyphens, without edge hyphens.".into();
+    }
+
+    validate_account(username, password, password2)
 }
 
 fn validate_account(username: &str, password: &str, password2: &str) -> String {
@@ -332,14 +371,7 @@ impl Installer {
                 let menu_start_y = 4.max((area.height as i16 - choices.len() as i16) / 2) as u16;
                 for (i, choice) in choices.iter().enumerate() {
                     let marker = if i == selected { ">" } else { " " };
-                    let style = if i == selected {
-                        Style::default()
-                            .fg(ON_ACCENT)
-                            .bg(ACCENT)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
+                    let style = highlight_style(i == selected);
                     f.render_widget(
                         Paragraph::new(format!("{marker} {choice}")).style(style),
                         Rect::new(2, menu_start_y + i as u16, 20, 1),
@@ -407,20 +439,7 @@ impl Installer {
                 }
 
                 let y = 8 + lines.len() as u16;
-                for (i, choice) in ["No", "Yes"].iter().enumerate() {
-                    let sel_style = if i == selected {
-                        Style::default()
-                            .fg(ON_ACCENT)
-                            .bg(ACCENT)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-                    f.render_widget(
-                        Paragraph::new(format!("[ {choice} ]")).style(sel_style),
-                        Rect::new(4 + i as u16 * 10, y, 10, 1),
-                    );
-                }
+                button_row(f, &["No", "Yes"], selected, y, 10);
             })
             .ok();
 
@@ -517,14 +536,7 @@ impl Installer {
                     let idx = top + row;
                     let status_text = if dev.busy { "BUSY" } else { "available" };
                     let marker = if idx == selected { ">" } else { " " };
-                    let style = if idx == selected {
-                        Style::default()
-                            .fg(ON_ACCENT)
-                            .bg(ACCENT)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
+                    let style = highlight_style(idx == selected);
                     let model: String = dev.model.chars().take(20).collect();
                     let line = format!(
                         "{marker} {:<19} {:<10} {:<8} {model:<20} {status_text}",
@@ -586,102 +598,24 @@ impl Installer {
         }
     }
 
-    pub(crate) fn language_screen(
+    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
+    pub(crate) fn identity_screen(
         &mut self,
         term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> ScreenAction {
         let current_locale = if self.ctx.locale.is_empty() {
-            "en_US.UTF-8"
+            self.ctx.config.identity.locale.as_str()
         } else {
             &self.ctx.locale
         };
-        let mut selected = LANGUAGES
+        let mut language_idx = LANGUAGES
             .iter()
             .position(|(_, l)| *l == current_locale)
             .unwrap_or(0);
-        let mut top: usize = 0;
-
-        loop {
-            let size = term.size().unwrap_or(Size {
-                width: 80,
-                height: 24,
-            });
-            let visible = (size.height.saturating_sub(8)).max(1) as usize;
-            top = top.min(selected);
-            if selected >= top + visible {
-                top = selected - visible + 1;
-            }
-
-            let (_, sel_locale) = LANGUAGES[selected];
-            self.ctx.locale = sel_locale.to_string();
-            self.ctx.keymap = keymap_for_locale(sel_locale).to_string();
-
-            term.draw(|f| {
-                Self::draw_frame(
-                    f,
-                    "Language",
-                    "Select the language used by the installed system.",
-                    "Up/Down select, Enter continue, Esc back",
-                );
-                let area = f.area();
-
-                let end = (top + visible).min(LANGUAGES.len());
-                for (row, (label, locale)) in LANGUAGES[top..end].iter().enumerate() {
-                    let idx = top + row;
-                    let style = if idx == selected {
-                        Style::default()
-                            .fg(ON_ACCENT)
-                            .bg(ACCENT)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-                    f.render_widget(
-                        Paragraph::new(format!("{label:<18} {locale}")).style(style),
-                        Rect::new(4, 4 + row as u16, area.width.saturating_sub(8), 1),
-                    );
-                }
-
-                let sel_text = format!(
-                    "Selected: {} ({}), keymap {}",
-                    LANGUAGES[selected].0, LANGUAGES[selected].1, self.ctx.keymap
-                );
-                f.render_widget(
-                    Paragraph::new(sel_text),
-                    Rect::new(
-                        2,
-                        area.height.saturating_sub(4),
-                        area.width.saturating_sub(4),
-                        1,
-                    ),
-                );
-            })
-            .ok();
-
-            if let Ok(Event::Key(key)) = event::read() {
-                match key.code {
-                    KeyCode::Up => selected = selected.saturating_sub(1),
-                    KeyCode::Down | KeyCode::Tab => selected = (selected + 1) % LANGUAGES.len(),
-                    KeyCode::Esc => return ScreenAction::Back,
-                    KeyCode::Enter => return ScreenAction::Continue,
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    #[allow(
-        clippy::too_many_lines,
-        clippy::cast_possible_truncation,
-        unused_assignments
-    )]
-    pub(crate) fn account_screen(
-        &mut self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ) -> ScreenAction {
+        let mut hostname = self.ctx.config.identity.hostname.clone();
         let mut username = self.ctx.username.clone();
-        let mut password = String::new();
-        let mut password2 = String::new();
+        let mut password = self.ctx.user_password.clone();
+        let mut password2 = self.ctx.user_password.clone();
         let mut shell_idx: usize = SHELLS
             .iter()
             .position(|(_, v)| *v == self.ctx.user_shell)
@@ -689,10 +623,21 @@ impl Installer {
         let mut field_idx: usize = 0;
         let mut reveal = false;
         let mut status = String::new();
-        let labels = ["Username", "Password", "Repeat password", "Login shell"];
+        let labels = [
+            "Language",
+            "Hostname",
+            "Username",
+            "Password",
+            "Repeat password",
+            "Login shell",
+        ];
 
         loop {
+            let (_, locale) = LANGUAGES[language_idx];
+            let keymap = keymap_for_locale(locale);
             let fields = [
+                format!("{} ({locale}, keymap {keymap})", LANGUAGES[language_idx].0),
+                hostname.clone(),
                 username.clone(),
                 password.clone(),
                 password2.clone(),
@@ -702,29 +647,22 @@ impl Installer {
             term.draw(|f| {
                 Self::draw_frame(
                     f,
-                    "Create User Account",
-                    "This account will own the new system.",
-                    "Tab next, Enter submit, Esc back, Ctrl-U clear, Ctrl-R reveal",
+                    "System Identity",
+                    "Choose language, hostname and the first user account.",
+                    "Tab next, Left/Right change choices, Enter submit, Esc back",
                 );
                 let area = f.area();
 
                 for (i, label) in labels.iter().enumerate() {
-                    let y = 5 + i as u16 * 2;
+                    let y = 4 + i as u16 * 2;
                     let selected = i == field_idx;
-                    let style = if selected {
-                        Style::default()
-                            .fg(ON_ACCENT)
-                            .bg(ACCENT)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
+                    let style = highlight_style(selected);
 
                     let count = fields[i].chars().count();
-                    let value = if (i == 1 || i == 2) && !reveal {
-                        "*".repeat(count.min(32))
-                    } else if count > 32 {
-                        fields[i].chars().skip(count - 32).collect()
+                    let value = if (i == 3 || i == 4) && !reveal {
+                        "*".repeat(count.min(40))
+                    } else if count > 40 {
+                        fields[i].chars().skip(count - 40).collect()
                     } else {
                         fields[i].clone()
                     };
@@ -734,8 +672,8 @@ impl Installer {
                         Rect::new(4, y, 16, 1),
                     );
                     f.render_widget(
-                        Paragraph::new(format!("[ {value:<32} ]")).style(style),
-                        Rect::new(22, y, 36, 1),
+                        Paragraph::new(format!("[ {value:<40} ]")).style(style),
+                        Rect::new(22, y, 44, 1),
                     );
                 }
 
@@ -743,14 +681,14 @@ impl Installer {
                     f.render_widget(
                         Paragraph::new("Password reveal is on")
                             .style(Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
-                        Rect::new(4, 13, area.width, 1),
+                        Rect::new(4, 17, area.width, 1),
                     );
                 }
 
                 if !status.is_empty() {
                     f.render_widget(
                         Paragraph::new(status.as_str()).style(Style::default().fg(ERR)),
-                        Rect::new(4, 15, area.width, 1),
+                        Rect::new(4, 19, area.width, 1),
                     );
                 }
             })
@@ -765,7 +703,13 @@ impl Installer {
                     KeyCode::Up => {
                         field_idx = field_idx.checked_sub(1).unwrap_or(labels.len() - 1);
                     }
-                    KeyCode::Left | KeyCode::Right if field_idx == 3 => {
+                    KeyCode::Left if field_idx == 0 => {
+                        language_idx = language_idx.checked_sub(1).unwrap_or(LANGUAGES.len() - 1);
+                    }
+                    KeyCode::Right if field_idx == 0 => {
+                        language_idx = (language_idx + 1) % LANGUAGES.len();
+                    }
+                    KeyCode::Left | KeyCode::Right if field_idx == 5 => {
                         shell_idx = 1 - shell_idx;
                     }
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -773,45 +717,118 @@ impl Installer {
                     }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         match field_idx {
-                            0 => username.clear(),
-                            1 => password.clear(),
-                            2 => password2.clear(),
+                            1 => hostname.clear(),
+                            2 => username.clear(),
+                            3 => password.clear(),
+                            4 => password2.clear(),
                             _ => {}
                         }
                     }
                     KeyCode::Backspace => match field_idx {
-                        0 => {
-                            username.pop();
-                        }
                         1 => {
-                            password.pop();
+                            hostname.pop();
                         }
                         2 => {
+                            username.pop();
+                        }
+                        3 => {
+                            password.pop();
+                        }
+                        4 => {
                             password2.pop();
                         }
                         _ => {}
                     },
                     KeyCode::Enter => {
-                        let result = validate_account(&username, &password, &password2);
+                        let result = validate_identity(&hostname, &username, &password, &password2);
                         if result.is_empty() {
+                            let (_, locale) = LANGUAGES[language_idx];
+                            self.ctx.locale = locale.to_string();
+                            self.ctx.keymap = keymap_for_locale(locale).to_string();
+                            self.ctx.config.identity.hostname = hostname.trim().to_string();
                             self.ctx.username = username.trim().to_string();
                             self.ctx.user_password.clone_from(&password);
                             self.ctx.user_shell = SHELLS[shell_idx].1.to_string();
                             return ScreenAction::Continue;
                         }
-                        if field_idx < 3 {
+                        if field_idx < labels.len() - 1 {
                             field_idx += 1;
                         } else {
                             status = result;
                         }
                     }
-                    KeyCode::Char(c) if field_idx < 3 && c.is_ascii() && c >= ' ' => {
-                        match field_idx {
-                            0 if username.len() < 32 => username.push(c),
-                            1 => password.push(c),
-                            2 => password2.push(c),
-                            _ => {}
-                        }
+                    KeyCode::Char(c) if c.is_ascii() && c >= ' ' => match field_idx {
+                        1 if hostname.len() < 253 => hostname.push(c),
+                        2 if username.len() < 32 => username.push(c),
+                        3 => password.push(c),
+                        4 => password2.push(c),
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    pub(crate) fn timezone_screen(
+        &mut self,
+        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) -> ScreenAction {
+        let current = self.ctx.config.identity.timezone.clone();
+        let mut zones: Vec<String> = TIMEZONES.iter().map(|zone| (*zone).to_string()).collect();
+        if !zones.iter().any(|zone| zone == &current) {
+            zones.insert(0, current);
+        }
+        let mut selected = zones
+            .iter()
+            .position(|zone| zone == &self.ctx.config.identity.timezone)
+            .unwrap_or(0);
+        let mut top: usize = 0;
+
+        loop {
+            let size = term.size().unwrap_or(Size {
+                width: 80,
+                height: 24,
+            });
+            let visible = (size.height.saturating_sub(8)).max(1) as usize;
+            top = top.min(selected);
+            if selected >= top + visible {
+                top = selected - visible + 1;
+            }
+
+            term.draw(|f| {
+                Self::draw_frame(
+                    f,
+                    "Timezone",
+                    "Select the timezone used by the installed system.",
+                    "Up/Down select, Enter continue, Esc back",
+                );
+                let area = f.area();
+
+                let end = (top + visible).min(zones.len());
+                for (row, zone) in zones[top..end].iter().enumerate() {
+                    let idx = top + row;
+                    let style = highlight_style(idx == selected);
+                    f.render_widget(
+                        Paragraph::new(zone.as_str()).style(style),
+                        Rect::new(4, 4 + row as u16, area.width.saturating_sub(8), 1),
+                    );
+                }
+            })
+            .ok();
+
+            if let Ok(Event::Key(key)) = event::read() {
+                match key.code {
+                    KeyCode::Up => selected = selected.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Tab => selected = (selected + 1) % zones.len(),
+                    KeyCode::Esc => return ScreenAction::Back,
+                    KeyCode::Enter => {
+                        self.ctx
+                            .config
+                            .identity
+                            .timezone
+                            .clone_from(&zones[selected]);
+                        return ScreenAction::Continue;
                     }
                     _ => {}
                 }
@@ -863,20 +880,7 @@ impl Installer {
                         .style(Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
                     Rect::new(4, 7, area.width.saturating_sub(8), 1),
                 );
-                for (i, choice) in ["Back", "Enroll keys"].iter().enumerate() {
-                    let style = if i == selected {
-                        Style::default()
-                            .fg(ON_ACCENT)
-                            .bg(ACCENT)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-                    f.render_widget(
-                        Paragraph::new(format!("[ {choice} ]")).style(style),
-                        Rect::new(4 + i as u16 * 16, 10, 16, 1),
-                    );
-                }
+                button_row(f, &["Back", "Enroll keys"], selected, 10, 16);
             })
             .ok();
 
@@ -943,20 +947,7 @@ impl Installer {
                 }
                 let y = 8 + lines.len() as u16;
                 let choices: Vec<&str> = FALLBACK_CHOICES.iter().map(|(_, label)| *label).collect();
-                for (i, choice) in choices.iter().enumerate() {
-                    let style = if i == selected {
-                        Style::default()
-                            .fg(ON_ACCENT)
-                            .bg(ACCENT)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-                    f.render_widget(
-                        Paragraph::new(format!("[ {choice} ]")).style(style),
-                        Rect::new(4 + i as u16 * 14, y, 14, 1),
-                    );
-                }
+                button_row(f, &choices, selected, y, 14);
             })
             .ok();
 
@@ -974,6 +965,82 @@ impl Installer {
                         }
                         return *action;
                     }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    pub(crate) fn review_screen(
+        &mut self,
+        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) -> ScreenAction {
+        let mut selected = 1usize;
+
+        loop {
+            let secure_boot = if self.ctx.secure_boot {
+                "Enroll keys"
+            } else {
+                "Disabled"
+            };
+            let image = if self.ctx.image_version.is_empty() {
+                self.ctx.target_imgref.clone()
+            } else {
+                format!("{} ({})", self.ctx.target_imgref, self.ctx.image_version)
+            };
+            let k3s = if self.ctx.config.k3s.server_url.is_empty() {
+                self.ctx.config.k3s.role.clone()
+            } else {
+                format!(
+                    "{} ({})",
+                    self.ctx.config.k3s.role, self.ctx.config.k3s.server_url
+                )
+            };
+            let rows = [
+                ("Target disk", self.ctx.drive_label.as_str()),
+                ("Image", image.as_str()),
+                ("Hostname", self.ctx.config.identity.hostname.as_str()),
+                ("Timezone", self.ctx.config.identity.timezone.as_str()),
+                ("Language", self.ctx.locale.as_str()),
+                ("Keymap", self.ctx.keymap.as_str()),
+                ("User", self.ctx.username.as_str()),
+                ("Shell", self.ctx.user_shell.as_str()),
+                ("k3s", k3s.as_str()),
+                ("Secure Boot", secure_boot),
+            ];
+
+            term.draw(|f| {
+                Self::draw_frame(
+                    f,
+                    "Does this look right?",
+                    "Review the installation choices before the disk is modified.",
+                    "Left/Right select, Enter activates, Esc back",
+                );
+                let area = f.area();
+
+                for (i, (label, value)) in rows.iter().enumerate() {
+                    let y = 4 + i as u16;
+                    f.render_widget(
+                        Paragraph::new(format!("{label:<13} {value}")),
+                        Rect::new(4, y, area.width.saturating_sub(8), 1),
+                    );
+                }
+
+                f.render_widget(
+                    Paragraph::new("Installation will erase the selected target disk.")
+                        .style(Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
+                    Rect::new(4, 16, area.width.saturating_sub(8), 1),
+                );
+
+                button_row(f, &["Back", "Start install"], selected, 19, 18);
+            })
+            .ok();
+
+            if let Ok(Event::Key(key)) = event::read() {
+                match key.code {
+                    KeyCode::Left | KeyCode::Right | KeyCode::Tab => selected = 1 - selected,
+                    KeyCode::Enter if selected == 1 => return ScreenAction::Install,
+                    KeyCode::Esc | KeyCode::Enter => return ScreenAction::Back,
                     _ => {}
                 }
             }
@@ -1290,20 +1357,7 @@ impl Installer {
                     Paragraph::new(countdown_line),
                     Rect::new(4, 9, area.width.saturating_sub(8), 1),
                 );
-                for (i, choice) in ["Shell", "Reboot"].iter().enumerate() {
-                    let style = if i == selected {
-                        Style::default()
-                            .fg(ON_ACCENT)
-                            .bg(ACCENT)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-                    f.render_widget(
-                        Paragraph::new(format!("[ {choice} ]")).style(style),
-                        Rect::new(4 + i as u16 * 14, 12, 14, 1),
-                    );
-                }
+                button_row(f, &["Shell", "Reboot"], selected, 12, 14);
             })
             .ok();
 

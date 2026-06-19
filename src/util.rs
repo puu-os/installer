@@ -15,6 +15,37 @@ pub fn human_size(size_b: u64) -> String {
     format!("{f:.1} PiB")
 }
 
+/// Sanitize a line of subprocess output for display: collapse carriage-return
+/// overwrites, strip ANSI CSI escape sequences and other control characters,
+/// turn tabs into spaces, and drop trailing whitespace.
+pub fn clean_log_line(line: &str) -> String {
+    let visible = line.rsplit('\r').next().unwrap_or(line);
+    let mut out = String::new();
+    let mut chars = visible.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        match c {
+            '\t' => out.push(' '),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+
+    out.truncate(out.trim_end().len());
+    out
+}
+
 /// Whether the controlling terminal's locale advertises UTF-8.
 pub fn terminal_is_utf8() -> bool {
     for var in ["LC_ALL", "LC_CTYPE", "LANG"] {
@@ -26,6 +57,21 @@ pub fn terminal_is_utf8() -> bool {
         }
     }
     false
+}
+
+/// Validate a hostname accepted by the installer.
+pub fn valid_hostname(name: &str) -> bool {
+    if name.is_empty() || name.len() > 253 {
+        return false;
+    }
+
+    name.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    })
 }
 
 /// Check whether `path` points to an executable regular file.

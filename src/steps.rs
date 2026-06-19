@@ -94,7 +94,7 @@ fn step_validate_drive(r: &mut Runner) -> Result<()> {
     }
 
     let size_b = pipeline::drive_size_bytes(&drive)?;
-    let min = pipeline::min_target_size_bytes(&r.ctx.config);
+    let min = pipeline::min_target_size_bytes(&r.ctx.config)?;
     if size_b < min {
         bail!(
             "'{drive}' is too small: {} detected, need at least {} for EFI, \
@@ -440,6 +440,25 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
+fn validate_timezone(timezone: &str) -> Result<()> {
+    let relative = Path::new(timezone);
+    if !relative
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        bail!("invalid timezone: {timezone}");
+    }
+
+    let path = Path::new(TARGET_MOUNT)
+        .join("usr/share/zoneinfo")
+        .join(relative);
+    if !path.is_file() {
+        bail!("timezone not found in target system: {timezone}");
+    }
+
+    Ok(())
+}
+
 fn step_firstboot(r: &mut Runner) -> Result<()> {
     let ident = &r.ctx.config.identity;
     let keymap = if r.ctx.keymap.is_empty() {
@@ -455,6 +474,13 @@ fn step_firstboot(r: &mut Runner) -> Result<()> {
 
     let timezone = ident.timezone.clone();
     let hostname = ident.hostname.clone();
+
+    if !hostname.is_empty() && !crate::util::valid_hostname(&hostname) {
+        bail!("invalid hostname: {hostname}");
+    }
+    if !timezone.is_empty() {
+        validate_timezone(&timezone)?;
+    }
 
     // Equivalent of `systemd-firstboot --root`: write the config files directly,
     // and like firstboot, never overwrite values already present in the image.
@@ -636,6 +662,9 @@ fn step_nvram(r: &mut Runner) -> Result<()> {
     std::fs::copy(&source, &systemd_target)?;
     std::fs::copy(&source, &fallback_target)?;
 
+    if r.ctx.parts.layout.is_none() {
+        r.ctx.parts.layout = Some(pipeline::load_partition_layout(&r.ctx.drive)?);
+    }
     let layout = r
         .ctx
         .parts
@@ -803,17 +832,22 @@ fn step_sign(r: &mut Runner) -> Result<()> {
     let db_key = std::fs::read_to_string(keydir.join("db/db.key"))?;
     let db_cert = std::fs::read_to_string(keydir.join("db/db.pem"))?;
 
+    let mut signed_count = 0usize;
+    let mut skipped_count = 0usize;
     for binary in &efi_binaries {
         let image = std::fs::read(binary)?;
-        if crate::secureboot::verify_pe(&image, &db_cert).unwrap_or(false) {
+        if crate::secureboot::verify_pe(&image, &db_cert)
+            .with_context(|| format!("failed to verify signature for {}", binary.display()))?
+        {
+            skipped_count += 1;
             continue;
         }
         let signed = crate::secureboot::sign_pe(&image, &db_key, &db_cert)?;
         std::fs::write(binary, &signed)?;
+        signed_count += 1;
     }
     r.log(&format!(
-        "signed {} EFI binaries on target ESP",
-        efi_binaries.len()
+        "signed {signed_count} EFI binaries on target ESP ({skipped_count} already signed)"
     ));
 
     for binary in &efi_binaries {

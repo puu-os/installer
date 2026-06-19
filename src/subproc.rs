@@ -44,20 +44,6 @@ fn format_argv(argv: &[String]) -> String {
     parts.join(" ")
 }
 
-fn clean_stream_line(line: &str) -> String {
-    let visible = line.rsplit('\r').next().unwrap_or(line);
-    visible
-        .chars()
-        .filter_map(|c| match c {
-            '\t' => Some(' '),
-            c if c.is_control() => None,
-            c => Some(c),
-        })
-        .collect::<String>()
-        .trim_end()
-        .to_string()
-}
-
 fn push_tail(tail: &mut VecDeque<String>, line: String) {
     if line.trim().is_empty() {
         return;
@@ -172,7 +158,7 @@ pub fn run(
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(line) => {
-                let line = clean_stream_line(&line);
+                let line = crate::util::clean_log_line(&line);
                 if !line.is_empty() {
                     push_tail(&mut output_tail, line.clone());
                     (log)(line);
