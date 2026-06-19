@@ -440,7 +440,7 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
-fn validate_timezone(timezone: &str) -> Result<()> {
+fn validate_timezone(deploy: &Path, timezone: &str) -> Result<()> {
     let relative = Path::new(timezone);
     if !relative
         .components()
@@ -449,9 +449,7 @@ fn validate_timezone(timezone: &str) -> Result<()> {
         bail!("invalid timezone: {timezone}");
     }
 
-    let path = Path::new(TARGET_MOUNT)
-        .join("usr/share/zoneinfo")
-        .join(relative);
+    let path = deploy.join("usr/share/zoneinfo").join(relative);
     if !path.is_file() {
         bail!("timezone not found in target system: {timezone}");
     }
@@ -478,13 +476,15 @@ fn step_firstboot(r: &mut Runner) -> Result<()> {
     if !hostname.is_empty() && !crate::util::valid_hostname(&hostname) {
         bail!("invalid hostname: {hostname}");
     }
+
+    let deploy = pipeline::deployment_root()?;
     if !timezone.is_empty() {
-        validate_timezone(&timezone)?;
+        validate_timezone(&deploy, &timezone)?;
     }
 
     // Equivalent of `systemd-firstboot --root`: write the config files directly,
     // and like firstboot, never overwrite values already present in the image.
-    let etc = Path::new(TARGET_MOUNT).join("etc");
+    let etc = deploy.join("etc");
     std::fs::create_dir_all(&etc)?;
     let write_if_absent = |path: PathBuf, contents: String| -> Result<()> {
         if !path.exists() {
@@ -507,13 +507,7 @@ fn step_firstboot(r: &mut Runner) -> Result<()> {
     }
 
     if !keymap.is_empty() {
-        let vconsole = Path::new(TARGET_MOUNT).join("etc/vconsole.conf");
-        {
-            let parent = vconsole
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("vconsole path has no parent"))?;
-            std::fs::create_dir_all(parent)?;
-        }
+        let vconsole = etc.join("vconsole.conf");
         std::fs::write(&vconsole, format!("KEYMAP={keymap}\n"))?;
         std::fs::set_permissions(&vconsole, PermissionsExt::from_mode(0o644))?;
         r.log(&format!("staged keymap {keymap} in /etc/vconsole.conf"));
