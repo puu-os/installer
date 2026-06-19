@@ -1095,10 +1095,6 @@ impl Installer {
                 }
             }
 
-            let _size = term.size().unwrap_or(Size {
-                width: 80,
-                height: 24,
-            });
             term.draw(|f| {
                 Self::draw_frame(
                     f,

@@ -276,20 +276,16 @@ pub fn running_in_container() -> bool {
 }
 
 pub fn derive_partitions(drive: &str) -> DerivedPartitions {
-    if drive.ends_with(|c: char| c.is_ascii_digit()) {
-        DerivedPartitions {
-            efi_part: format!("{drive}p1"),
-            root_part: format!("{drive}p2"),
-            home_part: format!("{drive}p3"),
-            ..Default::default()
-        }
+    let sep = if drive.ends_with(|c: char| c.is_ascii_digit()) {
+        "p"
     } else {
-        DerivedPartitions {
-            efi_part: format!("{drive}1"),
-            root_part: format!("{drive}2"),
-            home_part: format!("{drive}3"),
-            ..Default::default()
-        }
+        ""
+    };
+    DerivedPartitions {
+        efi_part: format!("{drive}{sep}1"),
+        root_part: format!("{drive}{sep}2"),
+        home_part: format!("{drive}{sep}3"),
+        ..Default::default()
     }
 }
 
@@ -557,8 +553,8 @@ const CHROOT_BIND_MOUNTS: &[(&str, &str)] = &[
 
 const TARGET_MOUNTS: &[&str] = &[TARGET_HOME_MOUNT, TARGET_EFI_MOUNT, TARGET_MOUNT];
 
-/// Mount points to tear down, in unmount order: chroot bind mounts (reversed)
-/// followed by the target filesystems from deepest to root.
+/// Decode the octal escape sequences (`\NNN`) that `/proc/self/mountinfo`
+/// uses for spaces and other special characters in mount paths.
 fn decode_mountinfo_path(path: &str) -> String {
     let mut out = String::new();
     let mut chars = path.chars().peekable();
@@ -604,6 +600,8 @@ fn mounted_target_points() -> Vec<String> {
     points
 }
 
+/// Mount points to tear down, in unmount order: chroot bind mounts (reversed)
+/// followed by the target filesystems from deepest to root.
 fn teardown_mount_points() -> Vec<String> {
     let mut points = mounted_target_points();
     if Path::new(BOOTC_VAR_TMP).is_mount() {
