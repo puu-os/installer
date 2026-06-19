@@ -205,7 +205,7 @@ fn validate_account(username: &str, password: &str, password2: &str) -> String {
     let username = username.trim();
 
     if !valid_username(username) {
-        return "Username must match [a-z_][a-z0-9_-] and be at most 32 chars.".into();
+        return "Username is alphanumeric and at most 32 chars.".into();
     }
     if password.is_empty() {
         return "Password must not be empty.".into();
