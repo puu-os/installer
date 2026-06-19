@@ -612,6 +612,15 @@ impl Installer {
             .iter()
             .position(|(_, l)| *l == current_locale)
             .unwrap_or(0);
+        let current_timezone = self.ctx.config.identity.timezone.clone();
+        let mut zones: Vec<String> = TIMEZONES.iter().map(|zone| (*zone).to_string()).collect();
+        if !zones.iter().any(|zone| zone == &current_timezone) {
+            zones.insert(0, current_timezone);
+        }
+        let mut timezone_idx = zones
+            .iter()
+            .position(|zone| zone == &self.ctx.config.identity.timezone)
+            .unwrap_or(0);
         let mut hostname = self.ctx.config.identity.hostname.clone();
         let mut username = self.ctx.username.clone();
         let mut password = self.ctx.user_password.clone();
@@ -625,6 +634,7 @@ impl Installer {
         let mut status = String::new();
         let labels = [
             "Language",
+            "Timezone",
             "Hostname",
             "Username",
             "Password",
@@ -637,6 +647,7 @@ impl Installer {
             let keymap = keymap_for_locale(locale);
             let fields = [
                 format!("{} ({locale}, keymap {keymap})", LANGUAGES[language_idx].0),
+                zones[timezone_idx].clone(),
                 hostname.clone(),
                 username.clone(),
                 password.clone(),
@@ -659,7 +670,7 @@ impl Installer {
                     let style = highlight_style(selected);
 
                     let count = fields[i].chars().count();
-                    let value = if (i == 3 || i == 4) && !reveal {
+                    let value = if (i == 4 || i == 5) && !reveal {
                         "*".repeat(count.min(40))
                     } else if count > 40 {
                         fields[i].chars().skip(count - 40).collect()
@@ -709,7 +720,13 @@ impl Installer {
                     KeyCode::Right if field_idx == 0 => {
                         language_idx = (language_idx + 1) % LANGUAGES.len();
                     }
-                    KeyCode::Left | KeyCode::Right if field_idx == 5 => {
+                    KeyCode::Left if field_idx == 1 => {
+                        timezone_idx = timezone_idx.checked_sub(1).unwrap_or(zones.len() - 1);
+                    }
+                    KeyCode::Right if field_idx == 1 => {
+                        timezone_idx = (timezone_idx + 1) % zones.len();
+                    }
+                    KeyCode::Left | KeyCode::Right if field_idx == 6 => {
                         shell_idx = 1 - shell_idx;
                     }
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -717,24 +734,24 @@ impl Installer {
                     }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         match field_idx {
-                            1 => hostname.clear(),
-                            2 => username.clear(),
-                            3 => password.clear(),
-                            4 => password2.clear(),
+                            2 => hostname.clear(),
+                            3 => username.clear(),
+                            4 => password.clear(),
+                            5 => password2.clear(),
                             _ => {}
                         }
                     }
                     KeyCode::Backspace => match field_idx {
-                        1 => {
+                        2 => {
                             hostname.pop();
                         }
-                        2 => {
+                        3 => {
                             username.pop();
                         }
-                        3 => {
+                        4 => {
                             password.pop();
                         }
-                        4 => {
+                        5 => {
                             password2.pop();
                         }
                         _ => {}
@@ -745,6 +762,11 @@ impl Installer {
                             let (_, locale) = LANGUAGES[language_idx];
                             self.ctx.locale = locale.to_string();
                             self.ctx.keymap = keymap_for_locale(locale).to_string();
+                            self.ctx
+                                .config
+                                .identity
+                                .timezone
+                                .clone_from(&zones[timezone_idx]);
                             self.ctx.config.identity.hostname = hostname.trim().to_string();
                             self.ctx.username = username.trim().to_string();
                             self.ctx.user_password.clone_from(&password);
@@ -758,78 +780,12 @@ impl Installer {
                         }
                     }
                     KeyCode::Char(c) if c.is_ascii() && c >= ' ' => match field_idx {
-                        1 if hostname.len() < 253 => hostname.push(c),
-                        2 if username.len() < 32 => username.push(c),
-                        3 => password.push(c),
-                        4 => password2.push(c),
+                        2 if hostname.len() < 253 => hostname.push(c),
+                        3 if username.len() < 32 => username.push(c),
+                        4 => password.push(c),
+                        5 => password2.push(c),
                         _ => {}
                     },
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    pub(crate) fn timezone_screen(
-        &mut self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ) -> ScreenAction {
-        let current = self.ctx.config.identity.timezone.clone();
-        let mut zones: Vec<String> = TIMEZONES.iter().map(|zone| (*zone).to_string()).collect();
-        if !zones.iter().any(|zone| zone == &current) {
-            zones.insert(0, current);
-        }
-        let mut selected = zones
-            .iter()
-            .position(|zone| zone == &self.ctx.config.identity.timezone)
-            .unwrap_or(0);
-        let mut top: usize = 0;
-
-        loop {
-            let size = term.size().unwrap_or(Size {
-                width: 80,
-                height: 24,
-            });
-            let visible = (size.height.saturating_sub(8)).max(1) as usize;
-            top = top.min(selected);
-            if selected >= top + visible {
-                top = selected - visible + 1;
-            }
-
-            term.draw(|f| {
-                Self::draw_frame(
-                    f,
-                    "Timezone",
-                    "Select the timezone used by the installed system.",
-                    "Up/Down select, Enter continue, Esc back",
-                );
-                let area = f.area();
-
-                let end = (top + visible).min(zones.len());
-                for (row, zone) in zones[top..end].iter().enumerate() {
-                    let idx = top + row;
-                    let style = highlight_style(idx == selected);
-                    f.render_widget(
-                        Paragraph::new(zone.as_str()).style(style),
-                        Rect::new(4, 4 + row as u16, area.width.saturating_sub(8), 1),
-                    );
-                }
-            })
-            .ok();
-
-            if let Ok(Event::Key(key)) = event::read() {
-                match key.code {
-                    KeyCode::Up => selected = selected.saturating_sub(1),
-                    KeyCode::Down | KeyCode::Tab => selected = (selected + 1) % zones.len(),
-                    KeyCode::Esc => return ScreenAction::Back,
-                    KeyCode::Enter => {
-                        self.ctx
-                            .config
-                            .identity
-                            .timezone
-                            .clone_from(&zones[selected]);
-                        return ScreenAction::Continue;
-                    }
                     _ => {}
                 }
             }

@@ -193,7 +193,6 @@ enum InstallFlowStep {
     Target,
     WipeConfirm,
     Identity,
-    Timezone,
     SecureBoot,
     Review,
     Install,
@@ -287,18 +286,13 @@ impl Installer {
                     }
                 }
                 InstallFlowStep::Identity => match self.identity_screen(term) {
-                    ScreenAction::Continue => InstallFlowStep::Timezone,
-                    ScreenAction::Back => InstallFlowStep::WipeConfirm,
-                    _ => return None,
-                },
-                InstallFlowStep::Timezone => match self.timezone_screen(term) {
                     ScreenAction::Continue => InstallFlowStep::SecureBoot,
-                    ScreenAction::Back => InstallFlowStep::Identity,
+                    ScreenAction::Back => InstallFlowStep::WipeConfirm,
                     _ => return None,
                 },
                 InstallFlowStep::SecureBoot => match self.secureboot_screen(term) {
                     ScreenAction::Install => InstallFlowStep::Review,
-                    ScreenAction::Back => InstallFlowStep::Timezone,
+                    ScreenAction::Back => InstallFlowStep::Identity,
                     ScreenAction::Reboot => return Some(Trap::Reboot),
                     _ => return None,
                 },
