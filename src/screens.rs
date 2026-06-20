@@ -138,9 +138,11 @@ fn highlight_style(selected: bool) -> Style {
 
 fn button_row(f: &mut Frame, choices: &[&str], selected: usize, y: u16, width: u16) {
     for (i, choice) in choices.iter().enumerate() {
+        let label = format!("[ {choice} ]");
+        let label_width = label.chars().count() as u16;
         f.render_widget(
-            Paragraph::new(format!("[ {choice} ]")).style(highlight_style(i == selected)),
-            Rect::new(4 + i as u16 * width, y, width, 1),
+            Paragraph::new(label).style(highlight_style(i == selected)),
+            Rect::new(4 + i as u16 * width, y, label_width, 1),
         );
     }
 }
@@ -393,7 +395,7 @@ impl Installer {
             if let Ok(Event::Key(key)) = event::read() {
                 match key.code {
                     KeyCode::Up => {
-                        selected = selected.saturating_sub(1);
+                        selected = selected.checked_sub(1).unwrap_or(choices.len() - 1);
                     }
                     KeyCode::Down | KeyCode::Tab => {
                         selected = (selected + 1) % choices.len();
@@ -510,7 +512,7 @@ impl Installer {
                 width: 80,
                 height: 24,
             });
-            let visible = (size.height.saturating_sub(8)).max(1) as usize;
+            let visible = (size.height.saturating_sub(9)).max(1) as usize;
             top = top.min(selected);
             if selected >= top + visible {
                 top = selected - visible + 1;
@@ -582,7 +584,7 @@ impl Installer {
             if let Ok(Event::Key(key)) = event::read() {
                 match key.code {
                     KeyCode::Up if !devices.is_empty() => {
-                        selected = selected.saturating_sub(1);
+                        selected = selected.checked_sub(1).unwrap_or(devices.len() - 1);
                     }
                     KeyCode::Down | KeyCode::Tab if !devices.is_empty() => {
                         selected = (selected + 1) % devices.len();
@@ -700,6 +702,11 @@ impl Installer {
                         Paragraph::new(format!("[ {value:<40} ]")).style(style),
                         Rect::new(22, y, 44, 1),
                     );
+                }
+
+                if matches!(field_idx, 2..=5) {
+                    let caret = fields[field_idx].chars().count().min(40) as u16;
+                    f.set_cursor_position((24 + caret, 4 + field_idx as u16 * 2));
                 }
 
                 if reveal {
@@ -924,9 +931,13 @@ impl Installer {
             if let Ok(Event::Key(key)) = event::read() {
                 match key.code {
                     KeyCode::Esc => return ScreenAction::Back,
-                    KeyCode::Left => selected = selected.saturating_sub(1),
+                    KeyCode::Left => {
+                        selected = selected
+                            .checked_sub(1)
+                            .unwrap_or(FALLBACK_CHOICES.len() - 1);
+                    }
                     KeyCode::Right | KeyCode::Tab => {
-                        selected = (selected + 1) % 3;
+                        selected = (selected + 1) % FALLBACK_CHOICES.len();
                     }
                     KeyCode::Enter => {
                         let (action, _) = &FALLBACK_CHOICES[selected];
@@ -1060,19 +1071,21 @@ impl Installer {
         let mut running = true;
         let mut failed = false;
         let mut complete = false;
-        let mut frame: usize = 0;
         let started = Instant::now();
         let mut finished: Option<Instant> = None;
 
         loop {
-            frame = frame.wrapping_add(1);
             while let Ok(evt) = worker.events_rx.try_recv() {
                 match evt {
                     crate::app::TaskEvent::Log(line) => {
                         logs.push(line);
+                        if log_scroll > 0 {
+                            log_scroll += 1;
+                        }
                         if logs.len() > 2000 {
                             logs.drain(0..logs.len() - 2000);
                         }
+                        log_scroll = log_scroll.min(logs.len().saturating_sub(1));
                     }
                     crate::app::TaskEvent::Progress {
                         step_index,
@@ -1109,6 +1122,7 @@ impl Installer {
                 }
             }
 
+            let frame = (started.elapsed().as_millis() / 80) as usize;
             term.draw(|f| {
                 Self::draw_frame(
                     f,

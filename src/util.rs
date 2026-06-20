@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
+use std::sync::OnceLock;
+
 /// Format a byte count as a human-readable string (e.g. "1.5 GiB").
 pub fn human_size(size_b: u64) -> String {
     let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
@@ -53,15 +55,18 @@ pub fn default_shell() -> String {
 
 /// Whether the controlling terminal's locale advertises UTF-8.
 pub fn terminal_is_utf8() -> bool {
-    for var in ["LC_ALL", "LC_CTYPE", "LANG"] {
-        if let Ok(value) = std::env::var(var) {
-            if !value.is_empty() {
-                let value = value.to_ascii_uppercase();
-                return value.contains("UTF-8") || value.contains("UTF8");
+    static UTF8: OnceLock<bool> = OnceLock::new();
+    *UTF8.get_or_init(|| {
+        for var in ["LC_ALL", "LC_CTYPE", "LANG"] {
+            if let Ok(value) = std::env::var(var) {
+                if !value.is_empty() {
+                    let value = value.to_ascii_uppercase();
+                    return value.contains("UTF-8") || value.contains("UTF8");
+                }
             }
         }
-    }
-    false
+        false
+    })
 }
 
 /// Validate a hostname accepted by the installer.
