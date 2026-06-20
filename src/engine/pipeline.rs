@@ -130,6 +130,9 @@ pub struct Step {
     pub fn_: StepFn,
     pub point_of_no_return: bool,
     pub requires_secure_boot: bool,
+    /// Relative expected cost, used to weight the overall progress bar so it
+    /// tracks wall-clock rather than step count.
+    pub weight: u32,
 }
 
 pub struct StepSelection {

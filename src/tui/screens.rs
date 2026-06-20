@@ -1224,13 +1224,16 @@ impl Installer {
                     Paragraph::new("Overall").style(Style::default().add_modifier(Modifier::BOLD)),
                     Rect::new(rx, 9, rw, 1),
                 );
-                let overall = (current_step as f64
-                    + if step_fraction >= 1.0 {
-                        1.0
-                    } else {
-                        step_fraction
-                    })
-                    / steps.len() as f64;
+                let runnable_weight = |range: std::ops::Range<usize>| -> u32 {
+                    range
+                        .filter(|&i| !matches!(states[i], InstallStepState::Skipped))
+                        .map(|i| steps[i].weight)
+                        .sum()
+                };
+                let total = runnable_weight(0..steps.len()).max(1);
+                let done = runnable_weight(0..current_step);
+                let active = f64::from(steps[current_step].weight) * step_fraction.min(1.0);
+                let overall = (f64::from(done) + active) / f64::from(total);
                 f.render_widget(
                     Paragraph::new(progress_bar(overall, rw as usize)),
                     Rect::new(rx, 10, rw, 1),
