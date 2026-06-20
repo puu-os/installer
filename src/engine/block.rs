@@ -15,9 +15,21 @@ pub struct Device {
 }
 
 /// Why a disk is unavailable as an install target.
+#[derive(Debug)]
 pub enum BusyReason {
     Mounted { ident: String, mountpoint: String },
     Mapping { kind: String, ident: String },
+}
+
+impl std::fmt::Display for BusyReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mounted { ident, mountpoint } => {
+                write!(f, "mounted: {ident} → {mountpoint}")
+            }
+            Self::Mapping { kind, ident } => write!(f, "{kind}: {ident}"),
+        }
+    }
 }
 
 /// Map of mount source device node -> mount point, parsed from mountinfo.
@@ -31,11 +43,11 @@ fn mounted_sources() -> HashMap<String, String> {
         let Some((pre, post)) = line.split_once(" - ") else {
             continue;
         };
-        let mountpoint = pre.split_whitespace().nth(4).unwrap_or("");
+        let mountpoint_raw = pre.split_whitespace().nth(4).unwrap_or("");
+        let mountpoint = crate::engine::util::decode_mountinfo_path(mountpoint_raw);
         let source = post.split_whitespace().nth(1).unwrap_or("");
         if source.starts_with("/dev/") {
-            map.entry(source.to_string())
-                .or_insert_with(|| mountpoint.to_string());
+            map.entry(source.to_string()).or_insert_with(|| mountpoint);
         }
     }
     map
@@ -108,13 +120,6 @@ pub fn disk_busy(disk_path: &str) -> Option<BusyReason> {
     None
 }
 
-fn busy_reason_text(reason: &BusyReason) -> String {
-    match reason {
-        BusyReason::Mounted { ident, mountpoint } => format!("mounted: {ident} → {mountpoint}"),
-        BusyReason::Mapping { kind, ident } => format!("{kind}: {ident}"),
-    }
-}
-
 /// Disk model, preferring the human-readable sysfs attribute.
 fn disk_model(dev: &udev::Device) -> String {
     let from_attr = dev
@@ -140,7 +145,7 @@ fn disk_size(dev: &udev::Device) -> String {
         .and_then(|s| s.to_str())
         .and_then(|s| s.trim().parse::<u64>().ok());
     match sectors {
-        Some(s) if s > 0 => crate::util::human_size(s * 512),
+        Some(s) if s > 0 => crate::engine::util::human_size(s * 512),
         _ => "—".into(),
     }
 }
@@ -184,7 +189,9 @@ pub fn list_disks() -> Result<Vec<Device>> {
             model: disk_model(&dev),
             size: disk_size(&dev),
             transport: disk_transport(&dev, &sysname),
-            busy_reason: disk_busy(&path).as_ref().map(busy_reason_text),
+            busy_reason: disk_busy(&path)
+                .as_ref()
+                .map(std::string::ToString::to_string),
             path,
         });
     }

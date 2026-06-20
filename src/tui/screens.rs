@@ -5,7 +5,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
@@ -13,10 +13,10 @@ use ratatui::{
     widgets::{Block, Paragraph},
 };
 
-use crate::app::{Installer, ScreenAction, Trap};
-use crate::block;
-use crate::firmware::{self, SetupModeStatus};
-use crate::pipeline;
+use crate::engine::block;
+use crate::engine::firmware::{self, SetupModeStatus};
+use crate::engine::pipeline;
+use crate::tui::app::{Installer, ScreenAction, Trap};
 
 fn clip_chars(s: &str, width: u16) -> String {
     s.chars().take(width as usize).collect()
@@ -94,26 +94,21 @@ const FALLBACK_CHOICES: &[(ScreenAction, &str)] = &[
     (ScreenAction::Reboot, "Reboot"),
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, strum::Display)]
 enum InstallStepState {
+    #[strum(to_string = "[ ]")]
     Pending,
+    #[strum(to_string = ">>>")]
     Active,
+    #[strum(to_string = "[*]")]
     Done,
+    #[strum(to_string = "[-]")]
     Skipped,
+    #[strum(to_string = "[!]")]
     Failed,
 }
 
 impl InstallStepState {
-    fn marker(self) -> &'static str {
-        match self {
-            Self::Active => ">>>",
-            Self::Done => "[*]",
-            Self::Skipped => "[-]",
-            Self::Failed => "[!]",
-            Self::Pending => "[ ]",
-        }
-    }
-
     fn style(self) -> Style {
         match self {
             Self::Active => Style::default().fg(ON_ACCENT).bg(ACCENT),
@@ -157,7 +152,7 @@ fn keymap_for_locale(locale: &str) -> &str {
 fn network_tool() -> Option<&'static str> {
     ["nmtui", "nmcli", "iwctl"]
         .into_iter()
-        .find(|&tool| crate::util::which_exists(tool))
+        .find(|&tool| crate::engine::util::which_exists(tool))
 }
 
 /// Handle a terminal I/O Result without panicking: restore terminal and exit cleanly.
@@ -206,7 +201,7 @@ fn valid_username(name: &str) -> bool {
 }
 
 fn validate_identity(hostname: &str, username: &str, password: &str, password2: &str) -> String {
-    if !crate::util::valid_hostname(hostname.trim()) {
+    if !crate::engine::util::valid_hostname(hostname.trim()) {
         return "Hostname must contain letters, digits or hyphens, without edge hyphens.".into();
     }
 
@@ -228,6 +223,32 @@ fn validate_account(username: &str, password: &str, password2: &str) -> String {
     String::new()
 }
 
+fn id_field<'a>(
+    idx: usize,
+    hostname: &'a mut String,
+    username: &'a mut String,
+    password: &'a mut String,
+    password2: &'a mut String,
+) -> Option<&'a mut String> {
+    match idx {
+        2 => Some(hostname),
+        3 => Some(username),
+        4 => Some(password),
+        5 => Some(password2),
+        _ => None,
+    }
+}
+
+fn toggle_choice(selected: &mut usize, key: &KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+            *selected = 1 - *selected;
+            true
+        }
+        _ => false,
+    }
+}
+
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -238,7 +259,7 @@ fn progress_bar(fraction: f64, width: usize) -> Line<'static> {
     let fraction = fraction.clamp(0.0, 1.0);
     let percent = (fraction * 100.0) as usize;
 
-    let (filled, track) = if crate::util::terminal_is_utf8() {
+    let (filled, track) = if crate::engine::util::terminal_is_utf8() {
         let eighths = (bar_w as f64 * fraction * 8.0) as usize;
         let full = eighths / 8;
         let rem = eighths % 8;
@@ -268,7 +289,7 @@ fn format_elapsed(d: Duration) -> String {
 }
 
 fn spinner(frame: usize) -> &'static str {
-    if crate::util::terminal_is_utf8() {
+    if crate::engine::util::terminal_is_utf8() {
         const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
         FRAMES[frame % FRAMES.len()]
     } else {
@@ -456,13 +477,13 @@ impl Installer {
             .ok();
 
             if let Ok(Event::Key(key)) = event::read() {
-                match key.code {
-                    KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
-                        selected = 1 - selected;
+                if toggle_choice(&mut selected, &key) {
+                } else {
+                    match key.code {
+                        KeyCode::Enter => return selected == 1,
+                        KeyCode::Esc => return false,
+                        _ => {}
                     }
-                    KeyCode::Enter => return selected == 1,
-                    KeyCode::Esc => return false,
-                    _ => {}
                 }
             }
         }
@@ -754,29 +775,27 @@ impl Installer {
                         reveal = !reveal;
                     }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        match field_idx {
-                            2 => hostname.clear(),
-                            3 => username.clear(),
-                            4 => password.clear(),
-                            5 => password2.clear(),
-                            _ => {}
+                        if let Some(f) = id_field(
+                            field_idx,
+                            &mut hostname,
+                            &mut username,
+                            &mut password,
+                            &mut password2,
+                        ) {
+                            f.clear();
                         }
                     }
-                    KeyCode::Backspace => match field_idx {
-                        2 => {
-                            hostname.pop();
+                    KeyCode::Backspace => {
+                        if let Some(f) = id_field(
+                            field_idx,
+                            &mut hostname,
+                            &mut username,
+                            &mut password,
+                            &mut password2,
+                        ) {
+                            f.pop();
                         }
-                        3 => {
-                            username.pop();
-                        }
-                        4 => {
-                            password.pop();
-                        }
-                        5 => {
-                            password2.pop();
-                        }
-                        _ => {}
-                    },
+                    }
                     KeyCode::Enter => {
                         let result = validate_identity(&hostname, &username, &password, &password2);
                         if result.is_empty() {
@@ -800,13 +819,24 @@ impl Installer {
                             status = result;
                         }
                     }
-                    KeyCode::Char(c) if c.is_ascii() && c >= ' ' => match field_idx {
-                        2 if hostname.len() < 253 => hostname.push(c),
-                        3 if username.len() < 32 => username.push(c),
-                        4 => password.push(c),
-                        5 => password2.push(c),
-                        _ => {}
-                    },
+                    KeyCode::Char(c) if c.is_ascii() && c >= ' ' => {
+                        if let Some(f) = id_field(
+                            field_idx,
+                            &mut hostname,
+                            &mut username,
+                            &mut password,
+                            &mut password2,
+                        ) {
+                            let max = match field_idx {
+                                2 => 253,
+                                3 => 32,
+                                _ => usize::MAX,
+                            };
+                            if f.len() < max {
+                                f.push(c);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -862,19 +892,19 @@ impl Installer {
             .ok();
 
             if let Ok(Event::Key(key)) = event::read() {
-                match key.code {
-                    KeyCode::Esc => return ScreenAction::Back,
-                    KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
-                        selected = 1 - selected;
-                    }
-                    KeyCode::Enter => {
-                        let (action, _) = &ENROLL_CHOICES[selected];
-                        if *action == ScreenAction::Install {
-                            self.ctx.secure_boot = true;
+                if toggle_choice(&mut selected, &key) {
+                } else {
+                    match key.code {
+                        KeyCode::Esc => return ScreenAction::Back,
+                        KeyCode::Enter => {
+                            let (action, _) = &ENROLL_CHOICES[selected];
+                            if *action == ScreenAction::Install {
+                                self.ctx.secure_boot = true;
+                            }
+                            return *action;
                         }
-                        return *action;
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
@@ -1018,11 +1048,13 @@ impl Installer {
             .ok();
 
             if let Ok(Event::Key(key)) = event::read() {
-                match key.code {
-                    KeyCode::Left | KeyCode::Right | KeyCode::Tab => selected = 1 - selected,
-                    KeyCode::Enter if selected == 1 => return ScreenAction::Install,
-                    KeyCode::Esc | KeyCode::Enter => return ScreenAction::Back,
-                    _ => {}
+                if toggle_choice(&mut selected, &key) {
+                } else {
+                    match key.code {
+                        KeyCode::Enter if selected == 1 => return ScreenAction::Install,
+                        KeyCode::Esc | KeyCode::Enter => return ScreenAction::Back,
+                        _ => {}
+                    }
                 }
             }
         }
@@ -1061,7 +1093,7 @@ impl Installer {
             }
         }
 
-        let mut worker = crate::app::InstallTask::start(&self.ctx, start_index, &skip_indices);
+        let mut worker = crate::tui::app::InstallTask::start(&self.ctx, start_index, &skip_indices);
 
         let mut logs: Vec<String> = Vec::new();
         let mut state = "Starting install".to_string();
@@ -1077,7 +1109,7 @@ impl Installer {
         loop {
             while let Ok(evt) = worker.events_rx.try_recv() {
                 match evt {
-                    crate::app::TaskEvent::Log(line) => {
+                    crate::tui::app::TaskEvent::Log(line) => {
                         logs.push(line);
                         if log_scroll > 0 {
                             log_scroll += 1;
@@ -1087,7 +1119,7 @@ impl Installer {
                         }
                         log_scroll = log_scroll.min(logs.len().saturating_sub(1));
                     }
-                    crate::app::TaskEvent::Progress {
+                    crate::tui::app::TaskEvent::Progress {
                         step_index,
                         status: s,
                         fraction,
@@ -1103,21 +1135,22 @@ impl Installer {
                             };
                         }
                     }
-                    crate::app::TaskEvent::Done => {
+                    crate::tui::app::TaskEvent::Done => {
                         running = false;
                         complete = true;
                         finished.get_or_insert_with(Instant::now);
                         state = "Install complete.".into();
                     }
-                    crate::app::TaskEvent::Failed { at, error } => {
+                    crate::tui::app::TaskEvent::Failed { at, error } => {
+                        let err_msg = format!("{error:#}");
                         running = false;
                         failed = true;
                         finished.get_or_insert_with(Instant::now);
                         if at < states.len() {
                             states[at] = InstallStepState::Failed;
                         }
-                        state = format!("Install failed at step {}: {error}", at + 1);
-                        self.ctx.last_error = error;
+                        state = format!("Install failed at step {}: {err_msg}", at + 1);
+                        self.ctx.last_error = err_msg;
                     }
                 }
             }
@@ -1151,7 +1184,7 @@ impl Installer {
                     let marker = if running && matches!(st, InstallStepState::Active) {
                         format!("{:<3}", spinner(frame))
                     } else {
-                        st.marker().to_string()
+                        st.to_string()
                     };
                     let style = st.style();
                     f.render_widget(
@@ -1216,7 +1249,7 @@ impl Installer {
                 );
 
                 let log_header = if log_scroll > 0 {
-                    let arrow = if crate::util::terminal_is_utf8() {
+                    let arrow = if crate::engine::util::terminal_is_utf8() {
                         "↑"
                     } else {
                         "^"
@@ -1260,9 +1293,20 @@ impl Installer {
                         KeyCode::PageUp => {
                             log_scroll = (log_scroll + 10).min(logs.len().saturating_sub(1));
                         }
-                        KeyCode::Esc | KeyCode::Char('c')
-                            if (key.code != KeyCode::Char('c')
-                                || key.modifiers.contains(KeyModifiers::CONTROL))
+                        KeyCode::Esc
+                            if running
+                                && self.confirm(
+                                    term,
+                                    "Cancel install?",
+                                    "The installer will stop and clean up mounts.",
+                                    false,
+                                ) =>
+                        {
+                            state = "Cancelling install...".into();
+                            worker.cancel();
+                        }
+                        KeyCode::Char('c')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
                                 && running
                                 && self.confirm(
                                     term,
@@ -1344,19 +1388,14 @@ impl Installer {
             if event::poll(Duration::from_millis(200)).unwrap_or(false) {
                 if let Ok(Event::Key(key)) = event::read() {
                     countdown = false;
-                    match key.code {
-                        KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
-                            selected = 1 - selected;
+                    if toggle_choice(&mut selected, &key) {
+                    } else if key.code == KeyCode::Enter {
+                        if selected == 0 {
+                            let shell = crate::engine::util::default_shell();
+                            run_on_console(term, std::process::Command::new(&shell));
+                        } else {
+                            return Trap::Reboot;
                         }
-                        KeyCode::Enter => {
-                            if selected == 0 {
-                                let shell = crate::util::default_shell();
-                                run_on_console(term, std::process::Command::new(&shell));
-                            } else {
-                                return Trap::Reboot;
-                            }
-                        }
-                        _ => {}
                     }
                 }
             }

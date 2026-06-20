@@ -10,9 +10,9 @@ use efivar::boot::{
     BootEntry, BootEntryAttributes, EFIHardDrive, EFIHardDriveType, FilePath, FilePathList,
 };
 
-use crate::image;
-use crate::partition;
-use crate::pipeline::{
+use crate::engine::image;
+use crate::engine::partition;
+use crate::engine::pipeline::{
     self, BOOTC_IMAGE_STORAGE, BOOTC_RUNROOT, BOOTC_STORAGE_MOUNT, BOOTC_VAR_TMP,
     CONTAINERS_RUNROOT, DEPENDENCIES, Runner, Step, TARGET_EFI_MOUNT, TARGET_HOME_MOUNT,
     TARGET_MOUNT,
@@ -22,7 +22,7 @@ fn step_dependencies(r: &mut Runner) -> Result<()> {
     let missing: Vec<&str> = DEPENDENCIES
         .iter()
         .copied()
-        .filter(|d| !crate::util::which_exists(d))
+        .filter(|d| !crate::engine::util::which_exists(d))
         .collect();
     if !missing.is_empty() {
         r.log("missing required tools:");
@@ -40,7 +40,7 @@ fn step_setup_mode(r: &mut Runner) -> Result<()> {
         r.log("Secure Boot disabled; skipping firmware setup check");
         return Ok(());
     }
-    let status = crate::firmware::detect_setup_mode();
+    let status = crate::engine::firmware::detect_setup_mode();
     if status.setup_mode.is_none() {
         r.ctx.secure_boot = false;
         r.log(
@@ -74,8 +74,8 @@ fn step_cleanup(r: &mut Runner) -> Result<()> {
 }
 
 fn step_validate_drive(r: &mut Runner) -> Result<()> {
-    let drive = r.ctx.drive.clone();
-    if !Path::new(&drive).exists() {
+    let drive = &r.ctx.drive;
+    if !Path::new(drive).exists() {
         bail!("'{drive}' is not a block device");
     }
     if let Some(ref src) = r.ctx.source_image {
@@ -84,32 +84,32 @@ fn step_validate_drive(r: &mut Runner) -> Result<()> {
         }
     }
 
-    match crate::block::disk_busy(&drive) {
-        Some(crate::block::BusyReason::Mounted { ident, mountpoint }) => {
+    match crate::engine::block::disk_busy(drive) {
+        Some(crate::engine::block::BusyReason::Mounted { ident, mountpoint }) => {
             bail!("'{drive}' is busy: {ident} mounted at {mountpoint}");
         }
-        Some(crate::block::BusyReason::Mapping { kind, ident }) => {
+        Some(crate::engine::block::BusyReason::Mapping { kind, ident }) => {
             bail!("'{drive}' has active {kind} mapping {ident}");
         }
         None => {}
     }
 
-    let size_b = crate::block::drive_size_bytes(&drive)?;
+    let size_b = crate::engine::block::drive_size_bytes(drive)?;
     let min = partition::min_target_size_bytes(&r.ctx.config)?;
     if size_b < min {
         bail!(
             "'{drive}' is too small: {} detected, need at least {} for EFI, \
              root and home partitions",
-            crate::util::human_size(size_b),
-            crate::util::human_size(min)
+            crate::engine::util::human_size(size_b),
+            crate::engine::util::human_size(min)
         );
     }
 
-    r.ctx.parts = partition::derive_partitions(&drive);
+    r.ctx.parts = partition::derive_partitions(drive);
 
     r.log(&format!(
         "target {drive} ({}; {}, {}, {})",
-        crate::util::human_size(size_b),
+        crate::engine::util::human_size(size_b),
         r.ctx.parts.efi_part,
         r.ctx.parts.root_part,
         r.ctx.parts.home_part
@@ -119,13 +119,16 @@ fn step_validate_drive(r: &mut Runner) -> Result<()> {
 
 fn step_partition(r: &mut Runner) -> Result<()> {
     let drive = r.ctx.drive.clone();
-    let efi = r.ctx.config.partitions.efi.clone();
-    let home = r.ctx.config.partitions.home.clone();
-    r.ctx.parts.layout = Some(partition::partition_drive(r, &drive, &efi, &home)?);
-    if crate::util::which_exists("blockdev") {
+    r.ctx.parts.layout = Some(partition::partition_drive(
+        &mut *r.log,
+        &drive,
+        &r.ctx.config.partitions.efi,
+        &r.ctx.config.partitions.home,
+    )?);
+    if crate::engine::util::which_exists("blockdev") {
         let _ = r.cmd(&["blockdev", "--rereadpt", &drive]).run();
     }
-    if crate::util::which_exists("udevadm") {
+    if crate::engine::util::which_exists("udevadm") {
         let _ = r.cmd(&["udevadm", "settle", "--timeout=30"]).run();
     }
 
@@ -140,7 +143,7 @@ fn step_format_efi(r: &mut Runner) -> Result<()> {
     pipeline::wait_for_block_device(r, &part)?;
     r.log(&format!("formatting {part} as FAT32 (label EFI)"));
     format_efi_fat(&part)?;
-    r.ctx.parts.efi_uuid = crate::block::capture_partuuid(&part)?;
+    r.ctx.parts.efi_uuid = crate::engine::block::capture_partuuid(&part)?;
     Ok(())
 }
 
@@ -173,7 +176,7 @@ fn step_format_root(r: &mut Runner) -> Result<()> {
     pipeline::wait_for_block_device(r, &part)?;
     r.log(&format!("formatting {part} as XFS (label puu-root)"));
     format_root_xfs(&part)?;
-    r.ctx.parts.root_uuid = crate::block::capture_uuid(&part)?;
+    r.ctx.parts.root_uuid = crate::engine::block::capture_uuid(&part)?;
     Ok(())
 }
 
@@ -208,15 +211,14 @@ fn step_format_home(r: &mut Runner) -> Result<()> {
         "mke2fs", "-t", "ext4", "-O", "encrypt", "-F", "-L", "puu-home", &part,
     ])
     .run()?;
-    r.ctx.parts.home_uuid = crate::block::capture_uuid(&part)?;
+    r.ctx.parts.home_uuid = crate::engine::block::capture_uuid(&part)?;
     Ok(())
 }
 
 fn mount_efi(r: &mut Runner) -> Result<()> {
-    let efi_part = r.ctx.parts.efi_part.clone();
     pipeline::mount_target(
-        r,
-        &efi_part,
+        &mut *r.log,
+        &r.ctx.parts.efi_part,
         TARGET_EFI_MOUNT,
         "vfat",
         Some("fmask=0077,dmask=0077"),
@@ -224,13 +226,23 @@ fn mount_efi(r: &mut Runner) -> Result<()> {
 }
 
 fn step_mount(r: &mut Runner) -> Result<()> {
-    let root_part = r.ctx.parts.root_part.clone();
-    pipeline::mount_target(r, &root_part, TARGET_MOUNT, "xfs", None)
+    pipeline::mount_target(
+        &mut *r.log,
+        &r.ctx.parts.root_part,
+        TARGET_MOUNT,
+        "xfs",
+        None,
+    )
 }
 
 fn step_mount_home(r: &mut Runner) -> Result<()> {
-    let home_part = r.ctx.parts.home_part.clone();
-    pipeline::mount_target(r, &home_part, TARGET_HOME_MOUNT, "ext4", None)?;
+    pipeline::mount_target(
+        &mut *r.log,
+        &r.ctx.parts.home_part,
+        TARGET_HOME_MOUNT,
+        "ext4",
+        None,
+    )?;
     Ok(())
 }
 
@@ -261,15 +273,14 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
         );
     }
 
-    let mut mounted_bootc_tmp = false;
-    let mut remove_bootc_storage = false;
-    let mut mounted_bootc_image_storage = false;
-    let mut mounted_bootc_tmp_dir = false;
+    let mut cleanups = pipeline::CleanupStack::new();
 
     let result = (|| -> Result<()> {
         if !Path::new(BOOTC_STORAGE_MOUNT).exists() {
             std::fs::create_dir_all(BOOTC_STORAGE_MOUNT)?;
-            remove_bootc_storage = true;
+            cleanups.push(|| {
+                let _ = std::fs::remove_dir_all(BOOTC_STORAGE_MOUNT);
+            });
         }
 
         for dir in &[BOOTC_IMAGE_STORAGE, CONTAINERS_RUNROOT, BOOTC_RUNROOT] {
@@ -281,15 +292,23 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
 
         if !pipeline::path_is_mount(BOOTC_IMAGE_STORAGE) {
             pipeline::bind_mount(BOOTC_IMAGE_STORAGE, BOOTC_IMAGE_STORAGE)?;
-            mounted_bootc_image_storage = true;
+            cleanups.push(|| {
+                let _ = pipeline::unmount(BOOTC_IMAGE_STORAGE);
+            });
         }
         if !pipeline::path_is_mount(&bootc_tmp_dir) {
-            let bootc_tmp_dir = bootc_tmp_dir.to_string_lossy();
-            pipeline::bind_mount(&bootc_tmp_dir, &bootc_tmp_dir)?;
-            mounted_bootc_tmp_dir = true;
+            let bootc_tmp_dir_str = bootc_tmp_dir.to_string_lossy().to_string();
+            pipeline::bind_mount(&bootc_tmp_dir_str, &bootc_tmp_dir_str)?;
+            cleanups.push(move || {
+                let _ = pipeline::unmount(&bootc_tmp_dir_str);
+            });
         }
 
-        mounted_bootc_tmp = pipeline::mount_bootc_vartmp()?;
+        if pipeline::mount_bootc_vartmp()? {
+            cleanups.push(|| {
+                let _ = pipeline::unmount(BOOTC_VAR_TMP);
+            });
+        }
 
         let storage_conf = PathBuf::from("/run/puu-installer/bootc-storage.conf");
         std::fs::write(
@@ -343,20 +362,6 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
 
         Ok(())
     })();
-
-    if mounted_bootc_tmp {
-        let _ = pipeline::unmount(BOOTC_VAR_TMP);
-    }
-    if mounted_bootc_tmp_dir {
-        let bootc_tmp_dir = PathBuf::from(BOOTC_STORAGE_MOUNT).join("tmp");
-        let _ = pipeline::unmount(&bootc_tmp_dir.to_string_lossy());
-    }
-    if mounted_bootc_image_storage {
-        let _ = pipeline::unmount(BOOTC_IMAGE_STORAGE);
-    }
-    if remove_bootc_storage {
-        let _ = std::fs::remove_dir_all(BOOTC_STORAGE_MOUNT);
-    }
 
     result?;
     r.progress(0.95, "Install bootc image");
@@ -509,7 +514,7 @@ fn step_firstboot(r: &mut Runner) -> Result<()> {
     let timezone = ident.timezone.clone();
     let hostname = ident.hostname.clone();
 
-    if !hostname.is_empty() && !crate::util::valid_hostname(&hostname) {
+    if !hostname.is_empty() && !crate::engine::util::valid_hostname(&hostname) {
         bail!("invalid hostname: {hostname}");
     }
 
@@ -600,7 +605,7 @@ fn step_stage_homed_identity(r: &mut Runner) -> Result<()> {
         bail!("password must not contain newline characters");
     }
 
-    let hashed = crate::passwd::hash_password_sha512(&r.ctx.user_password)?;
+    let hashed = crate::engine::passwd::hash_password_sha512(&r.ctx.user_password)?;
 
     let identity = serde_json::json!({
         "userName": name,
@@ -826,25 +831,23 @@ fn step_stage_esp_boot(r: &mut Runner) -> Result<()> {
         }
     }
     pipeline::copy_tree_files(&source_ostree, &esp_ostree)?;
-    unsafe {
-        libc::sync();
-    }
+    crate::engine::util::sync_all();
     r.log("staged boot loader entries and ostree kernel files on ESP");
     Ok(())
 }
 
 fn step_secureboot(r: &mut Runner) -> Result<()> {
-    crate::secureboot::ensure_sbctl_keys(&mut r.log)?;
-    let keydir = crate::secureboot::sbctl_keydir();
-    let owner = crate::secureboot::sbctl_owner_guid();
-    match crate::secureboot::enroll_keys(&keydir, &owner) {
+    crate::engine::secureboot::ensure_sbctl_keys(&mut r.log)?;
+    let keydir = crate::engine::secureboot::sbctl_keydir();
+    let owner = crate::engine::secureboot::sbctl_owner_guid();
+    match crate::engine::secureboot::enroll_keys(&keydir, &owner) {
         Ok(()) => {
             r.log("enrolled Secure Boot PK/KEK/db keys");
             Ok(())
         }
         Err(e) => {
             // If the firmware already left Setup Mode, keys are likely enrolled.
-            if crate::firmware::detect_setup_mode().setup_mode == Some(false) {
+            if crate::engine::firmware::detect_setup_mode().setup_mode == Some(false) {
                 r.log("Secure Boot keys appear to be enrolled already");
                 Ok(())
             } else {
@@ -855,12 +858,12 @@ fn step_secureboot(r: &mut Runner) -> Result<()> {
 }
 
 fn step_sign(r: &mut Runner) -> Result<()> {
-    crate::secureboot::ensure_sbctl_keys(&mut r.log)?;
-    let efi_binaries = crate::secureboot::target_efi_binaries();
+    crate::engine::secureboot::ensure_sbctl_keys(&mut r.log)?;
+    let efi_binaries = crate::engine::secureboot::target_efi_binaries();
     if efi_binaries.is_empty() {
         bail!("no EFI binaries found under {TARGET_EFI_MOUNT}");
     }
-    let keydir = crate::secureboot::sbctl_keydir();
+    let keydir = crate::engine::secureboot::sbctl_keydir();
     let db_key = std::fs::read_to_string(keydir.join("db/db.key"))?;
     let db_cert = std::fs::read_to_string(keydir.join("db/db.pem"))?;
 
@@ -868,13 +871,13 @@ fn step_sign(r: &mut Runner) -> Result<()> {
     let mut skipped_count = 0usize;
     for binary in &efi_binaries {
         let image = std::fs::read(binary)?;
-        if crate::secureboot::verify_pe(&image, &db_cert)
+        if crate::engine::secureboot::verify_pe(&image, &db_cert)
             .with_context(|| format!("failed to verify signature for {}", binary.display()))?
         {
             skipped_count += 1;
             continue;
         }
-        let signed = crate::secureboot::sign_pe(&image, &db_key, &db_cert)?;
+        let signed = crate::engine::secureboot::sign_pe(&image, &db_key, &db_cert)?;
         std::fs::write(binary, &signed)?;
         signed_count += 1;
     }
@@ -884,7 +887,7 @@ fn step_sign(r: &mut Runner) -> Result<()> {
 
     for binary in &efi_binaries {
         let image = std::fs::read(binary)?;
-        if !crate::secureboot::verify_pe(&image, &db_cert)? {
+        if !crate::engine::secureboot::verify_pe(&image, &db_cert)? {
             bail!("signature verification failed for {}", binary.display());
         }
     }

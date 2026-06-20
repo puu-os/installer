@@ -7,8 +7,6 @@
 use anyhow::Result;
 use openssl::rand::rand_bytes;
 
-use crate::pipeline::Runner;
-
 const PART_SIZE_UNITS: &[(&str, u64)] = &[
     ("K", 1024),
     ("M", 1024 * 1024),
@@ -50,7 +48,7 @@ const PART_TYPE_LINUX: [u8; 16] = [
 /// Layout mirrors the previous `sgdisk` calls: EFI (`efi_size`) at the front,
 /// home (`home_size`) pinned to the end of the disk, and root filling the gap.
 pub fn partition_drive(
-    runner: &mut Runner,
+    log: &mut dyn FnMut(String),
     drive: &str,
     efi_size: &str,
     home_size: &str,
@@ -64,7 +62,6 @@ pub fn partition_drive(
         .open(drive)?;
     let sector_size = gptman::linux::get_sector_size(&mut file).unwrap_or(512);
 
-    // A fresh GPT overwrites any existing partition table (equivalent to `sgdisk -Z`).
     let mut disk_guid = [0u8; 16];
     rand_bytes(&mut disk_guid)?;
     let mut gpt = gptman::GPT::new_from(&mut file, sector_size, disk_guid)?;
@@ -72,67 +69,19 @@ pub fn partition_drive(
     let efi_sectors = efi_bytes.div_ceil(sector_size);
     let home_sectors = home_bytes.div_ceil(sector_size);
 
-    let efi_start = gpt
-        .find_first_place(efi_sectors)
-        .ok_or_else(|| anyhow::anyhow!("no room for EFI partition on {drive}"))?;
-    let mut efi_guid = [0u8; 16];
-    rand_bytes(&mut efi_guid)?;
-    gpt[1] = gptman::GPTPartitionEntry {
-        partition_type_guid: PART_TYPE_ESP,
-        unique_partition_guid: efi_guid,
-        starting_lba: efi_start,
-        ending_lba: efi_start + efi_sectors - 1,
-        attribute_bits: 0,
-        partition_name: "EFI".into(),
-    };
-
-    // Pin home to the tail of the disk; it consumes everything up to the last usable sector.
-    let home_start = gpt
-        .find_last_place(home_sectors)
-        .ok_or_else(|| anyhow::anyhow!("no room for home partition on {drive}"))?;
-    let last_usable = gpt.header.last_usable_lba;
-    let mut home_guid = [0u8; 16];
-    rand_bytes(&mut home_guid)?;
-    gpt[3] = gptman::GPTPartitionEntry {
-        partition_type_guid: PART_TYPE_LINUX,
-        unique_partition_guid: home_guid,
-        starting_lba: home_start,
-        ending_lba: last_usable,
-        attribute_bits: 0,
-        partition_name: "home".into(),
-    };
-
-    // Root fills the remaining free region between EFI and home.
-    let root_size = gpt.get_maximum_partition_size()?;
-    let root_start = gpt
-        .find_optimal_place(root_size)
-        .ok_or_else(|| anyhow::anyhow!("no room for root partition on {drive}"))?;
-    let mut root_guid = [0u8; 16];
-    rand_bytes(&mut root_guid)?;
-    gpt[2] = gptman::GPTPartitionEntry {
-        partition_type_guid: PART_TYPE_LINUX,
-        unique_partition_guid: root_guid,
-        starting_lba: root_start,
-        ending_lba: root_start + root_size - 1,
-        attribute_bits: 0,
-        partition_name: "root".into(),
-    };
+    efi_entry(&mut gpt, efi_sectors, drive)?;
+    home_entry(&mut gpt, home_sectors, drive)?;
+    root_entry(&mut gpt, drive)?;
 
     let part_bytes = |n: u32| (gpt[n].ending_lba - gpt[n].starting_lba + 1) * sector_size;
-    runner.log(&format!(
+    log(format!(
         "wrote GPT to {drive}: EFI {}, root {}, home {}",
-        crate::util::human_size(part_bytes(1)),
-        crate::util::human_size(part_bytes(2)),
-        crate::util::human_size(part_bytes(3)),
+        crate::engine::util::human_size(part_bytes(1)),
+        crate::engine::util::human_size(part_bytes(2)),
+        crate::engine::util::human_size(part_bytes(3)),
     ));
 
-    gptman::GPT::write_protective_mbr_into(&mut file, sector_size)?;
-    gpt.write_into(&mut file)?;
-    file.sync_all()?;
-
-    // Make the kernel pick up the new table (equivalent to `partprobe`).
-    gptman::linux::reread_partition_table(&mut file)
-        .map_err(|e| anyhow::anyhow!("failed to reread partition table on {drive}: {e}"))?;
+    commit_gpt(&mut file, &mut gpt, drive, sector_size)?;
 
     Ok(PartitionLayout {
         efi: PartitionInfo {
@@ -142,6 +91,71 @@ pub fn partition_drive(
             ending_lba: gpt[1].ending_lba,
         },
     })
+}
+
+fn efi_entry(gpt: &mut gptman::GPT, sectors: u64, drive: &str) -> Result<()> {
+    let start = gpt
+        .find_first_place(sectors)
+        .ok_or_else(|| anyhow::anyhow!("no room for EFI partition on {drive}"))?;
+    let mut guid = [0u8; 16];
+    rand_bytes(&mut guid)?;
+    gpt[1] = gptman::GPTPartitionEntry {
+        partition_type_guid: PART_TYPE_ESP,
+        unique_partition_guid: guid,
+        starting_lba: start,
+        ending_lba: start + sectors - 1,
+        attribute_bits: 0,
+        partition_name: "EFI".into(),
+    };
+    Ok(())
+}
+
+fn home_entry(gpt: &mut gptman::GPT, sectors: u64, drive: &str) -> Result<()> {
+    let start = gpt
+        .find_last_place(sectors)
+        .ok_or_else(|| anyhow::anyhow!("no room for home partition on {drive}"))?;
+    let mut guid = [0u8; 16];
+    rand_bytes(&mut guid)?;
+    gpt[3] = gptman::GPTPartitionEntry {
+        partition_type_guid: PART_TYPE_LINUX,
+        unique_partition_guid: guid,
+        starting_lba: start,
+        ending_lba: gpt.header.last_usable_lba,
+        attribute_bits: 0,
+        partition_name: "home".into(),
+    };
+    Ok(())
+}
+
+fn root_entry(gpt: &mut gptman::GPT, drive: &str) -> Result<()> {
+    let size = gpt.get_maximum_partition_size()?;
+    let start = gpt
+        .find_optimal_place(size)
+        .ok_or_else(|| anyhow::anyhow!("no room for root partition on {drive}"))?;
+    let mut guid = [0u8; 16];
+    rand_bytes(&mut guid)?;
+    gpt[2] = gptman::GPTPartitionEntry {
+        partition_type_guid: PART_TYPE_LINUX,
+        unique_partition_guid: guid,
+        starting_lba: start,
+        ending_lba: start + size - 1,
+        attribute_bits: 0,
+        partition_name: "root".into(),
+    };
+    Ok(())
+}
+
+fn commit_gpt(
+    file: &mut std::fs::File,
+    gpt: &mut gptman::GPT,
+    drive: &str,
+    sector_size: u64,
+) -> Result<()> {
+    gptman::GPT::write_protective_mbr_into(file, sector_size)?;
+    gpt.write_into(file)?;
+    file.sync_all()?;
+    gptman::linux::reread_partition_table(file)
+        .map_err(|e| anyhow::anyhow!("failed to reread partition table on {drive}: {e}"))
 }
 
 fn partition_info(number: u32, entry: &gptman::GPTPartitionEntry) -> PartitionInfo {
@@ -175,7 +189,7 @@ pub fn load_partition_layout(drive: &str) -> Result<PartitionLayout> {
 }
 
 /// Return the minimum target disk size required by the configured partition sizes.
-pub fn min_target_size_bytes(config: &crate::config::Config) -> Result<u64> {
+pub fn min_target_size_bytes(config: &crate::engine::config::Config) -> Result<u64> {
     let efi = format!("+{}", config.partitions.efi);
     let root = format!("+{}", config.partitions.root_min);
     let home = format!("+{}", config.partitions.home);

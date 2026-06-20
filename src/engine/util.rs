@@ -3,6 +3,16 @@
 
 use std::sync::OnceLock;
 
+/// Flush all filesystem buffers to stable storage.
+pub(crate) fn sync_all() {
+    unsafe { libc::sync() };
+}
+
+/// Whether the current process has superuser privileges.
+pub(crate) fn running_as_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
 /// Format a byte count as a human-readable string (e.g. "1.5 GiB").
 pub fn human_size(size_b: u64) -> String {
     let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
@@ -88,6 +98,31 @@ pub fn valid_hostname(name: &str) -> bool {
 fn is_executable(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Decode the octal escape sequences (`\NNN`) that `/proc/self/mountinfo`
+/// uses for spaces and other special characters in mount paths.
+pub(crate) fn decode_mountinfo_path(path: &str) -> String {
+    let mut out = String::new();
+    let mut chars = path.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            let octal: String = chars.by_ref().take(3).collect();
+            if octal.len() == 3 {
+                if let Ok(value) = u8::from_str_radix(&octal, 8) {
+                    out.push(value as char);
+                    continue;
+                }
+            }
+            out.push('\\');
+            out.push_str(&octal);
+        } else {
+            out.push(c);
+        }
+    }
+
+    out
 }
 
 /// Check whether a command exists in `$PATH`, by searching `$PATH` directly

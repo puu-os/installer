@@ -6,8 +6,8 @@
 //!
 //! All cryptography goes through OpenSSL (libcrypto) so the binary depends on a
 //! single, FIPS-certifiable crypto backend. The Authenticode/PKCS#7 and PE
-//! container structures are assembled and parsed with the small hand-rolled DER
-//! helpers below rather than a third-party ASN.1 stack.
+//! container structures are assembled and parsed with the hand-rolled DER
+//! primitives in [`crate::engine::der`] rather than a third-party ASN.1 stack.
 
 #![allow(clippy::doc_markdown)]
 
@@ -23,8 +23,11 @@ use openssl::sign::Signer;
 use openssl::stack::Stack;
 use openssl::x509::X509;
 
-use crate::pipeline::{TARGET_EFI_MOUNT, TARGET_MOUNT};
-use crate::subproc::LogFn;
+use crate::engine::der::{
+    algorithm_identifier, der_int_u8, der_octet, der_oid, der_read, der_seq, der_set, der_tlv,
+};
+use crate::engine::pipeline::{TARGET_EFI_MOUNT, TARGET_MOUNT};
+use crate::engine::subproc::LogFn;
 
 // Object identifiers, expressed as arc sequences and DER-encoded on demand.
 const OID_SPC_INDIRECT_DATA: &[u32] = &[1, 3, 6, 1, 4, 1, 311, 2, 1, 4];
@@ -50,122 +53,6 @@ const SPC_PE_IMAGE_DATA_VALUE: &[u8] = &[
     0x00, 0x3c, 0x00, 0x3c, 0x00, 0x3c, 0x00, 0x4f, 0x00, 0x62, 0x00, 0x73, 0x00, 0x6f, 0x00, 0x6c,
     0x00, 0x65, 0x00, 0x74, 0x00, 0x65, 0x00, 0x3e, 0x00, 0x3e, 0x00, 0x3e,
 ];
-
-// --- Minimal DER encoding ---
-
-/// Encode a DER definite-length prefix.
-fn der_len(len: usize) -> Vec<u8> {
-    if len < 0x80 {
-        return vec![len as u8];
-    }
-    let bytes = len.to_be_bytes();
-    let start = bytes
-        .iter()
-        .position(|&b| b != 0)
-        .unwrap_or(bytes.len() - 1);
-    let body = &bytes[start..];
-    let mut out = Vec::with_capacity(1 + body.len());
-    out.push(0x80 | body.len() as u8);
-    out.extend_from_slice(body);
-    out
-}
-
-/// Encode one DER TLV: `tag || length || contents`.
-fn der_tlv(tag: u8, contents: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(2 + contents.len());
-    out.push(tag);
-    out.extend_from_slice(&der_len(contents.len()));
-    out.extend_from_slice(contents);
-    out
-}
-
-/// SEQUENCE built from already-encoded elements.
-fn der_seq(elems: &[Vec<u8>]) -> Vec<u8> {
-    der_tlv(0x30, &elems.concat())
-}
-
-/// SET built from already-encoded elements. The caller orders the elements per
-/// the DER SET OF rules (or passes a single element).
-fn der_set(elems: &[Vec<u8>]) -> Vec<u8> {
-    der_tlv(0x31, &elems.concat())
-}
-
-fn der_octet(bytes: &[u8]) -> Vec<u8> {
-    der_tlv(0x04, bytes)
-}
-
-fn der_int_u8(value: u8) -> Vec<u8> {
-    der_tlv(0x02, &[value])
-}
-
-fn der_null() -> Vec<u8> {
-    vec![0x05, 0x00]
-}
-
-/// Encode an OBJECT IDENTIFIER from its arc values.
-fn der_oid(arcs: &[u32]) -> Vec<u8> {
-    let mut body = vec![(arcs[0] * 40 + arcs[1]) as u8];
-    for &arc in &arcs[2..] {
-        let mut group = vec![(arc & 0x7f) as u8];
-        let mut rest = arc >> 7;
-        while rest > 0 {
-            group.push(0x80 | (rest & 0x7f) as u8);
-            rest >>= 7;
-        }
-        group.reverse();
-        body.extend_from_slice(&group);
-    }
-    der_tlv(0x06, &body)
-}
-
-/// `AlgorithmIdentifier { algorithm, NULL }`.
-fn algorithm_identifier(oid: &[u32]) -> Vec<u8> {
-    der_seq(&[der_oid(oid), der_null()])
-}
-
-// --- Minimal DER decoding ---
-
-/// A single DER element: its tag, its contents, and the full `tag||len||value`
-/// slice it occupies.
-struct Tlv<'a> {
-    tag: u8,
-    contents: &'a [u8],
-    total: &'a [u8],
-}
-
-/// Read the TLV at `data[pos..]`, returning it and the offset just past it.
-fn der_read(data: &[u8], pos: usize) -> Result<(Tlv<'_>, usize)> {
-    let tag = *data.get(pos).ok_or_else(|| anyhow!("truncated DER tag"))?;
-    let first = *data
-        .get(pos + 1)
-        .ok_or_else(|| anyhow!("truncated DER length"))?;
-    let (header, len) = if first < 0x80 {
-        (2, first as usize)
-    } else {
-        let n = (first & 0x7f) as usize;
-        let mut len = 0usize;
-        for i in 0..n {
-            let byte = *data
-                .get(pos + 2 + i)
-                .ok_or_else(|| anyhow!("truncated DER length"))?;
-            len = (len << 8) | byte as usize;
-        }
-        (2 + n, len)
-    };
-    let start = pos + header;
-    let end = start
-        .checked_add(len)
-        .filter(|&e| e <= data.len())
-        .ok_or_else(|| anyhow!("DER element exceeds buffer"))?;
-    Ok((
-        Tlv {
-            tag,
-            contents: &data[start..end],
-            total: &data[pos..end],
-        },
-        end,
-    ))
-}
 
 /// Extract the raw `issuer` Name and `serialNumber` TLVs from a certificate's
 /// DER, for use in a CMS `IssuerAndSerialNumber`.
@@ -611,25 +498,9 @@ fn authenticated_payload(
 fn write_auth_variable(name: &str, vendor_guid: &[u8; 16], payload: &[u8]) -> Result<()> {
     use std::io::Write;
 
-    let guid_str = format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        vendor_guid[3],
-        vendor_guid[2],
-        vendor_guid[1],
-        vendor_guid[0],
-        vendor_guid[5],
-        vendor_guid[4],
-        vendor_guid[7],
-        vendor_guid[6],
-        vendor_guid[8],
-        vendor_guid[9],
-        vendor_guid[10],
-        vendor_guid[11],
-        vendor_guid[12],
-        vendor_guid[13],
-        vendor_guid[14],
-        vendor_guid[15],
-    );
+    let guid_str = uuid::Uuid::from_bytes_le(*vendor_guid)
+        .hyphenated()
+        .to_string();
     let path = format!("{EFIVARS_DIR}/{name}-{guid_str}");
 
     // efivarfs expects one write of: attributes(u32 LE) || payload.

@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use nix::mount::MsFlags;
 
-use crate::block::probe_value;
-use crate::config::Config;
-use crate::pipeline::{path_is_mount, unmount};
+use crate::engine::block::probe_value;
+use crate::engine::config::Config;
+use crate::engine::pipeline::{path_is_mount, unmount};
 
 const MANIFEST_FILENAME: &str = "image.manifest";
 

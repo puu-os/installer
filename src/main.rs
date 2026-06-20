@@ -9,29 +9,17 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_precision_loss)]
 
-mod app;
-mod block;
-mod config;
-mod firmware;
-mod image;
-mod partition;
-mod passwd;
-mod pipeline;
-mod screens;
-mod secureboot;
-mod steps;
-mod subproc;
-mod util;
-
+mod engine;
+mod tui;
 use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context as _, Result, bail};
 use argh::FromArgs;
 
-use crate::app::Installer;
-use crate::config::Config;
-use crate::pipeline::Context;
+use crate::engine::config::Config;
+use crate::engine::pipeline::ContextBuilder;
+use crate::tui::app::Installer;
 
 /// Puu system installer.
 #[derive(FromArgs)]
@@ -89,7 +77,7 @@ fn read_first_line(path: &std::path::Path) -> Result<String> {
 fn main() -> Result<()> {
     let args: Args = argh::from_env();
 
-    if unsafe { libc::geteuid() } != 0 {
+    if !engine::util::running_as_root() {
         eprintln!("puu-installer must be run as root.");
         std::process::exit(1);
     }
@@ -103,10 +91,10 @@ fn main() -> Result<()> {
 
     let source_image = match args.source_image {
         Some(p) => Some(p),
-        None => image::default_source_image(&cfg),
+        None => engine::image::default_source_image(&cfg),
     };
 
-    if source_image.is_none() && !image::running_in_container() {
+    if source_image.is_none() && !engine::image::running_in_container() {
         eprintln!(
             "no local bootc source image found; expected \
              /dev/disk/by-label/{} or --source-image.",
@@ -115,7 +103,7 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let step_count = pipeline::STEPS.len();
+    let step_count = engine::pipeline::STEPS.len();
     if args.start_from < 1 || args.start_from > step_count {
         eprintln!("--start-from must be between 1 and {step_count}");
         std::process::exit(2);
@@ -144,40 +132,28 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let target_imgref = image::load_target_imgref(source_image.as_deref(), &cfg);
-    let image_version = image::load_image_version(source_image.as_deref());
+    let target_imgref = engine::image::load_target_imgref(source_image.as_deref(), &cfg);
+    let image_version = engine::image::load_image_version(source_image.as_deref());
 
-    let ctx = Context {
-        config: cfg,
-        source_image,
-        target_imgref,
-        image_version,
-        drive: args.drive.unwrap_or_default(),
-        drive_label: String::new(),
-        username: String::new(),
-        user_password: String::new(),
-        user_shell: "/bin/bash".to_string(),
-        keymap: String::new(),
-        locale: String::new(),
-        secure_boot: true,
-        k3s_token,
-        last_error: String::new(),
-        start_from: args.start_from,
-        skip_steps,
-        parts: partition::DerivedPartitions::default(),
-    };
+    let ctx = ContextBuilder::new(cfg, target_imgref, image_version)
+        .source_image(source_image)
+        .drive(args.drive.unwrap_or_default())
+        .k3s_token(k3s_token)
+        .start_from(args.start_from)
+        .skip_steps(skip_steps)
+        .build();
 
     let mut app = Installer::new(ctx);
     loop {
         match app.run() {
-            app::Trap::Quit => return Ok(()),
-            app::Trap::Reboot => {
-                unsafe { libc::sync() };
+            tui::app::Trap::Quit => return Ok(()),
+            tui::app::Trap::Reboot => {
+                engine::util::sync_all();
                 let _ = nix::sys::reboot::reboot(nix::sys::reboot::RebootMode::RB_AUTOBOOT);
                 bail!("reboot syscall failed");
             }
-            app::Trap::Shell => {
-                let shell = util::default_shell();
+            tui::app::Trap::Shell => {
+                let shell = engine::util::default_shell();
                 let _ = Command::new(&shell).status();
                 app = Installer::new(app.into_context());
             }

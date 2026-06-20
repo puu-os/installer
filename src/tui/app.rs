@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
 
-use crate::pipeline::{self, Context, ProgressCb, Runner, StepSelection};
-use crate::subproc::LogFn;
+use crate::engine::pipeline::{self, Context, ProgressCb, Runner, StepSelection};
+use crate::engine::subproc::LogFn;
 
 const INSTALL_LOG_PATH: &str = "/run/puu-installer/install.log";
 
@@ -40,7 +40,7 @@ pub enum TaskEvent {
     Done,
     Failed {
         at: usize,
-        error: String,
+        error: anyhow::Error,
     },
 }
 
@@ -83,7 +83,7 @@ impl InstallTask {
         let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
 
         let mut pipeline_ctx = ctx.clone();
-        pipeline_ctx.parts = crate::partition::DerivedPartitions::default();
+        pipeline_ctx.parts = crate::engine::partition::DerivedPartitions::default();
         let skip = skip_indices.to_vec();
 
         let thread = std::thread::spawn(move || {
@@ -114,7 +114,7 @@ impl InstallTask {
                 skip_indices: skip,
             };
 
-            let fail = |at: usize, error: String| {
+            let fail = |at: usize, error: anyhow::Error| {
                 let mut log = make_log(events_tx.clone(), log_file.clone());
                 pipeline::rollback(&mut log);
                 let _ = events_tx.send(TaskEvent::Failed { at, error });
@@ -125,18 +125,11 @@ impl InstallTask {
                     let _ = events_tx.send(TaskEvent::Done);
                 }
                 Ok(false) => {
-                    fail(runner.step_index, "installation cancelled".to_string());
+                    fail(runner.step_index, anyhow::anyhow!("installation cancelled"));
                 }
                 Err(e) => {
-                    let short = if e.to_string().starts_with("missing dependencies:") {
-                        "missing required tools".to_string()
-                    } else {
-                        e.to_string()
-                    };
-                    for line in short.lines() {
-                        send_log(&events_tx, &log_file, &format!("error: {line}"));
-                    }
-                    fail(runner.step_index, short);
+                    send_log(&events_tx, &log_file, &format!("error: {e:#}"));
+                    fail(runner.step_index, e);
                 }
             }
         });

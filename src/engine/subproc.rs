@@ -2,6 +2,7 @@
 // Copyright (C) Opinsys Oy 2026
 
 use std::collections::VecDeque;
+use std::ffi::CStr;
 use std::ffi::CString;
 use std::io::{self, BufRead, BufReader};
 use std::os::unix::process::CommandExt;
@@ -83,26 +84,27 @@ fn build_expression(
             .transpose()
             .map_err(|_| io::Error::other("chroot path contains an interior NUL"))?;
 
-        // chroot (if requested), then setsid to start a new session.
         unsafe {
-            command.pre_exec(move || {
-                if let Some(ref dir) = chroot_c {
-                    if libc::chroot(dir.as_ptr()) != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    if libc::chdir(c"/".as_ptr()) != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
-                libc::setsid();
-                Ok(())
-            });
+            command.pre_exec(move || enter_chroot(chroot_c.as_deref()));
         }
         Ok(())
     })
 }
 
-/// A subprocess invocation built from [`crate::pipeline::Runner::cmd`]. Merged
+unsafe fn enter_chroot(target: Option<&CStr>) -> io::Result<()> {
+    if let Some(dir) = target {
+        if unsafe { libc::chroot(dir.as_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::chdir(c"/".as_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    unsafe { libc::setsid() };
+    Ok(())
+}
+
+/// A subprocess invocation built from [`crate::engine::pipeline::Runner::cmd`]. Merged
 /// stdout+stderr is streamed to the log; a non-zero exit becomes an error.
 pub struct Cmd<'a> {
     log: &'a mut LogFn,
@@ -180,7 +182,7 @@ impl<'a> Cmd<'a> {
         loop {
             match rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(line) => {
-                    let line = crate::util::clean_log_line(&line);
+                    let line = crate::engine::util::clean_log_line(&line);
                     if !line.is_empty() {
                         push_tail(&mut output_tail, line.clone());
                         (self.log)(line);

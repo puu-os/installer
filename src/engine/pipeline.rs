@@ -8,10 +8,10 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use nix::mount::MsFlags;
 
-use crate::partition::DerivedPartitions;
-use crate::subproc::{self, LogFn};
+use crate::engine::partition::DerivedPartitions;
+use crate::engine::subproc::{self, LogFn};
 
-pub use crate::steps::STEPS;
+pub use crate::engine::steps::STEPS;
 
 pub const DEPENDENCIES: &[&str] = &["bootc", "mke2fs"];
 
@@ -33,7 +33,7 @@ pub const BOOTC_RUNROOT: &str = "/run/puu-installer/bootc-runroot";
 /// Mount `source` at `target` via `mount(2)`, creating the mountpoint and
 /// skipping if it is already mounted. Replaces shelling out to `mount(8)`.
 pub fn mount_target(
-    runner: &mut Runner,
+    log: &mut dyn FnMut(String),
     source: &str,
     target: &str,
     fstype: &str,
@@ -41,7 +41,7 @@ pub fn mount_target(
 ) -> Result<()> {
     std::fs::create_dir_all(target)?;
     if path_is_mount(target) {
-        runner.log(&format!("{target} is already mounted; reusing it"));
+        log(format!("{target} is already mounted; reusing it"));
         return Ok(());
     }
     nix::mount::mount(Some(source), target, Some(fstype), MsFlags::empty(), data)
@@ -80,7 +80,7 @@ pub fn unmount(target: &str) -> Result<()> {
 
 #[derive(Clone)]
 pub struct Context {
-    pub config: crate::config::Config,
+    pub config: crate::engine::config::Config,
     pub source_image: Option<PathBuf>,
     pub target_imgref: String,
     pub image_version: String,
@@ -97,6 +97,83 @@ pub struct Context {
     pub start_from: usize,
     pub skip_steps: Vec<usize>,
     pub parts: DerivedPartitions,
+}
+
+pub struct ContextBuilder {
+    config: crate::engine::config::Config,
+    source_image: Option<PathBuf>,
+    target_imgref: String,
+    image_version: String,
+    drive: String,
+    k3s_token: String,
+    start_from: usize,
+    skip_steps: Vec<usize>,
+}
+
+impl ContextBuilder {
+    pub fn new(
+        config: crate::engine::config::Config,
+        target_imgref: String,
+        image_version: String,
+    ) -> Self {
+        Self {
+            config,
+            source_image: None,
+            target_imgref,
+            image_version,
+            drive: String::new(),
+            k3s_token: String::new(),
+            start_from: 1,
+            skip_steps: Vec::new(),
+        }
+    }
+
+    pub fn source_image(mut self, source_image: Option<PathBuf>) -> Self {
+        self.source_image = source_image;
+        self
+    }
+
+    pub fn drive(mut self, drive: String) -> Self {
+        self.drive = drive;
+        self
+    }
+
+    pub fn k3s_token(mut self, k3s_token: String) -> Self {
+        self.k3s_token = k3s_token;
+        self
+    }
+
+    pub fn start_from(mut self, start_from: usize) -> Self {
+        self.start_from = start_from;
+        self
+    }
+
+    pub fn skip_steps(mut self, skip_steps: Vec<usize>) -> Self {
+        self.skip_steps = skip_steps;
+        self
+    }
+
+    pub fn build(self) -> Context {
+        Context {
+            config: self.config,
+            source_image: self.source_image,
+            target_imgref: self.target_imgref,
+            image_version: self.image_version,
+            drive: self.drive,
+            drive_label: String::new(),
+            username: String::new(),
+            user_password: String::new(),
+            user_shell: "/bin/bash".to_string(),
+            keymap: String::new(),
+            locale: String::new(),
+            secure_boot: true,
+            k3s_token: self.k3s_token,
+            last_error: String::new(),
+            start_from: self.start_from,
+            skip_steps: self.skip_steps,
+            parts: DerivedPartitions::default(),
+        }
+    }
 }
 
 pub type StepFn = fn(&mut Runner) -> Result<()>;
@@ -118,6 +195,28 @@ impl StepSelection {
         index >= self.start_index
             && !self.skip_indices.contains(&index)
             && (!step.requires_secure_boot || secure_boot)
+    }
+}
+
+/// Stack of cleanup actions that run in reverse order on drop, even if a
+/// step fails partway through.
+pub(crate) struct CleanupStack(Vec<Box<dyn FnOnce()>>);
+
+impl CleanupStack {
+    pub(crate) fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    pub(crate) fn push(&mut self, f: impl FnOnce() + 'static) {
+        self.0.push(Box::new(f));
+    }
+}
+
+impl Drop for CleanupStack {
+    fn drop(&mut self) {
+        for f in self.0.drain(..).rev() {
+            f();
+        }
     }
 }
 
@@ -179,31 +278,6 @@ const CHROOT_BIND_MOUNTS: &[(&str, &str)] = &[
 
 const TARGET_MOUNTS: &[&str] = &[TARGET_HOME_MOUNT, TARGET_EFI_MOUNT, TARGET_MOUNT];
 
-/// Decode the octal escape sequences (`\NNN`) that `/proc/self/mountinfo`
-/// uses for spaces and other special characters in mount paths.
-fn decode_mountinfo_path(path: &str) -> String {
-    let mut out = String::new();
-    let mut chars = path.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            let octal: String = chars.by_ref().take(3).collect();
-            if octal.len() == 3 {
-                if let Ok(value) = u8::from_str_radix(&octal, 8) {
-                    out.push(value as char);
-                    continue;
-                }
-            }
-            out.push('\\');
-            out.push_str(&octal);
-        } else {
-            out.push(c);
-        }
-    }
-
-    out
-}
-
 fn mounted_target_points() -> Vec<String> {
     let mut points = Vec::new();
     let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") else {
@@ -214,7 +288,7 @@ fn mounted_target_points() -> Vec<String> {
         let Some(mount_point) = line.split_whitespace().nth(4) else {
             continue;
         };
-        let mount_point = decode_mountinfo_path(mount_point);
+        let mount_point = crate::engine::util::decode_mountinfo_path(mount_point);
         if mount_point == TARGET_MOUNT
             || mount_point.starts_with(&format!("{TARGET_MOUNT}/"))
             || mount_point == BOOTC_VAR_TMP
@@ -295,7 +369,7 @@ pub fn merge_fstab(existing: &str, efi_uuid: &str, home_uuid: &str) -> String {
     result
 }
 
-pub fn install_kernel_args(root_uuid: &str, config: &crate::config::Config) -> Vec<String> {
+pub fn install_kernel_args(root_uuid: &str, config: &crate::engine::config::Config) -> Vec<String> {
     let machine = std::env::consts::ARCH;
     let mut args = vec![
         format!("root=UUID={root_uuid}"),
