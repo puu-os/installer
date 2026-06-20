@@ -3,6 +3,8 @@
 
 # puu-installer
 
+![Puu installing bootc image](screenshot.png "Puu installing bootc image")
+
 Standalone installer for bootc-based OSs.
 
 ## Configuration
