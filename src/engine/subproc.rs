@@ -201,6 +201,9 @@ impl<'a> Cmd<'a> {
                 Ok(line) => {
                     let line = crate::engine::util::clean_log_line(&line);
                     if !line.is_empty() {
+                        if let Some((source, _)) = self.tracker.as_mut() {
+                            source.observe_line(&line);
+                        }
                         push_tail(&mut output_tail, line.clone());
                         (self.log)(line);
                     }
