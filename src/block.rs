@@ -4,15 +4,14 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 pub struct Device {
     pub path: String,
     pub model: String,
     pub size: String,
     pub transport: String,
-    pub busy: bool,
-    pub busy_reason: String,
+    pub busy_reason: Option<String>,
 }
 
 /// Why a disk is unavailable as an install target.
@@ -181,21 +180,100 @@ pub fn list_disks() -> Result<Vec<Device>> {
             |p| p.to_string_lossy().into_owned(),
         );
 
-        let (busy, busy_reason) = match disk_busy(&path) {
-            Some(reason) => (true, busy_reason_text(&reason)),
-            None => (false, String::new()),
-        };
-
         disks.push(Device {
             model: disk_model(&dev),
             size: disk_size(&dev),
             transport: disk_transport(&dev, &sysname),
-            busy,
-            busy_reason,
+            busy_reason: disk_busy(&path).as_ref().map(busy_reason_text),
             path,
         });
     }
 
     disks.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(disks)
+}
+
+pub(crate) fn probe_value(device: &str, partitions: bool, key: &str) -> Result<String> {
+    let probe = blkid::prober::Prober::new_from_filename(device)
+        .map_err(|e| anyhow::anyhow!("failed to probe {device}: {e}"))?;
+    if partitions {
+        probe
+            .enable_partitions(true)
+            .map_err(|e| anyhow::anyhow!("failed to enable partition probing for {device}: {e}"))?;
+    }
+    probe
+        .do_safe_probe()
+        .map_err(|e| anyhow::anyhow!("failed to probe {device}: {e}"))?;
+    Ok(probe
+        .lookup_value(key)
+        .unwrap_or_default()
+        .trim()
+        .to_string())
+}
+
+pub fn capture_uuid(device: &str) -> Result<String> {
+    let uuid = probe_value(device, false, "UUID")?;
+    if uuid.is_empty() {
+        bail!("unable to determine UUID for {device}");
+    }
+    Ok(uuid)
+}
+
+pub fn capture_partuuid(device: &str) -> Result<String> {
+    let partuuid = probe_value(device, true, "PART_ENTRY_UUID")?;
+    if !partuuid.is_empty() {
+        return Ok(partuuid);
+    }
+
+    let partuuid = probe_value(device, false, "PARTUUID")?;
+    if !partuuid.is_empty() {
+        return Ok(partuuid);
+    }
+
+    let name = Path::new(device)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid partition device '{device}'"))?;
+    let uevent = std::fs::read_to_string(format!("/sys/class/block/{name}/uevent"));
+    if let Ok(uevent) = uevent {
+        for line in uevent.lines() {
+            if let Some(partuuid) = line.strip_prefix("PARTUUID=") {
+                return Ok(partuuid.to_string());
+            }
+        }
+    }
+
+    let device_path = std::fs::canonicalize(device)
+        .map_err(|e| anyhow::anyhow!("failed to canonicalize {device}: {e}"))?;
+    for entry in std::fs::read_dir("/dev/disk/by-partuuid")
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let entry_path = entry.path();
+        let target = std::fs::canonicalize(&entry_path);
+        if target.as_ref().ok() != Some(&device_path) {
+            continue;
+        }
+
+        if let Some(partuuid) = entry_path.file_name().and_then(|name| name.to_str()) {
+            return Ok(partuuid.to_string());
+        }
+    }
+
+    bail!("unable to determine PARTUUID for {device}");
+}
+
+pub fn drive_size_bytes(drive: &str) -> Result<u64> {
+    // `/sys/class/block/<name>/size` is always expressed in 512-byte sectors.
+    let name = Path::new(drive)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid drive path '{drive}'"))?;
+    let sysfs = format!("/sys/class/block/{name}/size");
+    let sectors: u64 = std::fs::read_to_string(&sysfs)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("unable to determine size of target drive '{drive}'"))?;
+    Ok(sectors * 512)
 }

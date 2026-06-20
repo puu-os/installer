@@ -10,6 +10,8 @@ use efivar::boot::{
     BootEntry, BootEntryAttributes, EFIHardDrive, EFIHardDriveType, FilePath, FilePathList,
 };
 
+use crate::image;
+use crate::partition;
 use crate::pipeline::{
     self, BOOTC_IMAGE_STORAGE, BOOTC_RUNROOT, BOOTC_STORAGE_MOUNT, BOOTC_VAR_TMP,
     CONTAINERS_RUNROOT, DEPENDENCIES, Runner, Step, TARGET_EFI_MOUNT, TARGET_HOME_MOUNT,
@@ -92,8 +94,8 @@ fn step_validate_drive(r: &mut Runner) -> Result<()> {
         None => {}
     }
 
-    let size_b = pipeline::drive_size_bytes(&drive)?;
-    let min = pipeline::min_target_size_bytes(&r.ctx.config)?;
+    let size_b = crate::block::drive_size_bytes(&drive)?;
+    let min = partition::min_target_size_bytes(&r.ctx.config)?;
     if size_b < min {
         bail!(
             "'{drive}' is too small: {} detected, need at least {} for EFI, \
@@ -103,7 +105,7 @@ fn step_validate_drive(r: &mut Runner) -> Result<()> {
         );
     }
 
-    r.ctx.parts = pipeline::derive_partitions(&drive);
+    r.ctx.parts = partition::derive_partitions(&drive);
 
     r.log(&format!(
         "target {drive} ({}; {}, {}, {})",
@@ -119,7 +121,7 @@ fn step_partition(r: &mut Runner) -> Result<()> {
     let drive = r.ctx.drive.clone();
     let efi = r.ctx.config.partitions.efi.clone();
     let home = r.ctx.config.partitions.home.clone();
-    r.ctx.parts.layout = Some(pipeline::partition_drive(r, &drive, &efi, &home)?);
+    r.ctx.parts.layout = Some(partition::partition_drive(r, &drive, &efi, &home)?);
     if crate::util::which_exists("blockdev") {
         let _ = r.cmd(&["blockdev", "--rereadpt", &drive]).run();
     }
@@ -136,16 +138,66 @@ fn step_partition(r: &mut Runner) -> Result<()> {
 fn step_format_efi(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.efi_part.clone();
     pipeline::wait_for_block_device(r, &part)?;
-    r.cmd(&["mkfs.fat", "-F32", "-n", "EFI", &part]).run()?;
-    r.ctx.parts.efi_uuid = pipeline::capture_partuuid(&part)?;
+    r.log(&format!("formatting {part} as FAT32 (label EFI)"));
+    format_efi_fat(&part)?;
+    r.ctx.parts.efi_uuid = crate::block::capture_partuuid(&part)?;
+    Ok(())
+}
+
+/// Write a fresh FAT32 filesystem to `part` natively with the `fatfs` crate,
+/// replacing `mkfs.fat -F32 -n EFI`. The disk size is taken from the device
+/// itself, and the partition is always freshly created here.
+fn format_efi_fat(part: &str) -> Result<()> {
+    let mut label = [b' '; 11];
+    label[..3].copy_from_slice(b"EFI");
+    let mut volume_id = [0u8; 4];
+    openssl::rand::rand_bytes(&mut volume_id)?;
+
+    let mut device = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(part)
+        .map_err(|e| anyhow::anyhow!("failed to open {part}: {e}"))?;
+    let options = fatfs::FormatVolumeOptions::new()
+        .fat_type(fatfs::FatType::Fat32)
+        .volume_id(u32::from_le_bytes(volume_id))
+        .volume_label(label);
+    fatfs::format_volume(&mut device, options)
+        .map_err(|e| anyhow::anyhow!("failed to write FAT32 filesystem to {part}: {e}"))?;
+    device.sync_all()?;
     Ok(())
 }
 
 fn step_format_root(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.root_part.clone();
     pipeline::wait_for_block_device(r, &part)?;
-    r.cmd(&["mkfs.xfs", "-f", "-L", "puu-root", &part]).run()?;
-    r.ctx.parts.root_uuid = pipeline::capture_uuid(&part)?;
+    r.log(&format!("formatting {part} as XFS (label puu-root)"));
+    format_root_xfs(&part)?;
+    r.ctx.parts.root_uuid = crate::block::capture_uuid(&part)?;
+    Ok(())
+}
+
+/// Write a fresh XFS filesystem to `part` natively with the `mkfs-xfs` crate,
+/// replacing `mkfs.xfs -f -L puu-root`. The partition is always freshly
+/// created here, so overwriting it unconditionally matches `mkfs.xfs -f`.
+fn format_root_xfs(part: &str) -> Result<()> {
+    let mut uuid = [0u8; 16];
+    openssl::rand::rand_bytes(&mut uuid)?;
+
+    let mut options = mkfs_xfs::FormatOptions::from_target(part, uuid)
+        .map_err(|e| anyhow::anyhow!("failed to inspect {part} for XFS formatting: {e}"))?;
+    options.label = Some("puu-root".into());
+
+    let plan = mkfs_xfs::FormatPlan::new(options)
+        .map_err(|e| anyhow::anyhow!("invalid XFS geometry for {part}: {e}"))?;
+
+    let mut device = std::fs::OpenOptions::new()
+        .write(true)
+        .open(part)
+        .map_err(|e| anyhow::anyhow!("failed to open {part}: {e}"))?;
+    mkfs_xfs::image::write_plan_to(&plan, &mut device)
+        .map_err(|e| anyhow::anyhow!("failed to write XFS metadata to {part}: {e}"))?;
+    device.sync_all()?;
     Ok(())
 }
 
@@ -156,7 +208,7 @@ fn step_format_home(r: &mut Runner) -> Result<()> {
         "mke2fs", "-t", "ext4", "-O", "encrypt", "-F", "-L", "puu-home", &part,
     ])
     .run()?;
-    r.ctx.parts.home_uuid = pipeline::capture_uuid(&part)?;
+    r.ctx.parts.home_uuid = crate::block::capture_uuid(&part)?;
     Ok(())
 }
 
@@ -186,11 +238,11 @@ fn step_mount_home(r: &mut Runner) -> Result<()> {
 fn step_bootc_install(r: &mut Runner) -> Result<()> {
     let source_image = r.ctx.source_image.clone();
     let source_image = if source_image.is_none() {
-        let default = pipeline::default_source_image(&r.ctx.config);
+        let default = image::default_source_image(&r.ctx.config);
         r.ctx.source_image.clone_from(&default);
         if let Some(ref img) = default {
-            r.ctx.target_imgref = pipeline::load_target_imgref(Some(img), &r.ctx.config);
-            r.ctx.image_version = pipeline::load_image_version(Some(img));
+            r.ctx.target_imgref = image::load_target_imgref(Some(img), &r.ctx.config);
+            r.ctx.image_version = image::load_image_version(Some(img));
             r.log(&format!(
                 "using local bootc image source: {}",
                 img.display()
@@ -201,7 +253,7 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
         source_image
     };
 
-    if source_image.is_none() && !pipeline::running_in_container() {
+    if source_image.is_none() && !image::running_in_container() {
         bail!(
             "no local bootc source image found; expected \
              /dev/disk/by-label/{}",
@@ -252,7 +304,7 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
 
         if let Some(ref src) = source_image {
             argv.push("--source-imgref".into());
-            argv.push(pipeline::image_source_ref(src));
+            argv.push(image::image_source_ref(src));
         }
 
         argv.extend([
@@ -370,7 +422,7 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
         r.log("using running bootc image as install source");
         return Ok(());
     };
-    let manifest = pipeline::image_manifest_metadata(&src);
+    let manifest = image::image_manifest_metadata(&src);
     if manifest.is_null() {
         r.log("no image manifest found, skipping digest verification");
         return Ok(());
@@ -548,7 +600,7 @@ fn step_stage_homed_identity(r: &mut Runner) -> Result<()> {
         bail!("password must not contain newline characters");
     }
 
-    let hashed = pipeline::hash_password_sha512(&r.ctx.user_password)?;
+    let hashed = crate::passwd::hash_password_sha512(&r.ctx.user_password)?;
 
     let identity = serde_json::json!({
         "userName": name,
@@ -643,7 +695,7 @@ fn step_nvram(r: &mut Runner) -> Result<()> {
     std::fs::copy(&source, &fallback_target)?;
 
     if r.ctx.parts.layout.is_none() {
-        r.ctx.parts.layout = Some(pipeline::load_partition_layout(&r.ctx.drive)?);
+        r.ctx.parts.layout = Some(partition::load_partition_layout(&r.ctx.drive)?);
     }
     let layout = r
         .ctx
@@ -782,9 +834,9 @@ fn step_stage_esp_boot(r: &mut Runner) -> Result<()> {
 }
 
 fn step_secureboot(r: &mut Runner) -> Result<()> {
-    pipeline::ensure_sbctl_keys(r)?;
-    let keydir = pipeline::sbctl_keydir();
-    let owner = pipeline::sbctl_owner_guid();
+    crate::secureboot::ensure_sbctl_keys(&mut r.log)?;
+    let keydir = crate::secureboot::sbctl_keydir();
+    let owner = crate::secureboot::sbctl_owner_guid();
     match crate::secureboot::enroll_keys(&keydir, &owner) {
         Ok(()) => {
             r.log("enrolled Secure Boot PK/KEK/db keys");
@@ -803,12 +855,12 @@ fn step_secureboot(r: &mut Runner) -> Result<()> {
 }
 
 fn step_sign(r: &mut Runner) -> Result<()> {
-    pipeline::ensure_sbctl_keys(r)?;
-    let efi_binaries = pipeline::target_efi_binaries();
+    crate::secureboot::ensure_sbctl_keys(&mut r.log)?;
+    let efi_binaries = crate::secureboot::target_efi_binaries();
     if efi_binaries.is_empty() {
         bail!("no EFI binaries found under {TARGET_EFI_MOUNT}");
     }
-    let keydir = pipeline::sbctl_keydir();
+    let keydir = crate::secureboot::sbctl_keydir();
     let db_key = std::fs::read_to_string(keydir.join("db/db.key"))?;
     let db_cert = std::fs::read_to_string(keydir.join("db/db.pem"))?;
 
@@ -845,139 +897,137 @@ fn step_final_cleanup(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
-pub static STEPS: std::sync::LazyLock<Vec<Step>> = std::sync::LazyLock::new(|| {
-    vec![
-        Step {
-            title: "Verify dependencies",
-            fn_: step_dependencies,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Verify Secure Boot setup",
-            fn_: step_setup_mode,
-            point_of_no_return: false,
-            requires_secure_boot: true,
-        },
-        Step {
-            title: "Clean up previous mounts",
-            fn_: step_cleanup,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Validate target drive",
-            fn_: step_validate_drive,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Verify image integrity",
-            fn_: step_verify_image,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Partition drive",
-            fn_: step_partition,
-            point_of_no_return: true,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Format EFI partition",
-            fn_: step_format_efi,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Format root filesystem",
-            fn_: step_format_root,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Format home filesystem",
-            fn_: step_format_home,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Mount target filesystems",
-            fn_: step_mount,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Install bootc image",
-            fn_: step_bootc_install,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Mount home filesystem",
-            fn_: step_mount_home,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Configure persistent mounts",
-            fn_: step_configure_mounts,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Configure firstboot identity",
-            fn_: step_firstboot,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Configure k3s cluster",
-            fn_: step_configure_k3s_cluster,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Stage homed user identity",
-            fn_: step_stage_homed_identity,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Pre-stage Flatpak refs",
-            fn_: step_flatpak_seed,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Manage NVRAM boot entry",
-            fn_: step_nvram,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Stage ESP boot files",
-            fn_: step_stage_esp_boot,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-        Step {
-            title: "Sign EFI binaries",
-            fn_: step_sign,
-            point_of_no_return: false,
-            requires_secure_boot: true,
-        },
-        Step {
-            title: "Enroll Secure Boot keys",
-            fn_: step_secureboot,
-            point_of_no_return: false,
-            requires_secure_boot: true,
-        },
-        Step {
-            title: "Unmount target filesystems",
-            fn_: step_final_cleanup,
-            point_of_no_return: false,
-            requires_secure_boot: false,
-        },
-    ]
-});
+pub static STEPS: &[Step] = &[
+    Step {
+        title: "Verify dependencies",
+        fn_: step_dependencies,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Verify Secure Boot setup",
+        fn_: step_setup_mode,
+        point_of_no_return: false,
+        requires_secure_boot: true,
+    },
+    Step {
+        title: "Clean up previous mounts",
+        fn_: step_cleanup,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Validate target drive",
+        fn_: step_validate_drive,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Verify image integrity",
+        fn_: step_verify_image,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Partition drive",
+        fn_: step_partition,
+        point_of_no_return: true,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Format EFI partition",
+        fn_: step_format_efi,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Format root filesystem",
+        fn_: step_format_root,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Format home filesystem",
+        fn_: step_format_home,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Mount target filesystems",
+        fn_: step_mount,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Install bootc image",
+        fn_: step_bootc_install,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Mount home filesystem",
+        fn_: step_mount_home,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Configure persistent mounts",
+        fn_: step_configure_mounts,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Configure firstboot identity",
+        fn_: step_firstboot,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Configure k3s cluster",
+        fn_: step_configure_k3s_cluster,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Stage homed user identity",
+        fn_: step_stage_homed_identity,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Pre-stage Flatpak refs",
+        fn_: step_flatpak_seed,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Manage NVRAM boot entry",
+        fn_: step_nvram,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Stage ESP boot files",
+        fn_: step_stage_esp_boot,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+    Step {
+        title: "Sign EFI binaries",
+        fn_: step_sign,
+        point_of_no_return: false,
+        requires_secure_boot: true,
+    },
+    Step {
+        title: "Enroll Secure Boot keys",
+        fn_: step_secureboot,
+        point_of_no_return: false,
+        requires_secure_boot: true,
+    },
+    Step {
+        title: "Unmount target filesystems",
+        fn_: step_final_cleanup,
+        point_of_no_return: false,
+        requires_secure_boot: false,
+    },
+];

@@ -13,6 +13,9 @@ mod app;
 mod block;
 mod config;
 mod firmware;
+mod image;
+mod partition;
+mod passwd;
 mod pipeline;
 mod screens;
 mod secureboot;
@@ -100,10 +103,10 @@ fn main() -> Result<()> {
 
     let source_image = match args.source_image {
         Some(p) => Some(p),
-        None => pipeline::default_source_image(&cfg),
+        None => image::default_source_image(&cfg),
     };
 
-    if source_image.is_none() && !pipeline::running_in_container() {
+    if source_image.is_none() && !image::running_in_container() {
         eprintln!(
             "no local bootc source image found; expected \
              /dev/disk/by-label/{} or --source-image.",
@@ -141,8 +144,8 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let target_imgref = pipeline::load_target_imgref(source_image.as_deref(), &cfg);
-    let image_version = pipeline::load_image_version(source_image.as_deref());
+    let target_imgref = image::load_target_imgref(source_image.as_deref(), &cfg);
+    let image_version = image::load_image_version(source_image.as_deref());
 
     let ctx = Context {
         config: cfg,
@@ -161,7 +164,7 @@ fn main() -> Result<()> {
         last_error: String::new(),
         start_from: args.start_from,
         skip_steps,
-        parts: pipeline::DerivedPartitions::default(),
+        parts: partition::DerivedPartitions::default(),
     };
 
     let mut app = Installer::new(ctx);

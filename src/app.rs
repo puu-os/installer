@@ -83,7 +83,7 @@ impl InstallTask {
         let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
 
         let mut pipeline_ctx = ctx.clone();
-        pipeline_ctx.parts = pipeline::DerivedPartitions::default();
+        pipeline_ctx.parts = crate::partition::DerivedPartitions::default();
         let skip = skip_indices.to_vec();
 
         let thread = std::thread::spawn(move || {
@@ -108,7 +108,7 @@ impl InstallTask {
                 step_index: 0,
             };
 
-            let steps = &*pipeline::STEPS;
+            let steps = pipeline::STEPS;
             let selection = StepSelection {
                 start_index,
                 skip_indices: skip,

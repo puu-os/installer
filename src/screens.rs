@@ -544,7 +544,11 @@ impl Installer {
                     .enumerate()
                 {
                     let idx = top + row;
-                    let status_text = if dev.busy { "BUSY" } else { "available" };
+                    let status_text = if dev.busy_reason.is_some() {
+                        "BUSY"
+                    } else {
+                        "available"
+                    };
                     let marker = if idx == selected { ">" } else { " " };
                     let style = highlight_style(idx == selected);
                     let model: String = dev.model.chars().take(20).collect();
@@ -593,8 +597,8 @@ impl Installer {
                             continue;
                         }
                         let dev = &devices[selected];
-                        if dev.busy {
-                            status = format!("{} is busy: {}", dev.path, dev.busy_reason);
+                        if let Some(reason) = &dev.busy_reason {
+                            status = format!("{} is busy: {reason}", dev.path);
                             continue;
                         }
                         self.ctx.drive.clone_from(&dev.path);
@@ -1018,7 +1022,7 @@ impl Installer {
         &mut self,
         term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> ScreenAction {
-        let steps = &*pipeline::STEPS;
+        let steps = pipeline::STEPS;
         let start_index = (self.ctx.start_from).saturating_sub(1);
         let skip_indices: Vec<usize> = self
             .ctx
