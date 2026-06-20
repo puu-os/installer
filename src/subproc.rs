@@ -2,13 +2,14 @@
 // Copyright (C) Opinsys Oy 2026
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Write};
+use std::ffi::CString;
+use std::io::{self, BufRead, BufReader};
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use duct::Expression;
 
 /// Options whose next value must be redacted in log output.
 const SECRET_OPTIONS: &[&str] = &["--password", "--passphrase", "--secret", "--token"];
@@ -54,176 +55,157 @@ fn push_tail(tail: &mut VecDeque<String>, line: String) {
     tail.push_back(line);
 }
 
-/// Build a Command that creates a new session and merges stderr into stdout.
-/// When `chroot_dir` is set, the child chroots into it before exec, replacing
-/// the external `chroot` helper.
-fn build_streaming_command(
+/// Build a duct expression that creates a new session and merges stderr into
+/// stdout. When `chroot_dir` is set, the child chroots into it before exec,
+/// replacing the external `chroot` helper. The expression is `unchecked`, so a
+/// non-zero exit is reported as a code rather than an error.
+fn build_expression(
     argv: &[String],
     env: Option<&[(String, String)]>,
-    cwd: Option<&str>,
-    has_stdin: bool,
     chroot_dir: Option<&str>,
-) -> Result<Command> {
-    let mut command = Command::new(&argv[0]);
-    command.args(&argv[1..]).stdout(Stdio::piped());
+) -> Expression {
+    let mut expr = duct::cmd(&argv[0], &argv[1..])
+        .stderr_to_stdout()
+        .stdin_null()
+        .unchecked();
 
-    if has_stdin {
-        command.stdin(Stdio::piped());
-    } else {
-        command.stdin(Stdio::null());
-    }
-
-    if let Some(dir) = cwd {
-        command.current_dir(dir);
-    }
     if let Some(pairs) = env {
         for (k, v) in pairs {
-            command.env(k, v);
+            expr = expr.env(k, v);
         }
     }
 
-    let chroot_c = chroot_dir
-        .map(std::ffi::CString::new)
-        .transpose()
-        .context("chroot path contains an interior NUL")?;
+    let chroot_dir = chroot_dir.map(str::to_string);
+    expr.before_spawn(move |command| {
+        let chroot_c = chroot_dir
+            .as_deref()
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| io::Error::other("chroot path contains an interior NUL"))?;
 
-    // chroot (if requested), then setsid + dup2(stdout→stderr) for one merged stream.
-    unsafe {
-        command.pre_exec(move || {
-            if let Some(ref dir) = chroot_c {
-                if libc::chroot(dir.as_ptr()) != 0 {
-                    return Err(std::io::Error::last_os_error());
+        // chroot (if requested), then setsid to start a new session.
+        unsafe {
+            command.pre_exec(move || {
+                if let Some(ref dir) = chroot_c {
+                    if libc::chroot(dir.as_ptr()) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if libc::chdir(c"/".as_ptr()) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
                 }
-                if libc::chdir(c"/".as_ptr()) != 0 {
-                    return Err(std::io::Error::last_os_error());
+                libc::setsid();
+                Ok(())
+            });
+        }
+        Ok(())
+    })
+}
+
+/// A subprocess invocation built from [`crate::pipeline::Runner::cmd`]. Merged
+/// stdout+stderr is streamed to the log; a non-zero exit becomes an error.
+pub struct Cmd<'a> {
+    log: &'a mut LogFn,
+    argv: Vec<String>,
+    env: Option<&'a [(String, String)]>,
+    heartbeat: Option<(Duration, &'a str)>,
+    chroot_dir: Option<&'a str>,
+}
+
+impl<'a> Cmd<'a> {
+    pub fn new(log: &'a mut LogFn, argv: Vec<String>) -> Self {
+        Cmd {
+            log,
+            argv,
+            env: None,
+            heartbeat: None,
+            chroot_dir: None,
+        }
+    }
+
+    /// Run with the given environment variables set for the child.
+    #[must_use]
+    pub fn env(mut self, env: &'a [(String, String)]) -> Self {
+        self.env = Some(env);
+        self
+    }
+
+    /// Emit `msg` to the log every `interval` while the command runs.
+    #[must_use]
+    pub fn heartbeat(mut self, interval: Duration, msg: &'a str) -> Self {
+        self.heartbeat = Some((interval, msg));
+        self
+    }
+
+    /// Chroot into `dir` before exec, replacing the external `chroot` helper.
+    #[must_use]
+    pub fn chroot(mut self, dir: &'a str) -> Self {
+        self.chroot_dir = Some(dir);
+        self
+    }
+
+    /// Run the command, streaming merged stdout+stderr line-by-line to the log
+    /// callback, and raise an error if the exit code is non-zero. The child
+    /// chroots into `chroot_dir` before exec when it is set.
+    pub fn run(self) -> Result<()> {
+        let display = format_argv(&self.argv);
+        (self.log)(format!("$ {display}"));
+
+        let reader = build_expression(&self.argv, self.env, self.chroot_dir)
+            .reader()
+            .with_context(|| format!("failed to spawn {}", self.argv[0]))?;
+        let (tx, rx) = mpsc::channel::<String>();
+
+        let reader_thread = std::thread::spawn(move || -> i32 {
+            for line in BufReader::new(&reader)
+                .lines()
+                .map_while(std::result::Result::ok)
+            {
+                if tx.send(line).is_err() {
+                    break;
                 }
             }
-            libc::setsid();
-            libc::dup2(1, 2);
-            Ok(())
+            // The read above ran to EOF, so the child has been reaped and
+            // `try_wait` is guaranteed to report its exit status.
+            match reader.try_wait() {
+                Ok(Some(output)) => output.status.code().unwrap_or(-1),
+                _ => -1,
+            }
         });
-    }
 
-    Ok(command)
-}
+        let started = Instant::now();
+        let mut last_heartbeat = Instant::now();
+        let mut output_tail = VecDeque::new();
 
-/// Run a command, streaming merged stdout+stderr line-by-line to the log
-/// callback. Returns the exit code and a tail of command output.
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    argv: &[String],
-    log: &mut LogFn,
-    stdin_data: Option<&[u8]>,
-    env: Option<&[(String, String)]>,
-    cwd: Option<&str>,
-    heartbeat_interval: Option<Duration>,
-    heartbeat_msg: Option<&str>,
-    chroot_dir: Option<&str>,
-) -> Result<(i32, Vec<String>)> {
-    let display = format_argv(argv);
-    (log)(format!("$ {display}"));
-
-    let mut command = build_streaming_command(argv, env, cwd, stdin_data.is_some(), chroot_dir)?;
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("failed to spawn {}", argv[0]))?;
-
-    if let Some(data) = stdin_data {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(data);
-            drop(stdin);
-        }
-    }
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("child process has no stdout"))?;
-    let (tx, rx) = mpsc::channel::<String>();
-
-    let reader_thread = std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(std::result::Result::ok) {
-            if tx.send(line).is_err() {
-                break;
+        loop {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(line) => {
+                    let line = crate::util::clean_log_line(&line);
+                    if !line.is_empty() {
+                        push_tail(&mut output_tail, line.clone());
+                        (self.log)(line);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
-        }
-    });
 
-    let started = Instant::now();
-    let heartbeat_msg = heartbeat_msg.unwrap_or(&display);
-    let mut last_heartbeat = Instant::now();
-    let mut output_tail = VecDeque::new();
-
-    loop {
-        match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(line) => {
-                let line = crate::util::clean_log_line(&line);
-                if !line.is_empty() {
-                    push_tail(&mut output_tail, line.clone());
-                    (log)(line);
+            if let Some((interval, msg)) = self.heartbeat {
+                if last_heartbeat.elapsed() >= interval {
+                    let elapsed = started.elapsed().as_secs();
+                    (self.log)(format!("{msg} ({elapsed}s elapsed)"));
+                    last_heartbeat = Instant::now();
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        if let Some(interval) = heartbeat_interval {
-            if last_heartbeat.elapsed() >= interval {
-                let elapsed = started.elapsed().as_secs();
-                (log)(format!("{heartbeat_msg} ({elapsed}s elapsed)"));
-                last_heartbeat = Instant::now();
+        let rc = reader_thread.join().unwrap_or(-1);
+        if rc != 0 {
+            if let Some(last_line) = output_tail.back() {
+                bail!("command failed (exit {rc}): {last_line}\ncommand: {display}");
             }
+            bail!("command failed (exit {rc}): {display}");
         }
+        Ok(())
     }
-
-    let _ = reader_thread.join();
-    let status = child.wait()?;
-    Ok((
-        status.code().unwrap_or(-1),
-        output_tail.into_iter().collect(),
-    ))
-}
-
-/// Run a command, raising an error if the exit code is non-zero.
-pub fn check(
-    argv: &[String],
-    log: &mut LogFn,
-    env: Option<&[(String, String)]>,
-    cwd: Option<&str>,
-    heartbeat_interval: Option<Duration>,
-    heartbeat_msg: Option<&str>,
-) -> Result<()> {
-    check_chroot(argv, log, env, cwd, heartbeat_interval, heartbeat_msg, None)
-}
-
-/// Like [`check`], but the child chroots into `chroot_dir` before exec.
-#[allow(clippy::too_many_arguments)]
-pub fn check_chroot(
-    argv: &[String],
-    log: &mut LogFn,
-    env: Option<&[(String, String)]>,
-    cwd: Option<&str>,
-    heartbeat_interval: Option<Duration>,
-    heartbeat_msg: Option<&str>,
-    chroot_dir: Option<&str>,
-) -> Result<()> {
-    let (rc, output_tail) = run(
-        argv,
-        log,
-        None,
-        env,
-        cwd,
-        heartbeat_interval,
-        heartbeat_msg,
-        chroot_dir,
-    )?;
-    if rc != 0 {
-        let display = format_argv(argv);
-        if let Some(last_line) = output_tail.last() {
-            bail!("command failed (exit {rc}): {last_line}\ncommand: {display}");
-        }
-        bail!("command failed (exit {rc}): {display}");
-    }
-    Ok(())
 }

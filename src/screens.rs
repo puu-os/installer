@@ -152,13 +152,10 @@ fn keymap_for_locale(locale: &str) -> &str {
         .map_or("us", |(_, k)| *k)
 }
 
-fn network_tool() -> Option<Vec<String>> {
-    for tool in &["nmtui", "nmcli", "iwctl"] {
-        if crate::util::which_exists(tool) {
-            return Some(vec![(*tool).to_string()]);
-        }
-    }
-    None
+fn network_tool() -> Option<&'static str> {
+    ["nmtui", "nmcli", "iwctl"]
+        .into_iter()
+        .find(|&tool| crate::util::which_exists(tool))
 }
 
 /// Handle a terminal I/O Result without panicking: restore terminal and exit cleanly.
@@ -171,6 +168,19 @@ fn tui_or_exit<T>(result: io::Result<T>, ctx: &str) -> T {
             std::process::exit(1);
         }
     }
+}
+
+/// Suspend the TUI, run an interactive command on the real terminal, then
+/// restore the alternate screen and raw mode.
+fn run_on_console(
+    term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    mut command: std::process::Command,
+) {
+    tui_or_exit(terminal::disable_raw_mode(), "disable_raw_mode");
+    let _ = crossterm::execute!(term.backend_mut(), LeaveAlternateScreen);
+    let _ = command.status();
+    tui_or_exit(terminal::enable_raw_mode(), "enable_raw_mode");
+    let _ = crossterm::execute!(term.backend_mut(), EnterAlternateScreen);
 }
 
 /// Validate POSIX username.
@@ -1322,13 +1332,8 @@ impl Installer {
                         }
                         KeyCode::Enter => {
                             if selected == 0 {
-                                tui_or_exit(terminal::disable_raw_mode(), "disable_raw_mode");
-                                crossterm::execute!(term.backend_mut(), LeaveAlternateScreen).ok();
-                                let shell =
-                                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-                                let _ = std::process::Command::new(&shell).status();
-                                tui_or_exit(terminal::enable_raw_mode(), "enable_raw_mode");
-                                crossterm::execute!(term.backend_mut(), EnterAlternateScreen).ok();
+                                let shell = crate::util::default_shell();
+                                run_on_console(term, std::process::Command::new(&shell));
                             } else {
                                 return Trap::Reboot;
                             }
@@ -1342,8 +1347,7 @@ impl Installer {
 
     #[allow(clippy::unused_self)]
     pub(crate) fn run_network(&mut self, term: &mut Terminal<CrosstermBackend<io::Stdout>>) {
-        let tool = network_tool();
-        if tool.is_none() {
+        let Some(tool) = network_tool() else {
             term.draw(|f| {
                 Self::draw_frame(f, "Network", "", "");
                 f.render_widget(
@@ -1359,22 +1363,7 @@ impl Installer {
             .ok();
             let _ = event::read();
             return;
-        }
-        let Some(argv) = tool else {
-            return;
         };
-        tui_or_exit(terminal::disable_raw_mode(), "disable_raw_mode");
-        tui_or_exit(
-            crossterm::execute!(term.backend_mut(), LeaveAlternateScreen),
-            "LeaveAlternateScreen",
-        );
-        let _ = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .status();
-        tui_or_exit(terminal::enable_raw_mode(), "enable_raw_mode");
-        tui_or_exit(
-            crossterm::execute!(term.backend_mut(), EnterAlternateScreen),
-            "EnterAlternateScreen",
-        );
+        run_on_console(term, std::process::Command::new(tool));
     }
 }

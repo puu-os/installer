@@ -174,7 +174,7 @@ fn main() -> Result<()> {
                 bail!("reboot syscall failed");
             }
             app::Trap::Shell => {
-                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                let shell = util::default_shell();
                 let _ = Command::new(&shell).status();
                 app = Installer::new(app.into_context());
             }

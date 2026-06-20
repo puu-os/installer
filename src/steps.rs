@@ -9,7 +9,6 @@ use anyhow::{Context as _, Result, bail};
 use efivar::boot::{
     BootEntry, BootEntryAttributes, EFIHardDrive, EFIHardDriveType, FilePath, FilePathList,
 };
-use sha2::Digest;
 
 use crate::pipeline::{
     self, BOOTC_IMAGE_STORAGE, BOOTC_RUNROOT, BOOTC_STORAGE_MOUNT, BOOTC_VAR_TMP,
@@ -122,10 +121,10 @@ fn step_partition(r: &mut Runner) -> Result<()> {
     let home = r.ctx.config.partitions.home.clone();
     r.ctx.parts.layout = Some(pipeline::partition_drive(r, &drive, &efi, &home)?);
     if crate::util::which_exists("blockdev") {
-        let _ = r.run_cmd(&["blockdev", "--rereadpt", &drive], None, None, None);
+        let _ = r.cmd(&["blockdev", "--rereadpt", &drive]).run();
     }
     if crate::util::which_exists("udevadm") {
-        let _ = r.run_cmd(&["udevadm", "settle", "--timeout=30"], None, None, None);
+        let _ = r.cmd(&["udevadm", "settle", "--timeout=30"]).run();
     }
 
     pipeline::wait_for_block_device(r, &r.ctx.parts.efi_part.clone())?;
@@ -137,7 +136,7 @@ fn step_partition(r: &mut Runner) -> Result<()> {
 fn step_format_efi(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.efi_part.clone();
     pipeline::wait_for_block_device(r, &part)?;
-    r.run_cmd(&["mkfs.fat", "-F32", "-n", "EFI", &part], None, None, None)?;
+    r.cmd(&["mkfs.fat", "-F32", "-n", "EFI", &part]).run()?;
     r.ctx.parts.efi_uuid = pipeline::capture_partuuid(&part)?;
     Ok(())
 }
@@ -145,12 +144,7 @@ fn step_format_efi(r: &mut Runner) -> Result<()> {
 fn step_format_root(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.root_part.clone();
     pipeline::wait_for_block_device(r, &part)?;
-    r.run_cmd(
-        &["mkfs.xfs", "-f", "-L", "puu-root", &part],
-        None,
-        None,
-        None,
-    )?;
+    r.cmd(&["mkfs.xfs", "-f", "-L", "puu-root", &part]).run()?;
     r.ctx.parts.root_uuid = pipeline::capture_uuid(&part)?;
     Ok(())
 }
@@ -158,14 +152,10 @@ fn step_format_root(r: &mut Runner) -> Result<()> {
 fn step_format_home(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.home_part.clone();
     pipeline::wait_for_block_device(r, &part)?;
-    r.run_cmd(
-        &[
-            "mke2fs", "-t", "ext4", "-O", "encrypt", "-F", "-L", "puu-home", &part,
-        ],
-        None,
-        None,
-        None,
-    )?;
+    r.cmd(&[
+        "mke2fs", "-t", "ext4", "-O", "encrypt", "-F", "-L", "puu-home", &part,
+    ])
+    .run()?;
     r.ctx.parts.home_uuid = pipeline::capture_uuid(&part)?;
     Ok(())
 }
@@ -247,7 +237,7 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
             mounted_bootc_tmp_dir = true;
         }
 
-        mounted_bootc_tmp = pipeline::mount_bootc_vartmp(r)?;
+        mounted_bootc_tmp = pipeline::mount_bootc_vartmp()?;
 
         let storage_conf = PathBuf::from("/run/puu-installer/bootc-storage.conf");
         std::fs::write(
@@ -258,17 +248,21 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
             ),
         )?;
 
-        let mut argv: Vec<String> = vec![
-            "bootc".into(),
-            "install".into(),
-            "to-filesystem".into(),
+        let mut argv: Vec<String> = vec!["bootc".into(), "install".into(), "to-filesystem".into()];
+
+        if let Some(ref src) = source_image {
+            argv.push("--source-imgref".into());
+            argv.push(pipeline::image_source_ref(src));
+        }
+
+        argv.extend([
             "--target-imgref".into(),
             r.ctx.target_imgref.clone(),
             "--skip-fetch-check".into(),
             "--bootloader".into(),
             "none".into(),
             "--skip-finalize".into(),
-        ];
+        ]);
 
         for arg in pipeline::install_kernel_args(&r.ctx.parts.root_uuid, &r.ctx.config) {
             argv.push("--karg".into());
@@ -276,16 +270,6 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
         }
 
         argv.push(TARGET_MOUNT.into());
-
-        if let Some(ref src) = source_image {
-            let idx = argv
-                .iter()
-                .position(|a| a == "to-filesystem")
-                .ok_or_else(|| anyhow::anyhow!("bootc argv missing to-filesystem"))?
-                + 1;
-            argv.insert(idx, pipeline::image_source_ref(src));
-            argv.insert(idx, "--source-imgref".into());
-        }
 
         r.log("bootc image deployment may take several minutes without native progress output");
         r.progress(0.05, "Install bootc image");
@@ -297,13 +281,13 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
             ),
             ("TMPDIR".into(), BOOTC_VAR_TMP.into()),
         ];
-        let args_ref: Vec<&str> = argv.iter().map(std::string::String::as_str).collect();
-        r.run_cmd(
-            &args_ref,
-            Some(&env),
-            Some(Duration::from_secs(30)),
-            Some("bootc install still running; deploying image"),
-        )?;
+        r.cmd(&argv)
+            .env(&env)
+            .heartbeat(
+                Duration::from_secs(30),
+                "bootc install still running; deploying image",
+            )
+            .run()?;
 
         Ok(())
     })();
@@ -432,7 +416,7 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
         })?
     };
 
-    let actual = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&raw)));
+    let actual = format!("sha256:{}", hex::encode(openssl::sha::sha256(&raw)));
     if actual != expected {
         bail!("image digest mismatch: expected {expected}, got {actual}");
     }
@@ -547,8 +531,7 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
         argv.push("--node-name".into());
         argv.push(r.ctx.config.k3s.node_name.clone());
     }
-    let args_ref: Vec<&str> = argv.iter().map(std::string::String::as_str).collect();
-    r.run_cmd_chroot(&args_ref, TARGET_MOUNT, None, None)?;
+    r.cmd(&argv).chroot(TARGET_MOUNT).run()?;
     r.log(&format!(
         "k3s cluster: staged {} configuration",
         r.ctx.config.k3s.role
@@ -626,14 +609,17 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
         "flatpak-seed: installing {} system Flatpak refs",
         refs.len()
     ));
-    let mounted = pipeline::mount_chroot_binds(r)?;
-    let result = r.run_cmd_chroot(
-        &[&r.ctx.config.flatpak.sync_helper.clone()],
-        TARGET_MOUNT,
-        Some(Duration::from_secs(30)),
-        Some("flatpak pre-seed still running; downloading apps"),
-    );
-    pipeline::unmount_chroot_binds(r, &mounted)?;
+    let mounted = pipeline::mount_chroot_binds()?;
+    let sync_helper = r.ctx.config.flatpak.sync_helper.clone();
+    let result = r
+        .cmd(&[sync_helper])
+        .chroot(TARGET_MOUNT)
+        .heartbeat(
+            Duration::from_secs(30),
+            "flatpak pre-seed still running; downloading apps",
+        )
+        .run();
+    pipeline::unmount_chroot_binds(&mounted)?;
     result?;
     r.log(
         "flatpak-seed: system Flatpaks installed; system flatpak-sync.timer \

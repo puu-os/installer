@@ -66,6 +66,10 @@ fn send_log(
     let _ = tx.send(TaskEvent::Log(line.to_string()));
 }
 
+fn make_log(tx: mpsc::Sender<TaskEvent>, log_file: Arc<Mutex<Option<std::fs::File>>>) -> LogFn {
+    Box::new(move |line: String| send_log(&tx, &log_file, &line))
+}
+
 pub struct InstallTask {
     pub events_rx: mpsc::Receiver<TaskEvent>,
     cancel_tx: mpsc::Sender<()>,
@@ -84,11 +88,7 @@ impl InstallTask {
 
         let thread = std::thread::spawn(move || {
             let log_file = Arc::new(Mutex::new(open_install_log()));
-            let log: LogFn = {
-                let tx = events_tx.clone();
-                let log_file = log_file.clone();
-                Box::new(move |line: String| send_log(&tx, &log_file, &line))
-            };
+            let log = make_log(events_tx.clone(), log_file.clone());
 
             let progress: ProgressCb = {
                 let tx = events_tx.clone();
@@ -115,9 +115,7 @@ impl InstallTask {
             };
 
             let fail = |at: usize, error: String| {
-                let tx = events_tx.clone();
-                let log_file = log_file.clone();
-                let mut log: LogFn = Box::new(move |line: String| send_log(&tx, &log_file, &line));
+                let mut log = make_log(events_tx.clone(), log_file.clone());
                 pipeline::rollback(&mut log);
                 let _ = events_tx.send(TaskEvent::Failed { at, error });
             };
@@ -208,7 +206,7 @@ impl Installer {
     }
 
     pub fn run(&mut self) -> Trap {
-        Self::tui_enable();
+        let _ = terminal::enable_raw_mode();
         let _console_log_level = ConsoleLogLevelGuard::quiet();
         let backend = CrosstermBackend::new(stdout());
         let mut terminal = Terminal::new(backend).unwrap_or_else(|e| {
@@ -221,17 +219,9 @@ impl Installer {
 
         let result = self.run_screens(&mut terminal);
 
-        Self::tui_disable();
+        let _ = terminal::disable_raw_mode();
         let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
         result
-    }
-
-    fn tui_enable() {
-        let _ = terminal::enable_raw_mode();
-    }
-
-    fn tui_disable() {
-        let _ = terminal::disable_raw_mode();
     }
 
     fn run_screens(&mut self, term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Trap {

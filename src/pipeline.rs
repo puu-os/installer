@@ -24,14 +24,6 @@ pub type ProgressCb = Box<dyn FnMut(usize, &str, f64) + Send>;
 
 const MANIFEST_FILENAME: &str = "image.manifest";
 
-pub fn default_source_image_path(config: &crate::config::Config) -> PathBuf {
-    PathBuf::from(&config.image.source_mount).join("image.tar")
-}
-
-pub fn default_source_mount(config: &crate::config::Config) -> PathBuf {
-    PathBuf::from(&config.image.source_mount)
-}
-
 pub const BOOTC_STORAGE_MOUNT: &str = "/run/puu-installer/target/var/tmp/puu-bootc-storage";
 pub const BOOTC_IMAGE_STORAGE: &str =
     "/run/puu-installer/target/var/tmp/puu-bootc-storage/containers/storage";
@@ -123,15 +115,148 @@ pub fn unmount(target: &str) -> Result<()> {
     nix::mount::umount(target).map_err(|e| anyhow::anyhow!("failed to unmount {target}: {e}"))
 }
 
+/// crypt(3) base64 alphabet (`./0-9A-Za-z`), used for both the salt and the
+/// encoded digest of a `$6$` hash.
+const CRYPT_B64: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
 /// Produce a `$6$` SHA-512 crypt hash, replacing `openssl passwd -6 -stdin`.
+///
+/// Implements Ulrich Drepper's SHA-512 crypt scheme on top of OpenSSL's
+/// SHA-512 primitive so that the only cryptographic backend is libcrypto.
 pub fn hash_password_sha512(password: &str) -> Result<String> {
-    use sha_crypt::{PasswordHasher, ShaCrypt};
-    // 12 raw bytes encode to a 16-character crypt salt, matching `openssl passwd`.
-    let salt = random_bytes::<12>()?;
-    let hash = ShaCrypt::SHA512
-        .hash_password_with_salt(password.as_bytes(), &salt)
-        .map_err(|e| anyhow::anyhow!("failed to hash password: {e}"))?;
-    Ok(hash.to_string())
+    // A random 16-character salt drawn from the crypt alphabet, as emitted by
+    // `openssl passwd -6`. The alphabet is ASCII, so each byte is its own char.
+    let salt: String = random_bytes::<16>()?
+        .iter()
+        .map(|b| CRYPT_B64[(b & 0x3f) as usize] as char)
+        .collect();
+    let hash = sha512_crypt(password.as_bytes(), salt.as_bytes());
+    Ok(format!("$6${salt}${hash}"))
+}
+
+/// SHA-512 crypt with the default 5000 rounds, returning the encoded digest
+/// (the trailing `$6$<salt>$` field).
+fn sha512_crypt(key: &[u8], salt: &[u8]) -> String {
+    use openssl::sha::Sha512;
+
+    const ROUNDS: usize = 5000;
+
+    // Digest B = SHA512(key || salt || key).
+    let mut temp_ctx = Sha512::new();
+    temp_ctx.update(key);
+    temp_ctx.update(salt);
+    temp_ctx.update(key);
+    let temp_result = temp_ctx.finish();
+
+    // Digest A = SHA512(key || salt || B-extended-to-keylen || pattern-of(keylen)).
+    let mut alt_ctx = Sha512::new();
+    alt_ctx.update(key);
+    alt_ctx.update(salt);
+    let mut count = key.len();
+    while count > 64 {
+        alt_ctx.update(&temp_result);
+        count -= 64;
+    }
+    alt_ctx.update(&temp_result[..count]);
+    let mut bits = key.len();
+    while bits > 0 {
+        if bits & 1 != 0 {
+            alt_ctx.update(&temp_result);
+        } else {
+            alt_ctx.update(key);
+        }
+        bits >>= 1;
+    }
+    let mut alt_result = alt_ctx.finish();
+
+    // Sequence P: SHA512(key repeated keylen times), tiled to keylen bytes.
+    let mut p_ctx = Sha512::new();
+    for _ in 0..key.len() {
+        p_ctx.update(key);
+    }
+    let key_digest = p_ctx.finish();
+    let p_bytes = tile(&key_digest, key.len());
+
+    // Sequence S: SHA512(salt repeated 16 + A[0] times), tiled to saltlen bytes.
+    let mut s_ctx = Sha512::new();
+    for _ in 0..(16 + alt_result[0] as usize) {
+        s_ctx.update(salt);
+    }
+    let salt_digest = s_ctx.finish();
+    let s_bytes = tile(&salt_digest, salt.len());
+
+    // Iterate ROUNDS times, alternating the running digest with P and S.
+    for round in 0..ROUNDS {
+        let mut ctx = Sha512::new();
+        if round & 1 != 0 {
+            ctx.update(&p_bytes);
+        } else {
+            ctx.update(&alt_result);
+        }
+        if round % 3 != 0 {
+            ctx.update(&s_bytes);
+        }
+        if round % 7 != 0 {
+            ctx.update(&p_bytes);
+        }
+        if round & 1 != 0 {
+            ctx.update(&alt_result);
+        } else {
+            ctx.update(&p_bytes);
+        }
+        alt_result = ctx.finish();
+    }
+
+    sha512_crypt_b64(&alt_result)
+}
+
+/// Repeat the 64-byte `digest` to fill `len` bytes.
+fn tile(digest: &[u8; 64], len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    let mut cnt = len;
+    while cnt > 64 {
+        out.extend_from_slice(digest);
+        cnt -= 64;
+    }
+    out.extend_from_slice(&digest[..cnt]);
+    out
+}
+
+/// crypt(3) base64 encoding of a 64-byte SHA-512 digest (86 characters), using
+/// the byte permutation defined by the SHA-512 crypt scheme.
+fn sha512_crypt_b64(digest: &[u8; 64]) -> String {
+    // The crypt alphabet is ASCII, so each emitted byte is its own char.
+    let mut out = String::with_capacity(86);
+    let mut emit = |hi: u8, mid: u8, lo: u8, count: usize| {
+        let mut word = (u32::from(hi) << 16) | (u32::from(mid) << 8) | u32::from(lo);
+        for _ in 0..count {
+            out.push(CRYPT_B64[(word & 0x3f) as usize] as char);
+            word >>= 6;
+        }
+    };
+    emit(digest[0], digest[21], digest[42], 4);
+    emit(digest[22], digest[43], digest[1], 4);
+    emit(digest[44], digest[2], digest[23], 4);
+    emit(digest[3], digest[24], digest[45], 4);
+    emit(digest[25], digest[46], digest[4], 4);
+    emit(digest[47], digest[5], digest[26], 4);
+    emit(digest[6], digest[27], digest[48], 4);
+    emit(digest[28], digest[49], digest[7], 4);
+    emit(digest[50], digest[8], digest[29], 4);
+    emit(digest[9], digest[30], digest[51], 4);
+    emit(digest[31], digest[52], digest[10], 4);
+    emit(digest[53], digest[11], digest[32], 4);
+    emit(digest[12], digest[33], digest[54], 4);
+    emit(digest[34], digest[55], digest[13], 4);
+    emit(digest[56], digest[14], digest[35], 4);
+    emit(digest[15], digest[36], digest[57], 4);
+    emit(digest[37], digest[58], digest[16], 4);
+    emit(digest[59], digest[17], digest[38], 4);
+    emit(digest[18], digest[39], digest[60], 4);
+    emit(digest[40], digest[61], digest[19], 4);
+    emit(digest[62], digest[20], digest[41], 4);
+    emit(0, 0, digest[63], 2);
+    out
 }
 
 /// Create a fresh GPT on `drive` with EFI, root and home partitions, using the
@@ -326,11 +451,11 @@ pub fn image_source_ref(source_image: &Path) -> String {
 }
 
 pub fn default_source_image(config: &crate::config::Config) -> Option<PathBuf> {
-    let default_img = default_source_image_path(config);
+    let mount = PathBuf::from(&config.image.source_mount);
+    let default_img = mount.join("image.tar");
     if default_img.is_file() {
         return Some(default_img);
     }
-    let mount = default_source_mount(config);
     if mount.is_mount() {
         let _ = unmount_default_source(config);
     }
@@ -375,7 +500,7 @@ pub fn default_source_image(config: &crate::config::Config) -> Option<PathBuf> {
 }
 
 fn unmount_default_source(config: &crate::config::Config) -> Result<()> {
-    unmount(&default_source_mount(config).to_string_lossy())
+    unmount(&PathBuf::from(&config.image.source_mount).to_string_lossy())
 }
 
 trait PathMountExt {
@@ -480,43 +605,12 @@ impl Runner {
         (self.progress)(self.step_index, status, fraction);
     }
 
-    pub fn run_cmd(
-        &mut self,
-        argv: &[&str],
-        env: Option<&[(String, String)]>,
-        heartbeat_interval: Option<Duration>,
-        heartbeat_msg: Option<&str>,
-    ) -> Result<()> {
-        let cmd_args: Vec<String> = argv.iter().map(std::string::ToString::to_string).collect();
-        subproc::check(
-            &cmd_args,
-            &mut self.log,
-            env,
-            None,
-            heartbeat_interval,
-            heartbeat_msg,
-        )
-    }
-
-    /// Like [`Runner::run_cmd`], but the command runs chrooted into `chroot_dir`,
-    /// replacing the external `chroot` helper.
-    pub fn run_cmd_chroot(
-        &mut self,
-        argv: &[&str],
-        chroot_dir: &str,
-        heartbeat_interval: Option<Duration>,
-        heartbeat_msg: Option<&str>,
-    ) -> Result<()> {
-        let cmd_args: Vec<String> = argv.iter().map(std::string::ToString::to_string).collect();
-        subproc::check_chroot(
-            &cmd_args,
-            &mut self.log,
-            None,
-            None,
-            heartbeat_interval,
-            heartbeat_msg,
-            Some(chroot_dir),
-        )
+    /// Begin building a subprocess invocation. Use [`subproc::Cmd::env`],
+    /// [`subproc::Cmd::heartbeat`] and [`subproc::Cmd::chroot`] to opt into
+    /// extras, then [`subproc::Cmd::run`] to execute it.
+    pub fn cmd<S: AsRef<str>>(&mut self, argv: &[S]) -> subproc::Cmd<'_> {
+        let argv = argv.iter().map(|a| a.as_ref().to_string()).collect();
+        subproc::Cmd::new(&mut self.log, argv)
     }
 
     pub fn execute(
@@ -629,7 +723,7 @@ pub fn cleanup_mounts(runner: &mut Runner) -> Result<()> {
     Ok(())
 }
 
-pub fn mount_chroot_binds(_runner: &mut Runner) -> Result<Vec<String>> {
+pub fn mount_chroot_binds() -> Result<Vec<String>> {
     let mut mounted = Vec::new();
     for (src, rel) in CHROOT_BIND_MOUNTS {
         let dst = format!("{TARGET_MOUNT}/{rel}");
@@ -643,7 +737,7 @@ pub fn mount_chroot_binds(_runner: &mut Runner) -> Result<Vec<String>> {
     Ok(mounted)
 }
 
-pub fn unmount_chroot_binds(_runner: &mut Runner, mounted: &[String]) -> Result<()> {
+pub fn unmount_chroot_binds(mounted: &[String]) -> Result<()> {
     for dst in mounted.iter().rev() {
         unmount(dst)?;
     }
@@ -946,7 +1040,7 @@ pub fn wait_for_block_device(runner: &mut Runner, part: &str) -> Result<()> {
     }
 }
 
-pub fn mount_bootc_vartmp(_runner: &mut Runner) -> Result<bool> {
+pub fn mount_bootc_vartmp() -> Result<bool> {
     let bootc_tmp = PathBuf::from(BOOTC_STORAGE_MOUNT).join("tmp");
     std::fs::create_dir_all(&bootc_tmp)?;
     std::fs::set_permissions(&bootc_tmp, PermissionsExt::from_mode(0o1777))?;
@@ -1020,5 +1114,20 @@ pub fn rollback(log: &mut LogFn) {
             log(format!("rollback: unmounting {mp}"));
             let _ = unmount(&mp);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha512_crypt_matches_reference_vector() {
+        // Drepper's published SHA-512 crypt test vector.
+        let hash = sha512_crypt(b"Hello world!", b"saltstring");
+        assert_eq!(
+            hash,
+            "svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1"
+        );
     }
 }

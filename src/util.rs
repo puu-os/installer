@@ -46,6 +46,11 @@ pub fn clean_log_line(line: &str) -> String {
     out
 }
 
+/// The user's login shell from `$SHELL`, falling back to `/bin/sh`.
+pub fn default_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+}
+
 /// Whether the controlling terminal's locale advertises UTF-8.
 pub fn terminal_is_utf8() -> bool {
     for var in ["LC_ALL", "LC_CTYPE", "LANG"] {
