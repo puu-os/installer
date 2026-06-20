@@ -3,7 +3,7 @@
 
 # puu-installer
 
-![Puu installing bootc image](screenshot.png "Puu installing bootc image")
+<img alt="Puu installing bootc image" src="screenshot.png" width="800">
 
 Standalone installer for bootc-based OSs.
 
