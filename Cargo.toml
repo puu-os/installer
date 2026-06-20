@@ -3,7 +3,7 @@
 
 [package]
 name = "puu-installer"
-version = "0.2.19"
+version = "0.20.20"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-2.0-or-later"
