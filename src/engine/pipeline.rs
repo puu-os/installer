@@ -191,6 +191,21 @@ impl Runner {
         subproc::Cmd::new(&mut self.log, argv)
     }
 
+    /// Like [`Runner::cmd`], but samples `source` while the command runs and
+    /// reports it as the current step's progress, labelled `status`.
+    pub fn cmd_tracked<S: AsRef<str>>(
+        &mut self,
+        argv: &[S],
+        status: &'static str,
+        source: Box<dyn crate::engine::progress::ProgressSource>,
+    ) -> subproc::Cmd<'_> {
+        let argv = argv.iter().map(|a| a.as_ref().to_string()).collect();
+        let step_index = self.step_index;
+        let progress = &mut self.progress;
+        let emit = move |fraction: f64| (progress)(step_index, status, fraction);
+        subproc::Cmd::new(&mut self.log, argv).track(source, Box::new(emit))
+    }
+
     pub fn execute(
         &mut self,
         steps: &[Step],

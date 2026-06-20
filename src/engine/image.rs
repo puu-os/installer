@@ -15,6 +15,11 @@ use crate::engine::pipeline::{path_is_mount, unmount};
 
 const MANIFEST_FILENAME: &str = "image.manifest";
 
+/// Compressed-to-on-disk expansion estimate (numerator/denominator) applied to
+/// the OCI layer sizes when the sidecar manifest carries no `installSize`.
+const LAYER_EXPANSION_NUM: u64 = 22;
+const LAYER_EXPANSION_DEN: u64 = 10;
+
 pub fn running_in_container() -> bool {
     std::env::var("container").as_deref() == Ok("podman")
 }
@@ -41,6 +46,39 @@ pub fn load_image_version(source_image: Option<&Path>) -> String {
 
 pub fn image_manifest_metadata(source_image: &Path) -> serde_json::Value {
     read_manifest(source_image).unwrap_or(serde_json::Value::Null)
+}
+
+/// Estimated bytes the bootc deployment writes to the target filesystem, used
+/// to follow its otherwise-opaque progress. Prefers an explicit `installSize`
+/// from the sidecar manifest, then falls back to scaling the OCI layer sizes.
+/// `None` when no local source image is available.
+pub fn install_size_estimate(source_image: Option<&Path>) -> Option<u64> {
+    let source_image = source_image?;
+    if let Some(size) = manifest_install_size(source_image) {
+        return Some(size);
+    }
+    let raw = raw_manifest(source_image).ok()?;
+    let total = compressed_layer_total(&raw)?;
+    Some(total.saturating_mul(LAYER_EXPANSION_NUM) / LAYER_EXPANSION_DEN)
+}
+
+fn manifest_install_size(source_image: &Path) -> Option<u64> {
+    let value = read_manifest(source_image)?;
+    let field = value.get("installSize")?;
+    field
+        .as_u64()
+        .or_else(|| field.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// Sum of the compressed layer sizes in a raw OCI image manifest.
+fn compressed_layer_total(raw_manifest: &[u8]) -> Option<u64> {
+    let json: serde_json::Value = serde_json::from_slice(raw_manifest).ok()?;
+    let layers = json.get("layers")?.as_array()?;
+    let total: u64 = layers
+        .iter()
+        .filter_map(|layer| layer.get("size").and_then(serde_json::Value::as_u64))
+        .sum();
+    (total > 0).then_some(total)
 }
 
 /// Read a single named entry from a tar archive, if present.

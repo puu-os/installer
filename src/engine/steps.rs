@@ -17,6 +17,7 @@ use crate::engine::pipeline::{
     CONTAINERS_RUNROOT, DEPENDENCIES, Runner, Step, TARGET_EFI_MOUNT, TARGET_HOME_MOUNT,
     TARGET_MOUNT,
 };
+use crate::engine::progress;
 
 fn step_dependencies(r: &mut Runner) -> Result<()> {
     let missing: Vec<&str> = DEPENDENCIES
@@ -335,7 +336,6 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
         argv.push(TARGET_MOUNT.into());
 
         r.log("bootc image deployment may take several minutes without native progress output");
-        r.progress(0.05, "Install bootc image");
 
         let env = vec![
             (
@@ -344,8 +344,15 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
             ),
             ("TMPDIR".into(), BOOTC_VAR_TMP.into()),
         ];
-        r.cmd(&argv)
-            .env(&env)
+
+        let tracker = image::install_size_estimate(source_image.as_deref())
+            .and_then(|expected| progress::DiskWriteProgress::new(TARGET_MOUNT, expected).ok())
+            .map(|source| Box::new(source) as Box<dyn progress::ProgressSource>);
+        let cmd = match tracker {
+            Some(source) => r.cmd_tracked(&argv, "Install bootc image", source),
+            None => r.cmd(&argv),
+        };
+        cmd.env(&env)
             .heartbeat(
                 Duration::from_secs(30),
                 "bootc install still running; deploying image",
@@ -356,7 +363,6 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
     })();
 
     result?;
-    r.progress(0.95, "Install bootc image");
     Ok(())
 }
 

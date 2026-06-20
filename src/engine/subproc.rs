@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use duct::Expression;
 
+use crate::engine::progress::ProgressSource;
+
 /// Options whose next value must be redacted in log output.
 const SECRET_OPTIONS: &[&str] = &["--password", "--passphrase", "--secret", "--token"];
 
@@ -19,7 +21,11 @@ const REDACTED: &str = "<redacted>";
 
 pub type LogFn = Box<dyn FnMut(String) + Send>;
 
+/// A [`ProgressSource`] paired with a sink that forwards each sampled reading.
+type ProgressTracker<'a> = (Box<dyn ProgressSource>, Box<dyn FnMut(f64) + 'a>);
+
 const OUTPUT_TAIL_LINES: usize = 12;
+const PROGRESS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
 fn format_argv(argv: &[String]) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(argv.len());
@@ -112,6 +118,7 @@ pub struct Cmd<'a> {
     env: Option<&'a [(String, String)]>,
     heartbeat: Option<(Duration, &'a str)>,
     chroot_dir: Option<&'a str>,
+    tracker: Option<ProgressTracker<'a>>,
 }
 
 impl<'a> Cmd<'a> {
@@ -122,6 +129,7 @@ impl<'a> Cmd<'a> {
             env: None,
             heartbeat: None,
             chroot_dir: None,
+            tracker: None,
         }
     }
 
@@ -146,10 +154,18 @@ impl<'a> Cmd<'a> {
         self
     }
 
+    /// Sample `source` while the command runs and forward each reading to
+    /// `emit`, surfacing real progress for a command with no native output.
+    #[must_use]
+    pub fn track(mut self, source: Box<dyn ProgressSource>, emit: Box<dyn FnMut(f64) + 'a>) -> Self {
+        self.tracker = Some((source, emit));
+        self
+    }
+
     /// Run the command, streaming merged stdout+stderr line-by-line to the log
     /// callback, and raise an error if the exit code is non-zero. The child
     /// chroots into `chroot_dir` before exec when it is set.
-    pub fn run(self) -> Result<()> {
+    pub fn run(mut self) -> Result<()> {
         let display = format_argv(&self.argv);
         (self.log)(format!("$ {display}"));
 
@@ -177,6 +193,7 @@ impl<'a> Cmd<'a> {
 
         let started = Instant::now();
         let mut last_heartbeat = Instant::now();
+        let mut last_sample = Instant::now();
         let mut output_tail = VecDeque::new();
 
         loop {
@@ -197,6 +214,15 @@ impl<'a> Cmd<'a> {
                     let elapsed = started.elapsed().as_secs();
                     (self.log)(format!("{msg} ({elapsed}s elapsed)"));
                     last_heartbeat = Instant::now();
+                }
+            }
+
+            if let Some((source, emit)) = self.tracker.as_mut() {
+                if last_sample.elapsed() >= PROGRESS_SAMPLE_INTERVAL {
+                    if let Some(fraction) = source.fraction() {
+                        emit(fraction);
+                    }
+                    last_sample = Instant::now();
                 }
             }
         }

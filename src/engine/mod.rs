@@ -9,6 +9,7 @@ pub(crate) mod image;
 pub(crate) mod partition;
 pub(crate) mod passwd;
 pub(crate) mod pipeline;
+pub(crate) mod progress;
 pub(crate) mod secureboot;
 pub(crate) mod steps;
 pub(crate) mod subproc;
