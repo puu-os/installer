@@ -477,8 +477,7 @@ impl Installer {
             .ok();
 
             if let Ok(Event::Key(key)) = event::read() {
-                if toggle_choice(&mut selected, &key) {
-                } else {
+                if !toggle_choice(&mut selected, &key) {
                     match key.code {
                         KeyCode::Enter => return selected == 1,
                         KeyCode::Esc => return false,
@@ -892,8 +891,7 @@ impl Installer {
             .ok();
 
             if let Ok(Event::Key(key)) = event::read() {
-                if toggle_choice(&mut selected, &key) {
-                } else {
+                if !toggle_choice(&mut selected, &key) {
                     match key.code {
                         KeyCode::Esc => return ScreenAction::Back,
                         KeyCode::Enter => {
@@ -1048,8 +1046,7 @@ impl Installer {
             .ok();
 
             if let Ok(Event::Key(key)) = event::read() {
-                if toggle_choice(&mut selected, &key) {
-                } else {
+                if !toggle_choice(&mut selected, &key) {
                     match key.code {
                         KeyCode::Enter if selected == 1 => return ScreenAction::Install,
                         KeyCode::Esc | KeyCode::Enter => return ScreenAction::Back,
@@ -1388,8 +1385,7 @@ impl Installer {
             if event::poll(Duration::from_millis(200)).unwrap_or(false) {
                 if let Ok(Event::Key(key)) = event::read() {
                     countdown = false;
-                    if toggle_choice(&mut selected, &key) {
-                    } else if key.code == KeyCode::Enter {
+                    if !toggle_choice(&mut selected, &key) && key.code == KeyCode::Enter {
                         if selected == 0 {
                             let shell = crate::engine::util::default_shell();
                             run_on_console(term, std::process::Command::new(&shell));

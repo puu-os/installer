@@ -5,7 +5,8 @@
 //! geometry the install pipeline operates on.
 
 use anyhow::Result;
-use openssl::rand::rand_bytes;
+
+use crate::engine::util::random_bytes;
 
 const PART_SIZE_UNITS: &[(&str, u64)] = &[
     ("K", 1024),
@@ -62,8 +63,7 @@ pub fn partition_drive(
         .open(drive)?;
     let sector_size = gptman::linux::get_sector_size(&mut file).unwrap_or(512);
 
-    let mut disk_guid = [0u8; 16];
-    rand_bytes(&mut disk_guid)?;
+    let disk_guid = random_bytes::<16>()?;
     let mut gpt = gptman::GPT::new_from(&mut file, sector_size, disk_guid)?;
 
     let efi_sectors = efi_bytes.div_ceil(sector_size);
@@ -84,47 +84,42 @@ pub fn partition_drive(
     commit_gpt(&mut file, &mut gpt, drive, sector_size)?;
 
     Ok(PartitionLayout {
-        efi: PartitionInfo {
-            number: 1,
-            unique_guid: gpt[1].unique_partition_guid,
-            starting_lba: gpt[1].starting_lba,
-            ending_lba: gpt[1].ending_lba,
-        },
+        efi: partition_info(1, &gpt[1]),
     })
+}
+
+fn set_entry(
+    gpt: &mut gptman::GPT,
+    index: u32,
+    partition_type_guid: [u8; 16],
+    start: u64,
+    end: u64,
+    name: &str,
+) -> Result<()> {
+    gpt[index] = gptman::GPTPartitionEntry {
+        partition_type_guid,
+        unique_partition_guid: random_bytes::<16>()?,
+        starting_lba: start,
+        ending_lba: end,
+        attribute_bits: 0,
+        partition_name: name.into(),
+    };
+    Ok(())
 }
 
 fn efi_entry(gpt: &mut gptman::GPT, sectors: u64, drive: &str) -> Result<()> {
     let start = gpt
         .find_first_place(sectors)
         .ok_or_else(|| anyhow::anyhow!("no room for EFI partition on {drive}"))?;
-    let mut guid = [0u8; 16];
-    rand_bytes(&mut guid)?;
-    gpt[1] = gptman::GPTPartitionEntry {
-        partition_type_guid: PART_TYPE_ESP,
-        unique_partition_guid: guid,
-        starting_lba: start,
-        ending_lba: start + sectors - 1,
-        attribute_bits: 0,
-        partition_name: "EFI".into(),
-    };
-    Ok(())
+    set_entry(gpt, 1, PART_TYPE_ESP, start, start + sectors - 1, "EFI")
 }
 
 fn home_entry(gpt: &mut gptman::GPT, sectors: u64, drive: &str) -> Result<()> {
     let start = gpt
         .find_last_place(sectors)
         .ok_or_else(|| anyhow::anyhow!("no room for home partition on {drive}"))?;
-    let mut guid = [0u8; 16];
-    rand_bytes(&mut guid)?;
-    gpt[3] = gptman::GPTPartitionEntry {
-        partition_type_guid: PART_TYPE_LINUX,
-        unique_partition_guid: guid,
-        starting_lba: start,
-        ending_lba: gpt.header.last_usable_lba,
-        attribute_bits: 0,
-        partition_name: "home".into(),
-    };
-    Ok(())
+    let end = gpt.header.last_usable_lba;
+    set_entry(gpt, 3, PART_TYPE_LINUX, start, end, "home")
 }
 
 fn root_entry(gpt: &mut gptman::GPT, drive: &str) -> Result<()> {
@@ -132,17 +127,7 @@ fn root_entry(gpt: &mut gptman::GPT, drive: &str) -> Result<()> {
     let start = gpt
         .find_optimal_place(size)
         .ok_or_else(|| anyhow::anyhow!("no room for root partition on {drive}"))?;
-    let mut guid = [0u8; 16];
-    rand_bytes(&mut guid)?;
-    gpt[2] = gptman::GPTPartitionEntry {
-        partition_type_guid: PART_TYPE_LINUX,
-        unique_partition_guid: guid,
-        starting_lba: start,
-        ending_lba: start + size - 1,
-        attribute_bits: 0,
-        partition_name: "root".into(),
-    };
-    Ok(())
+    set_entry(gpt, 2, PART_TYPE_LINUX, start, start + size - 1, "root")
 }
 
 fn commit_gpt(

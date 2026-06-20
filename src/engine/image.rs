@@ -43,6 +43,76 @@ pub fn image_manifest_metadata(source_image: &Path) -> serde_json::Value {
     read_manifest(source_image).unwrap_or(serde_json::Value::Null)
 }
 
+/// Read a single named entry from a tar archive, if present.
+fn read_archive_entry(src: &Path, name: &Path) -> Result<Option<Vec<u8>>> {
+    let file = std::fs::File::open(src)?;
+    let mut archive = tar::Archive::new(file);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if entry.path()?.as_ref() == name {
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut data)?;
+            return Ok(Some(data));
+        }
+    }
+    Ok(None)
+}
+
+/// Digest of the image manifest referenced by an OCI `index.json`.
+fn oci_index_manifest_digest(index: &[u8]) -> Result<String> {
+    let json: serde_json::Value = serde_json::from_slice(index)?;
+    json.get("manifests")
+        .and_then(|m| m.as_array())
+        .and_then(|m| m.first())
+        .and_then(|m| m.get("digest"))
+        .and_then(|d| d.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("OCI index.json has no manifest digest"))
+}
+
+/// Path of a blob inside an OCI archive for a `<algo>:<hex>` digest.
+fn oci_blob_path(digest: &str) -> Result<PathBuf> {
+    let (algo, hex) = digest
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("malformed OCI digest {digest}"))?;
+    Ok(Path::new("blobs").join(algo).join(hex))
+}
+
+/// Raw image manifest bytes for digest verification: the `manifest.json` from a
+/// `dir:` layout or tar archive, else the manifest blob referenced by the
+/// archive's `index.json`.
+pub fn raw_manifest(source_image: &Path) -> Result<Vec<u8>> {
+    if source_image.is_dir() {
+        // A skopeo `dir:` layout stores the raw manifest as `manifest.json`;
+        // `skopeo inspect --raw` just emits that file, so hash it directly.
+        let manifest_path = source_image.join("manifest.json");
+        return std::fs::read(&manifest_path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to read image manifest {}: {e}",
+                manifest_path.display()
+            )
+        });
+    }
+    if let Some(data) = read_archive_entry(source_image, Path::new("manifest.json"))? {
+        return Ok(data);
+    }
+    let index = read_archive_entry(source_image, Path::new("index.json"))?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "image archive {} has neither manifest.json nor index.json",
+            source_image.display()
+        )
+    })?;
+    let digest = oci_index_manifest_digest(&index)?;
+    let blob = oci_blob_path(&digest)?;
+    read_archive_entry(source_image, &blob)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "OCI archive {} is missing manifest blob {}",
+            source_image.display(),
+            blob.display()
+        )
+    })
+}
+
 pub fn image_source_ref(source_image: &Path) -> String {
     if source_image.is_dir() {
         return format!("dir:{}", source_image.display());

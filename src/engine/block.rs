@@ -11,7 +11,7 @@ pub struct Device {
     pub model: String,
     pub size: String,
     pub transport: String,
-    pub busy_reason: Option<String>,
+    pub busy_reason: Option<BusyReason>,
 }
 
 /// Why a disk is unavailable as an install target.
@@ -100,10 +100,7 @@ pub fn disk_busy(disk_path: &str) -> Option<BusyReason> {
     let disk = Path::new(disk_path).file_name()?.to_str()?.to_string();
     let mounts = mounted_sources();
 
-    let mut nodes = vec![disk.clone()];
-    nodes.extend(partition_sysnames(&disk));
-
-    for node in &nodes {
+    for node in std::iter::once(disk.clone()).chain(partition_sysnames(&disk)) {
         let devnode = format!("/dev/{node}");
         if let Some(mountpoint) = mounts.get(&devnode) {
             if !mountpoint.is_empty() {
@@ -113,7 +110,7 @@ pub fn disk_busy(disk_path: &str) -> Option<BusyReason> {
                 });
             }
         }
-        if let Some((kind, ident)) = holder_mapping(node) {
+        if let Some((kind, ident)) = holder_mapping(&node) {
             return Some(BusyReason::Mapping { kind, ident });
         }
     }
@@ -189,9 +186,7 @@ pub fn list_disks() -> Result<Vec<Device>> {
             model: disk_model(&dev),
             size: disk_size(&dev),
             transport: disk_transport(&dev, &sysname),
-            busy_reason: disk_busy(&path)
-                .as_ref()
-                .map(std::string::ToString::to_string),
+            busy_reason: disk_busy(&path),
             path,
         });
     }

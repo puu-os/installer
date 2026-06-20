@@ -18,7 +18,7 @@ fn efi_variable_path(name: &str, root: &Path) -> Option<PathBuf> {
         return Some(exact);
     }
     let prefix = format!("{name}-");
-    let mut matches: Vec<PathBuf> = std::fs::read_dir(root)
+    std::fs::read_dir(root)
         .ok()?
         .filter_map(std::result::Result::ok)
         .map(|e| e.path())
@@ -27,9 +27,7 @@ fn efi_variable_path(name: &str, root: &Path) -> Option<PathBuf> {
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.starts_with(&prefix))
         })
-        .collect();
-    matches.sort();
-    matches.into_iter().next()
+        .min()
 }
 
 fn efi_bool(name: &str, root: &Path) -> Option<bool> {

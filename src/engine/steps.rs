@@ -84,14 +84,8 @@ fn step_validate_drive(r: &mut Runner) -> Result<()> {
         }
     }
 
-    match crate::engine::block::disk_busy(drive) {
-        Some(crate::engine::block::BusyReason::Mounted { ident, mountpoint }) => {
-            bail!("'{drive}' is busy: {ident} mounted at {mountpoint}");
-        }
-        Some(crate::engine::block::BusyReason::Mapping { kind, ident }) => {
-            bail!("'{drive}' has active {kind} mapping {ident}");
-        }
-        None => {}
+    if let Some(reason) = crate::engine::block::disk_busy(drive) {
+        bail!("'{drive}' is busy: {reason}");
     }
 
     let size_b = crate::engine::block::drive_size_bytes(drive)?;
@@ -153,8 +147,7 @@ fn step_format_efi(r: &mut Runner) -> Result<()> {
 fn format_efi_fat(part: &str) -> Result<()> {
     let mut label = [b' '; 11];
     label[..3].copy_from_slice(b"EFI");
-    let mut volume_id = [0u8; 4];
-    openssl::rand::rand_bytes(&mut volume_id)?;
+    let volume_id = crate::engine::util::random_bytes::<4>()?;
 
     let mut device = std::fs::OpenOptions::new()
         .read(true)
@@ -184,8 +177,7 @@ fn step_format_root(r: &mut Runner) -> Result<()> {
 /// replacing `mkfs.xfs -f -L puu-root`. The partition is always freshly
 /// created here, so overwriting it unconditionally matches `mkfs.xfs -f`.
 fn format_root_xfs(part: &str) -> Result<()> {
-    let mut uuid = [0u8; 16];
-    openssl::rand::rand_bytes(&mut uuid)?;
+    let uuid = crate::engine::util::random_bytes::<16>()?;
 
     let mut options = mkfs_xfs::FormatOptions::from_target(part, uuid)
         .map_err(|e| anyhow::anyhow!("failed to inspect {part} for XFS formatting: {e}"))?;
@@ -387,41 +379,6 @@ fn step_configure_mounts(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
-/// Read a single named entry from a tar archive, if present.
-fn read_archive_entry(src: &Path, name: &Path) -> Result<Option<Vec<u8>>> {
-    let file = std::fs::File::open(src)?;
-    let mut archive = tar::Archive::new(file);
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        if entry.path()?.as_ref() == name {
-            let mut data = Vec::new();
-            std::io::Read::read_to_end(&mut entry, &mut data)?;
-            return Ok(Some(data));
-        }
-    }
-    Ok(None)
-}
-
-/// Digest of the image manifest referenced by an OCI `index.json`.
-fn oci_index_manifest_digest(index: &[u8]) -> Result<String> {
-    let json: serde_json::Value = serde_json::from_slice(index)?;
-    json.get("manifests")
-        .and_then(|m| m.as_array())
-        .and_then(|m| m.first())
-        .and_then(|m| m.get("digest"))
-        .and_then(|d| d.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("OCI index.json has no manifest digest"))
-}
-
-/// Path of a blob inside an OCI archive for a `<algo>:<hex>` digest.
-fn oci_blob_path(digest: &str) -> Result<PathBuf> {
-    let (algo, hex) = digest
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("malformed OCI digest {digest}"))?;
-    Ok(Path::new("blobs").join(algo).join(hex))
-}
-
 fn step_verify_image(r: &mut Runner) -> Result<()> {
     let Some(src) = r.ctx.source_image.clone() else {
         r.log("using running bootc image as install source");
@@ -443,35 +400,7 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
     }
     r.log(&format!("expected image digest: {expected}"));
 
-    let raw = if src.is_dir() {
-        // A skopeo `dir:` layout stores the raw manifest as `manifest.json`;
-        // `skopeo inspect --raw` just emits that file, so hash it directly.
-        let manifest_path = src.join("manifest.json");
-        std::fs::read(&manifest_path).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to read image manifest {}: {e}",
-                manifest_path.display()
-            )
-        })?
-    } else if let Some(data) = read_archive_entry(&src, Path::new("manifest.json"))? {
-        data
-    } else {
-        let index = read_archive_entry(&src, Path::new("index.json"))?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "image archive {} has neither manifest.json nor index.json",
-                src.display()
-            )
-        })?;
-        let digest = oci_index_manifest_digest(&index)?;
-        let blob = oci_blob_path(&digest)?;
-        read_archive_entry(&src, &blob)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "OCI archive {} is missing manifest blob {}",
-                src.display(),
-                blob.display()
-            )
-        })?
-    };
+    let raw = image::raw_manifest(&src)?;
 
     let actual = format!("sha256:{}", hex::encode(openssl::sha::sha256(&raw)));
     if actual != expected {

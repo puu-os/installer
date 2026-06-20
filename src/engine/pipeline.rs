@@ -99,67 +99,14 @@ pub struct Context {
     pub parts: DerivedPartitions,
 }
 
-pub struct ContextBuilder {
-    config: crate::engine::config::Config,
-    source_image: Option<PathBuf>,
-    target_imgref: String,
-    image_version: String,
-    drive: String,
-    k3s_token: String,
-    start_from: usize,
-    skip_steps: Vec<usize>,
-}
-
-impl ContextBuilder {
-    pub fn new(
-        config: crate::engine::config::Config,
-        target_imgref: String,
-        image_version: String,
-    ) -> Self {
+impl Default for Context {
+    fn default() -> Self {
         Self {
-            config,
+            config: crate::engine::config::Config::default(),
             source_image: None,
-            target_imgref,
-            image_version,
+            target_imgref: String::new(),
+            image_version: String::new(),
             drive: String::new(),
-            k3s_token: String::new(),
-            start_from: 1,
-            skip_steps: Vec::new(),
-        }
-    }
-
-    pub fn source_image(mut self, source_image: Option<PathBuf>) -> Self {
-        self.source_image = source_image;
-        self
-    }
-
-    pub fn drive(mut self, drive: String) -> Self {
-        self.drive = drive;
-        self
-    }
-
-    pub fn k3s_token(mut self, k3s_token: String) -> Self {
-        self.k3s_token = k3s_token;
-        self
-    }
-
-    pub fn start_from(mut self, start_from: usize) -> Self {
-        self.start_from = start_from;
-        self
-    }
-
-    pub fn skip_steps(mut self, skip_steps: Vec<usize>) -> Self {
-        self.skip_steps = skip_steps;
-        self
-    }
-
-    pub fn build(self) -> Context {
-        Context {
-            config: self.config,
-            source_image: self.source_image,
-            target_imgref: self.target_imgref,
-            image_version: self.image_version,
-            drive: self.drive,
             drive_label: String::new(),
             username: String::new(),
             user_password: String::new(),
@@ -167,10 +114,10 @@ impl ContextBuilder {
             keymap: String::new(),
             locale: String::new(),
             secure_boot: true,
-            k3s_token: self.k3s_token,
+            k3s_token: String::new(),
             last_error: String::new(),
-            start_from: self.start_from,
-            skip_steps: self.skip_steps,
+            start_from: 1,
+            skip_steps: Vec::new(),
             parts: DerivedPartitions::default(),
         }
     }
@@ -402,15 +349,16 @@ pub fn install_kernel_args(root_uuid: &str, config: &crate::engine::config::Conf
 const PART_WAIT_TIMEOUT_S: u64 = 30;
 const PART_WAIT_INTERVAL_MS: u64 = 500;
 
+fn is_openable(part: &str) -> bool {
+    Path::new(part).exists() && std::fs::OpenOptions::new().read(true).open(part).is_ok()
+}
+
 pub fn wait_for_block_device(runner: &mut Runner, part: &str) -> Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(PART_WAIT_TIMEOUT_S);
     loop {
-        let openable =
-            Path::new(part).exists() && std::fs::OpenOptions::new().read(true).open(part).is_ok();
-        if openable {
+        if is_openable(part) {
             std::thread::sleep(Duration::from_millis(PART_WAIT_INTERVAL_MS));
-            if Path::new(part).exists() && std::fs::OpenOptions::new().read(true).open(part).is_ok()
-            {
+            if is_openable(part) {
                 return Ok(());
             }
         }

@@ -16,8 +16,7 @@ const CRYPT_B64: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk
 pub fn hash_password_sha512(password: &str) -> Result<String> {
     // A random 16-character salt drawn from the crypt alphabet, as emitted by
     // `openssl passwd -6`. The alphabet is ASCII, so each byte is its own char.
-    let mut salt_bytes = [0u8; 16];
-    openssl::rand::rand_bytes(&mut salt_bytes)?;
+    let salt_bytes = crate::engine::util::random_bytes::<16>()?;
     let salt: String = salt_bytes
         .iter()
         .map(|b| CRYPT_B64[(b & 0x3f) as usize] as char)

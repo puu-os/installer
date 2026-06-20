@@ -3,6 +3,15 @@
 
 use std::sync::OnceLock;
 
+use anyhow::Result;
+
+/// Fill an `N`-byte array with cryptographically secure random bytes.
+pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N]> {
+    let mut buf = [0u8; N];
+    openssl::rand::rand_bytes(&mut buf)?;
+    Ok(buf)
+}
+
 /// Flush all filesystem buffers to stable storage.
 pub(crate) fn sync_all() {
     unsafe { libc::sync() };
@@ -15,16 +24,14 @@ pub(crate) fn running_as_root() -> bool {
 
 /// Format a byte count as a human-readable string (e.g. "1.5 GiB").
 pub fn human_size(size_b: u64) -> String {
-    let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-    let mut f = size_b as f64;
-    for (i, unit) in units.iter().enumerate() {
-        if f < 1024.0 || i == units.len() - 1 {
-            return format!("{f:.1} {unit}");
-        }
-        f /= 1024.0;
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let mut size = size_b as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
     }
-    // Compiler cannot prove the loop always returns; use last unit as safety net.
-    format!("{f:.1} PiB")
+    format!("{size:.1} {}", UNITS[unit])
 }
 
 /// Sanitize a line of subprocess output for display: collapse carriage-return

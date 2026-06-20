@@ -632,8 +632,7 @@ fn walkdir_like(root: &Path, glob: &str) -> Vec<PathBuf> {
 }
 
 fn random_uuid() -> Result<String> {
-    let mut buf = [0u8; 16];
-    openssl::rand::rand_bytes(&mut buf)?;
+    let buf = crate::engine::util::random_bytes::<16>()?;
     Ok(uuid::Builder::from_random_bytes(buf)
         .into_uuid()
         .to_string())

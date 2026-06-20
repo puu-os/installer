@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result, bail};
 use argh::FromArgs;
 
 use crate::engine::config::Config;
-use crate::engine::pipeline::ContextBuilder;
+use crate::engine::pipeline::Context;
 use crate::tui::app::Installer;
 
 /// Puu system installer.
@@ -135,13 +135,17 @@ fn main() -> Result<()> {
     let target_imgref = engine::image::load_target_imgref(source_image.as_deref(), &cfg);
     let image_version = engine::image::load_image_version(source_image.as_deref());
 
-    let ctx = ContextBuilder::new(cfg, target_imgref, image_version)
-        .source_image(source_image)
-        .drive(args.drive.unwrap_or_default())
-        .k3s_token(k3s_token)
-        .start_from(args.start_from)
-        .skip_steps(skip_steps)
-        .build();
+    let ctx = Context {
+        config: cfg,
+        source_image,
+        target_imgref,
+        image_version,
+        drive: args.drive.unwrap_or_default(),
+        k3s_token,
+        start_from: args.start_from,
+        skip_steps,
+        ..Default::default()
+    };
 
     let mut app = Installer::new(ctx);
     loop {
