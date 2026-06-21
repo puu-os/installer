@@ -1072,23 +1072,6 @@ impl Installer {
             .collect();
 
         let mut states = vec![InstallStepState::Pending; steps.len()];
-        for i in 0..start_index {
-            if i < states.len() {
-                states[i] = InstallStepState::Skipped;
-            }
-        }
-        for &idx in &skip_indices {
-            if idx < states.len() {
-                states[idx] = InstallStepState::Skipped;
-            }
-        }
-        if !self.ctx.secure_boot {
-            for (i, step) in steps.iter().enumerate() {
-                if step.requires_secure_boot {
-                    states[i] = InstallStepState::Skipped;
-                }
-            }
-        }
 
         let mut worker = crate::tui::app::InstallTask::start(&self.ctx, start_index, &skip_indices);
 
@@ -1129,6 +1112,11 @@ impl Installer {
                             } else {
                                 InstallStepState::Active
                             };
+                        }
+                    }
+                    crate::tui::app::TaskEvent::Skipped { step_index } => {
+                        if step_index < states.len() {
+                            states[step_index] = InstallStepState::Skipped;
                         }
                     }
                     crate::tui::app::TaskEvent::Done => {

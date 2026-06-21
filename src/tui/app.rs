@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
 
-use crate::engine::pipeline::{self, Context, ProgressCb, Runner, StepSelection};
+use crate::engine::pipeline::{self, Context, ProgressCb, Runner, SkipCb, StepSelection};
 use crate::engine::subproc::LogFn;
 
 const INSTALL_LOG_PATH: &str = "/run/puu-installer/install.log";
@@ -35,6 +35,9 @@ pub enum TaskEvent {
     Progress {
         step_index: usize,
         fraction: f64,
+    },
+    Skipped {
+        step_index: usize,
     },
     Done,
     Failed {
@@ -99,10 +102,18 @@ impl InstallTask {
                 })
             };
 
+            let skipped: SkipCb = {
+                let tx = events_tx.clone();
+                Box::new(move |step_index: usize| {
+                    let _ = tx.send(TaskEvent::Skipped { step_index });
+                })
+            };
+
             let mut runner = Runner {
                 ctx: pipeline_ctx,
                 log,
                 progress,
+                skipped,
                 step_index: 0,
             };
 

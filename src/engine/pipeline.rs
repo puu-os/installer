@@ -23,6 +23,11 @@ pub const TARGET_HOME_MOUNT: &str = "/run/puu-installer/target/var/home";
 /// `fraction` in `[0.0, 1.0]`.
 pub type ProgressCb = Box<dyn FnMut(usize, f64) + Send>;
 
+/// Skip callback invoked with the `step_index` of each step the selection
+/// excludes, so the UI reflects the engine's decisions instead of re-deriving
+/// the selection rules from mutable state.
+pub type SkipCb = Box<dyn FnMut(usize) + Send>;
+
 pub const BOOTC_STORAGE_MOUNT: &str = "/run/puu-installer/target/var/tmp/puu-bootc-storage";
 pub const BOOTC_IMAGE_STORAGE: &str =
     "/run/puu-installer/target/var/tmp/puu-bootc-storage/containers/storage";
@@ -174,6 +179,7 @@ pub struct Runner {
     pub ctx: Context,
     pub log: LogFn,
     pub progress: ProgressCb,
+    pub skipped: SkipCb,
     pub step_index: usize,
 }
 
@@ -219,6 +225,7 @@ impl Runner {
                 return Ok(false);
             }
             if !selection.includes(i, step, self.ctx.secure_boot) {
+                (self.skipped)(i);
                 continue;
             }
             self.step_index = i;
