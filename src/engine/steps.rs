@@ -268,101 +268,96 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
 
     let mut cleanups = pipeline::CleanupStack::new();
 
-    let result = (|| -> Result<()> {
-        if !Path::new(BOOTC_STORAGE_MOUNT).exists() {
-            std::fs::create_dir_all(BOOTC_STORAGE_MOUNT)?;
-            cleanups.push(|| {
-                let _ = std::fs::remove_dir_all(BOOTC_STORAGE_MOUNT);
-            });
-        }
+    if !Path::new(BOOTC_STORAGE_MOUNT).exists() {
+        std::fs::create_dir_all(BOOTC_STORAGE_MOUNT)?;
+        cleanups.push(|| {
+            let _ = std::fs::remove_dir_all(BOOTC_STORAGE_MOUNT);
+        });
+    }
 
-        for dir in &[BOOTC_IMAGE_STORAGE, CONTAINERS_RUNROOT, BOOTC_RUNROOT] {
-            std::fs::create_dir_all(dir)?;
-        }
+    for dir in &[BOOTC_IMAGE_STORAGE, CONTAINERS_RUNROOT, BOOTC_RUNROOT] {
+        std::fs::create_dir_all(dir)?;
+    }
 
-        let bootc_tmp_dir = PathBuf::from(BOOTC_STORAGE_MOUNT).join("tmp");
-        std::fs::create_dir_all(&bootc_tmp_dir)?;
+    let bootc_tmp_dir = PathBuf::from(BOOTC_STORAGE_MOUNT).join("tmp");
+    std::fs::create_dir_all(&bootc_tmp_dir)?;
 
-        if !pipeline::path_is_mount(BOOTC_IMAGE_STORAGE) {
-            pipeline::bind_mount(BOOTC_IMAGE_STORAGE, BOOTC_IMAGE_STORAGE)?;
-            cleanups.push(|| {
-                let _ = pipeline::unmount(BOOTC_IMAGE_STORAGE);
-            });
-        }
-        if !pipeline::path_is_mount(&bootc_tmp_dir) {
-            let bootc_tmp_dir_str = bootc_tmp_dir.to_string_lossy().to_string();
-            pipeline::bind_mount(&bootc_tmp_dir_str, &bootc_tmp_dir_str)?;
-            cleanups.push(move || {
-                let _ = pipeline::unmount(&bootc_tmp_dir_str);
-            });
-        }
+    if !pipeline::path_is_mount(BOOTC_IMAGE_STORAGE) {
+        pipeline::bind_mount(BOOTC_IMAGE_STORAGE, BOOTC_IMAGE_STORAGE)?;
+        cleanups.push(|| {
+            let _ = pipeline::unmount(BOOTC_IMAGE_STORAGE);
+        });
+    }
+    if !pipeline::path_is_mount(&bootc_tmp_dir) {
+        let bootc_tmp_dir_str = bootc_tmp_dir.to_string_lossy().to_string();
+        pipeline::bind_mount(&bootc_tmp_dir_str, &bootc_tmp_dir_str)?;
+        cleanups.push(move || {
+            let _ = pipeline::unmount(&bootc_tmp_dir_str);
+        });
+    }
 
-        if pipeline::mount_bootc_vartmp()? {
-            cleanups.push(|| {
-                let _ = pipeline::unmount(BOOTC_VAR_TMP);
-            });
-        }
+    if pipeline::mount_bootc_vartmp()? {
+        cleanups.push(|| {
+            let _ = pipeline::unmount(BOOTC_VAR_TMP);
+        });
+    }
 
-        let storage_conf = PathBuf::from("/run/puu-installer/bootc-storage.conf");
-        std::fs::write(
-            &storage_conf,
-            format!(
-                "[storage]\ndriver = \"overlay\"\ngraphroot = \"{BOOTC_IMAGE_STORAGE}\"\n\
-                 runroot = \"{CONTAINERS_RUNROOT}\"\n"
-            ),
-        )?;
+    let storage_conf = PathBuf::from("/run/puu-installer/bootc-storage.conf");
+    std::fs::write(
+        &storage_conf,
+        format!(
+            "[storage]\ndriver = \"overlay\"\ngraphroot = \"{BOOTC_IMAGE_STORAGE}\"\n\
+             runroot = \"{CONTAINERS_RUNROOT}\"\n"
+        ),
+    )?;
 
-        let mut argv: Vec<String> = vec!["bootc".into(), "install".into(), "to-filesystem".into()];
+    let mut argv: Vec<String> = vec!["bootc".into(), "install".into(), "to-filesystem".into()];
 
-        if let Some(ref src) = source_image {
-            argv.push("--source-imgref".into());
-            argv.push(image::image_source_ref(src));
-        }
+    if let Some(ref src) = source_image {
+        argv.push("--source-imgref".into());
+        argv.push(image::image_source_ref(src));
+    }
 
-        argv.extend([
-            "--target-imgref".into(),
-            r.ctx.target_imgref.clone(),
-            "--skip-fetch-check".into(),
-            "--bootloader".into(),
-            "none".into(),
-            "--skip-finalize".into(),
-        ]);
+    argv.extend([
+        "--target-imgref".into(),
+        r.ctx.target_imgref.clone(),
+        "--skip-fetch-check".into(),
+        "--bootloader".into(),
+        "none".into(),
+        "--skip-finalize".into(),
+    ]);
 
-        for arg in pipeline::install_kernel_args(&r.ctx.parts.root_uuid, &r.ctx.config) {
-            argv.push("--karg".into());
-            argv.push(arg);
-        }
+    for arg in pipeline::install_kernel_args(&r.ctx.parts.root_uuid, &r.ctx.config) {
+        argv.push("--karg".into());
+        argv.push(arg);
+    }
 
-        argv.push(TARGET_MOUNT.into());
+    argv.push(TARGET_MOUNT.into());
 
-        r.log("bootc image deployment may take several minutes without native progress output");
+    r.log("bootc image deployment may take several minutes without native progress output");
 
-        let env = vec![
-            (
-                "CONTAINERS_STORAGE_CONF".into(),
-                storage_conf.to_string_lossy().to_string(),
-            ),
-            ("TMPDIR".into(), BOOTC_VAR_TMP.into()),
-        ];
+    let env = vec![
+        (
+            "CONTAINERS_STORAGE_CONF".into(),
+            storage_conf.to_string_lossy().to_string(),
+        ),
+        ("TMPDIR".into(), BOOTC_VAR_TMP.into()),
+    ];
 
-        let tracker = image::install_size_estimate(source_image.as_deref())
-            .and_then(|expected| progress::DiskWriteProgress::new(TARGET_MOUNT, expected).ok())
-            .map(|source| Box::new(source) as Box<dyn progress::ProgressSource>);
-        let cmd = match tracker {
-            Some(source) => r.cmd_tracked(&argv, "Install bootc image", source),
-            None => r.cmd(&argv),
-        };
-        cmd.env(&env)
-            .heartbeat(
-                Duration::from_secs(30),
-                "bootc install still running; deploying image",
-            )
-            .run()?;
+    let tracker = image::install_size_estimate(source_image.as_deref())
+        .and_then(|expected| progress::DiskWriteProgress::new(TARGET_MOUNT, expected).ok())
+        .map(|source| Box::new(source) as Box<dyn progress::ProgressSource>);
+    let cmd = match tracker {
+        Some(source) => r.cmd_tracked(&argv, "Install bootc image", source),
+        None => r.cmd(&argv),
+    };
+    cmd.env(&env)
+        .heartbeat(
+            Duration::from_secs(30),
+            "bootc install still running; deploying image",
+        )
+        .run()?;
 
-        Ok(())
-    })();
-
-    result?;
     Ok(())
 }
 
