@@ -1118,11 +1118,10 @@ impl Installer {
                     }
                     crate::tui::app::TaskEvent::Progress {
                         step_index,
-                        status: s,
                         fraction,
                     } => {
                         current_step = step_index;
-                        state = s;
+                        state = steps[step_index].title.to_string();
                         step_fraction = fraction;
                         if step_index < states.len() {
                             states[step_index] = if fraction >= 1.0 {

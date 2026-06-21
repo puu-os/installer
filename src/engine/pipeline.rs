@@ -19,9 +19,9 @@ pub const TARGET_MOUNT: &str = "/run/puu-installer/target";
 pub const TARGET_EFI_MOUNT: &str = "/run/puu-installer/target/efi";
 pub const TARGET_HOME_MOUNT: &str = "/run/puu-installer/target/var/home";
 
-#[allow(clippy::doc_markdown)]
-/// Progress callback: (step_index, status_text, fraction)
-pub type ProgressCb = Box<dyn FnMut(usize, &str, f64) + Send>;
+/// Progress callback invoked with the current `step_index` and its completion
+/// `fraction` in `[0.0, 1.0]`.
+pub type ProgressCb = Box<dyn FnMut(usize, f64) + Send>;
 
 pub const BOOTC_STORAGE_MOUNT: &str = "/run/puu-installer/target/var/tmp/puu-bootc-storage";
 pub const BOOTC_IMAGE_STORAGE: &str =
@@ -182,8 +182,8 @@ impl Runner {
         (self.log)(msg.to_string());
     }
 
-    pub fn progress(&mut self, fraction: f64, status: &str) {
-        (self.progress)(self.step_index, status, fraction);
+    pub fn progress(&mut self, fraction: f64) {
+        (self.progress)(self.step_index, fraction);
     }
 
     /// Begin building a subprocess invocation. Use [`subproc::Cmd::env`],
@@ -195,17 +195,16 @@ impl Runner {
     }
 
     /// Like [`Runner::cmd`], but samples `source` while the command runs and
-    /// reports it as the current step's progress, labelled `status`.
+    /// reports it as the current step's progress.
     pub fn cmd_tracked<S: AsRef<str>>(
         &mut self,
         argv: &[S],
-        status: &'static str,
         source: Box<dyn crate::engine::progress::ProgressSource>,
     ) -> subproc::Cmd<'_> {
         let argv = argv.iter().map(|a| a.as_ref().to_string()).collect();
         let step_index = self.step_index;
         let progress = &mut self.progress;
-        let emit = move |fraction: f64| (progress)(step_index, status, fraction);
+        let emit = move |fraction: f64| (progress)(step_index, fraction);
         subproc::Cmd::new(&mut self.log, argv).track(source, Box::new(emit))
     }
 
@@ -223,12 +222,12 @@ impl Runner {
                 continue;
             }
             self.step_index = i;
-            self.progress(0.0, step.title);
+            self.progress(0.0);
             if step.point_of_no_return {
                 self.log("entering point of no return");
             }
             (step.fn_)(self)?;
-            self.progress(1.0, step.title);
+            self.progress(1.0);
         }
         Ok(true)
     }

@@ -348,7 +348,7 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
         .and_then(|expected| progress::DiskWriteProgress::new(TARGET_MOUNT, expected).ok())
         .map(|source| Box::new(source) as Box<dyn progress::ProgressSource>);
     let cmd = match tracker {
-        Some(source) => r.cmd_tracked(&argv, "Install bootc image", source),
+        Some(source) => r.cmd_tracked(&argv, source),
         None => r.cmd(&argv),
     };
     cmd.env(&env)
@@ -600,7 +600,7 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
     let sync_helper = r.ctx.config.flatpak.sync_helper.clone();
     let source = Box::new(progress::MarkerProgress::new()) as Box<dyn progress::ProgressSource>;
     let result = r
-        .cmd_tracked(&[sync_helper], "Pre-stage Flatpak refs", source)
+        .cmd_tracked(&[sync_helper], source)
         .chroot(TARGET_MOUNT)
         .heartbeat(
             Duration::from_secs(30),

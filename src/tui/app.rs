@@ -34,7 +34,6 @@ pub enum TaskEvent {
     Log(String),
     Progress {
         step_index: usize,
-        status: String,
         fraction: f64,
     },
     Done,
@@ -92,10 +91,9 @@ impl InstallTask {
 
             let progress: ProgressCb = {
                 let tx = events_tx.clone();
-                Box::new(move |step_index: usize, status: &str, fraction: f64| {
+                Box::new(move |step_index: usize, fraction: f64| {
                     let _ = tx.send(TaskEvent::Progress {
                         step_index,
-                        status: status.to_string(),
                         fraction,
                     });
                 })
