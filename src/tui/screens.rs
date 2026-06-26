@@ -300,10 +300,11 @@ fn spinner(frame: usize) -> &'static str {
 
 impl Installer {
     pub(crate) fn title(&self) -> String {
+        let name = &self.ctx.config.branding.name;
         if self.ctx.image_version.is_empty() {
-            "Puu Installer".to_string()
+            format!("{name} Installer")
         } else {
-            format!("Puu {} Installer", self.ctx.image_version)
+            format!("{name} {} Installer", self.ctx.image_version)
         }
     }
 
@@ -871,7 +872,10 @@ impl Installer {
                 Self::draw_frame(
                     f,
                     "Secure Boot",
-                    "Puu can enroll its own Secure Boot keys when firmware Setup Mode is on.",
+                    &format!(
+                        "{} can enroll its own Secure Boot keys when firmware Setup Mode is on.",
+                        self.ctx.config.branding.name
+                    ),
                     "Left/Right select, Enter activates, Esc back",
                 );
                 let area = f.area();
@@ -1081,6 +1085,7 @@ impl Installer {
         let mut current_step = start_index;
         let mut log_scroll: usize = 0;
         let mut running = true;
+        let mut committed = false;
         let mut failed = false;
         let mut complete = false;
         let started = Instant::now();
@@ -1104,6 +1109,9 @@ impl Installer {
                         fraction,
                     } => {
                         current_step = step_index;
+                        if steps[step_index].point_of_no_return {
+                            committed = true;
+                        }
                         state = steps[step_index].title.to_string();
                         step_fraction = fraction;
                         if step_index < states.len() {
@@ -1143,12 +1151,14 @@ impl Installer {
             term.draw(|f| {
                 Self::draw_frame(
                     f,
-                    "Installing Puu",
+                    &format!("Installing {}", self.ctx.config.branding.name),
                     &format!("Target: {}", self.ctx.drive_label),
                     if complete {
                         "Enter continue"
                     } else if failed {
                         "Enter back to menu"
+                    } else if committed {
+                        "PgUp/PgDn scroll"
                     } else {
                         "Esc cancel, PgUp/PgDn scroll"
                     },
@@ -1282,6 +1292,7 @@ impl Installer {
                         }
                         KeyCode::Esc
                             if running
+                                && !committed
                                 && self.confirm(
                                     term,
                                     "Cancel install?",
@@ -1295,6 +1306,7 @@ impl Installer {
                         KeyCode::Char('c')
                             if key.modifiers.contains(KeyModifiers::CONTROL)
                                 && running
+                                && !committed
                                 && self.confirm(
                                     term,
                                     "Cancel install?",
@@ -1346,7 +1358,7 @@ impl Installer {
                 Self::draw_frame(
                     f,
                     "Install Complete",
-                    "Puu is ready to boot.",
+                    &format!("{} is ready to boot.", self.ctx.config.branding.name),
                     "Left/Right select, Enter activates",
                 );
                 let area = f.area();

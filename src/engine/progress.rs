@@ -97,7 +97,11 @@ impl ProgressSource for MarkerProgress {
 
 /// Parse the `<done>/<total>` fraction following a [`PROGRESS_MARKER`] token.
 fn parse_marker(line: &str) -> Option<f64> {
-    let token = line.split(PROGRESS_MARKER).nth(1)?.split_whitespace().next()?;
+    let token = line
+        .split(PROGRESS_MARKER)
+        .nth(1)?
+        .split_whitespace()
+        .next()?;
     let (done, total) = token.split_once('/')?;
     let done: f64 = done.parse().ok()?;
     let total: f64 = total.parse().ok()?;

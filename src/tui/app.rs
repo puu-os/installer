@@ -32,18 +32,10 @@ pub(crate) enum ScreenAction {
 
 pub enum TaskEvent {
     Log(String),
-    Progress {
-        step_index: usize,
-        fraction: f64,
-    },
-    Skipped {
-        step_index: usize,
-    },
+    Progress { step_index: usize, fraction: f64 },
+    Skipped { step_index: usize },
     Done,
-    Failed {
-        at: usize,
-        error: anyhow::Error,
-    },
+    Failed { at: usize, error: anyhow::Error },
 }
 
 fn open_install_log() -> Option<std::fs::File> {

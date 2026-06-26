@@ -18,16 +18,23 @@ The k3s cluster token is the only k3s setting passed on the command line, via
 `--k3s-token-file` (the file's first line is used). All other k3s settings live
 in the configuration file.
 
+To rebrand the installer for a different bootc OS, set `branding.name` (the
+product name shown in the TUI and written as the EFI firmware boot-entry
+description) and the `labels` (the on-disk root/home filesystem labels). Boot
+relies on UUIDs, so the labels are cosmetic.
+
 The defaults configuration is the following:
 
 ```yaml
+branding:
+  name: Puu
 partitions:
   efi: 512M
   rootMin: 64G
   home: 256G
 labels:
-  root: root
-  home: home
+  root: puu-root
+  home: puu-home
 image:
   targetImgRef: quay.io/puu/puu:latest
   sourceLabel: PAYLOAD

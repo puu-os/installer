@@ -220,8 +220,9 @@ impl Runner {
         selection: &StepSelection,
         mut is_cancelled: impl FnMut() -> bool,
     ) -> Result<bool> {
+        let mut committed = false;
         for (i, step) in steps.iter().enumerate() {
-            if is_cancelled() {
+            if !committed && is_cancelled() {
                 return Ok(false);
             }
             if !selection.includes(i, step, self.ctx.secure_boot) {
@@ -232,6 +233,7 @@ impl Runner {
             self.progress(0.0);
             if step.point_of_no_return {
                 self.log("entering point of no return");
+                committed = true;
             }
             (step.fn_)(self)?;
             self.progress(1.0);

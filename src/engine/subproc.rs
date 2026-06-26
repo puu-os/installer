@@ -157,7 +157,11 @@ impl<'a> Cmd<'a> {
     /// Sample `source` while the command runs and forward each reading to
     /// `emit`, surfacing real progress for a command with no native output.
     #[must_use]
-    pub fn track(mut self, source: Box<dyn ProgressSource>, emit: Box<dyn FnMut(f64) + 'a>) -> Self {
+    pub fn track(
+        mut self,
+        source: Box<dyn ProgressSource>,
+        emit: Box<dyn FnMut(f64) + 'a>,
+    ) -> Self {
         self.tracker = Some((source, emit));
         self
     }

@@ -167,22 +167,23 @@ fn format_efi_fat(part: &str) -> Result<()> {
 
 fn step_format_root(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.root_part.clone();
+    let label = r.ctx.config.labels.root.clone();
     pipeline::wait_for_block_device(r, &part)?;
-    r.log(&format!("formatting {part} as XFS (label puu-root)"));
-    format_root_xfs(&part)?;
+    r.log(&format!("formatting {part} as XFS (label {label})"));
+    format_root_xfs(&part, &label)?;
     r.ctx.parts.root_uuid = crate::engine::block::capture_uuid(&part)?;
     Ok(())
 }
 
 /// Write a fresh XFS filesystem to `part` natively with the `mkfs-xfs` crate,
-/// replacing `mkfs.xfs -f -L puu-root`. The partition is always freshly
+/// replacing `mkfs.xfs -f -L <label>`. The partition is always freshly
 /// created here, so overwriting it unconditionally matches `mkfs.xfs -f`.
-fn format_root_xfs(part: &str) -> Result<()> {
+fn format_root_xfs(part: &str, label: &str) -> Result<()> {
     let uuid = crate::engine::util::random_bytes::<16>()?;
 
     let mut options = mkfs_xfs::FormatOptions::from_target(part, uuid)
         .map_err(|e| anyhow::anyhow!("failed to inspect {part} for XFS formatting: {e}"))?;
-    options.label = Some("puu-root".into());
+    options.label = Some(label.into());
 
     let plan = mkfs_xfs::FormatPlan::new(options)
         .map_err(|e| anyhow::anyhow!("invalid XFS geometry for {part}: {e}"))?;
@@ -199,9 +200,10 @@ fn format_root_xfs(part: &str) -> Result<()> {
 
 fn step_format_home(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.home_part.clone();
+    let label = r.ctx.config.labels.home.clone();
     pipeline::wait_for_block_device(r, &part)?;
     r.cmd(&[
-        "mke2fs", "-t", "ext4", "-O", "encrypt", "-F", "-L", "puu-home", &part,
+        "mke2fs", "-t", "ext4", "-O", "encrypt", "-F", "-L", &label, &part,
     ])
     .run()?;
     r.ctx.parts.home_uuid = crate::engine::block::capture_uuid(&part)?;
@@ -241,6 +243,10 @@ fn step_mount_home(r: &mut Runner) -> Result<()> {
 
 #[allow(clippy::too_many_lines)]
 fn step_bootc_install(r: &mut Runner) -> Result<()> {
+    if r.ctx.parts.root_uuid.is_empty() {
+        bail!("root partition UUID is unset; re-run without skipping the format steps");
+    }
+
     let source_image = r.ctx.source_image.clone();
     let source_image = if source_image.is_none() {
         let default = image::default_source_image(&r.ctx.config);
@@ -362,6 +368,10 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
 }
 
 fn step_configure_mounts(r: &mut Runner) -> Result<()> {
+    if r.ctx.parts.efi_uuid.is_empty() || r.ctx.parts.home_uuid.is_empty() {
+        bail!("EFI or home partition UUID is unset; re-run without skipping the format steps");
+    }
+
     let deploy = pipeline::deployment_root()?;
     for dir in &["efi", "var", "var/home"] {
         std::fs::create_dir_all(deploy.join(dir))?;
@@ -655,7 +665,7 @@ fn step_nvram(r: &mut Runner) -> Result<()> {
     };
     let entry = BootEntry {
         attributes: BootEntryAttributes::LOAD_OPTION_ACTIVE,
-        description: "puu".into(),
+        description: r.ctx.config.branding.name.clone(),
         file_path_list: Some(file_path_list),
         optional_data: Vec::new(),
     };
