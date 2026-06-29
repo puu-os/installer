@@ -115,6 +115,8 @@ fn step_validate_drive(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
+const BLKRRPART: libc::c_ulong = 0x125f;
+
 fn step_partition(r: &mut Runner) -> Result<()> {
     let drive = r.ctx.drive.clone();
     r.ctx.parts.layout = Some(partition::partition_drive(
@@ -123,10 +125,9 @@ fn step_partition(r: &mut Runner) -> Result<()> {
         &r.ctx.config.partitions.efi,
         &r.ctx.config.partitions.home,
     )?);
-    // BLKRRPART = _IO(0x12, 95) = 0x125F
     let file = std::fs::File::open(&drive)
         .map_err(|e| anyhow::anyhow!("failed to open {drive} to re-read partition table: {e}"))?;
-    if unsafe { libc::ioctl(file.as_raw_fd(), 0x125f) } != 0 {
+    if unsafe { libc::ioctl(file.as_raw_fd(), BLKRRPART) } != 0 {
         let err = std::io::Error::last_os_error();
         bail!("BLKRRPART ioctl failed on {drive}: {err}");
     }
