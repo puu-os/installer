@@ -170,7 +170,7 @@ pub fn default_source_image(config: &Config) -> Option<PathBuf> {
         return Some(default_img);
     }
     if path_is_mount(&mount) {
-        let _ = unmount_default_source(config);
+        let _ = unmount(&config.image.source_mount);
     }
     if running_in_container() {
         return None;
@@ -207,11 +207,7 @@ pub fn default_source_image(config: &Config) -> Option<PathBuf> {
     if default_img.is_file() {
         Some(default_img)
     } else {
-        let _ = unmount_default_source(config);
+        let _ = unmount(&config.image.source_mount);
         None
     }
-}
-
-fn unmount_default_source(config: &Config) -> Result<()> {
-    unmount(&PathBuf::from(&config.image.source_mount).to_string_lossy())
 }
