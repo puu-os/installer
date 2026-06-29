@@ -358,13 +358,13 @@ pub fn install_kernel_args(root_uuid: &str, config: &crate::engine::config::Conf
         .cloned()
         .or_else(|| match machine {
             "x86_64" => Some("console=ttyS0,115200".into()),
-            "aarch64" | "arm64" => Some("console=ttyAMA0,115200".into()),
+            "aarch64" => Some("console=ttyAMA0,115200".into()),
             _ => None,
         });
     if let Some(console) = serial_console {
         args.push(console);
     }
-    if machine == "aarch64" || machine == "arm64" {
+    if machine == "aarch64" {
         for a in &config.kernel.extra_arm64_args {
             args.push(a.clone());
         }
