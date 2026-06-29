@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,6 +10,8 @@ use anyhow::{Context as _, Result, bail};
 use efivar::boot::{
     BootEntry, BootEntryAttributes, EFIHardDrive, EFIHardDriveType, FilePath, FilePathList,
 };
+
+use udev::AsRaw;
 
 use crate::engine::image;
 use crate::engine::partition;
@@ -120,12 +123,36 @@ fn step_partition(r: &mut Runner) -> Result<()> {
         &r.ctx.config.partitions.efi,
         &r.ctx.config.partitions.home,
     )?);
-    if crate::engine::util::which_exists("blockdev") {
-        let _ = r.cmd(&["blockdev", "--rereadpt", &drive]).run();
+    // BLKRRPART = _IO(0x12, 95) = 0x125F
+    let file = std::fs::File::open(&drive)
+        .map_err(|e| anyhow::anyhow!("failed to open {drive} to re-read partition table: {e}"))?;
+    if unsafe { libc::ioctl(file.as_raw_fd(), 0x125f) } != 0 {
+        let err = std::io::Error::last_os_error();
+        bail!("BLKRRPART ioctl failed on {drive}: {err}");
     }
-    if crate::engine::util::which_exists("udevadm") {
-        let _ = r.cmd(&["udevadm", "settle", "--timeout=30"]).run();
+    // Wait for the udev event queue to drain (replaces `udevadm settle`).
+    let udev = udev::Udev::new()?;
+    let queue = unsafe { udev::ffi::udev_queue_new(udev.as_raw()) };
+    if queue.is_null() {
+        bail!("failed to create udev queue");
     }
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match unsafe { udev::ffi::udev_queue_get_udev_is_active(queue) } {
+            0 => break,
+            n if n < 0 => {
+                unsafe { udev::ffi::udev_queue_unref(queue) };
+                bail!("udev_queue_get_udev_is_active returned {n}");
+            }
+            _ => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            unsafe { udev::ffi::udev_queue_unref(queue) };
+            bail!("udev settle timed out after 30s");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    unsafe { udev::ffi::udev_queue_unref(queue) };
 
     pipeline::wait_for_block_device(r, &r.ctx.parts.efi_part.clone())?;
     pipeline::wait_for_block_device(r, &r.ctx.parts.root_part.clone())?;
