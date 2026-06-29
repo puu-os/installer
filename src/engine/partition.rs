@@ -69,9 +69,34 @@ pub fn partition_drive(
     let efi_sectors = efi_bytes.div_ceil(sector_size);
     let home_sectors = home_bytes.div_ceil(sector_size);
 
-    efi_entry(&mut gpt, efi_sectors, drive)?;
-    home_entry(&mut gpt, home_sectors, drive)?;
-    root_entry(&mut gpt, drive)?;
+    let start = gpt
+        .find_first_place(efi_sectors)
+        .ok_or_else(|| anyhow::anyhow!("no room for EFI partition on {drive}"))?;
+    set_entry(
+        &mut gpt,
+        1,
+        PART_TYPE_ESP,
+        start,
+        start + efi_sectors - 1,
+        "EFI",
+    )?;
+    let start = gpt
+        .find_last_place(home_sectors)
+        .ok_or_else(|| anyhow::anyhow!("no room for home partition on {drive}"))?;
+    let end = gpt.header.last_usable_lba;
+    set_entry(&mut gpt, 3, PART_TYPE_LINUX, start, end, "home")?;
+    let size = gpt.get_maximum_partition_size()?;
+    let start = gpt
+        .find_optimal_place(size)
+        .ok_or_else(|| anyhow::anyhow!("no room for root partition on {drive}"))?;
+    set_entry(
+        &mut gpt,
+        2,
+        PART_TYPE_LINUX,
+        start,
+        start + size - 1,
+        "root",
+    )?;
 
     let part_bytes = |n: u32| (gpt[n].ending_lba - gpt[n].starting_lba + 1) * sector_size;
     log(format!(
@@ -105,29 +130,6 @@ fn set_entry(
         partition_name: name.into(),
     };
     Ok(())
-}
-
-fn efi_entry(gpt: &mut gptman::GPT, sectors: u64, drive: &str) -> Result<()> {
-    let start = gpt
-        .find_first_place(sectors)
-        .ok_or_else(|| anyhow::anyhow!("no room for EFI partition on {drive}"))?;
-    set_entry(gpt, 1, PART_TYPE_ESP, start, start + sectors - 1, "EFI")
-}
-
-fn home_entry(gpt: &mut gptman::GPT, sectors: u64, drive: &str) -> Result<()> {
-    let start = gpt
-        .find_last_place(sectors)
-        .ok_or_else(|| anyhow::anyhow!("no room for home partition on {drive}"))?;
-    let end = gpt.header.last_usable_lba;
-    set_entry(gpt, 3, PART_TYPE_LINUX, start, end, "home")
-}
-
-fn root_entry(gpt: &mut gptman::GPT, drive: &str) -> Result<()> {
-    let size = gpt.get_maximum_partition_size()?;
-    let start = gpt
-        .find_optimal_place(size)
-        .ok_or_else(|| anyhow::anyhow!("no room for root partition on {drive}"))?;
-    set_entry(gpt, 2, PART_TYPE_LINUX, start, start + size - 1, "root")
 }
 
 fn commit_gpt(
