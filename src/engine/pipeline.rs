@@ -375,16 +375,13 @@ pub fn install_kernel_args(root_uuid: &str, config: &crate::engine::config::Conf
 const PART_WAIT_TIMEOUT_S: u64 = 30;
 const PART_WAIT_INTERVAL_MS: u64 = 500;
 
-fn is_openable(part: &str) -> bool {
-    Path::new(part).exists() && std::fs::OpenOptions::new().read(true).open(part).is_ok()
-}
-
 pub fn wait_for_block_device(runner: &mut Runner, part: &str) -> Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(PART_WAIT_TIMEOUT_S);
     loop {
-        if is_openable(part) {
+        if Path::new(part).exists() && std::fs::OpenOptions::new().read(true).open(part).is_ok() {
             std::thread::sleep(Duration::from_millis(PART_WAIT_INTERVAL_MS));
-            if is_openable(part) {
+            if Path::new(part).exists() && std::fs::OpenOptions::new().read(true).open(part).is_ok()
+            {
                 return Ok(());
             }
         }
