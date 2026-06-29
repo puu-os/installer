@@ -84,7 +84,7 @@ pub fn partition_drive(
     commit_gpt(&mut file, &mut gpt, drive, sector_size)?;
 
     Ok(PartitionLayout {
-        efi: partition_info(1, &gpt[1]),
+        efi: PartitionInfo::from_entry(1, &gpt[1]),
     })
 }
 
@@ -143,15 +143,6 @@ fn commit_gpt(
         .map_err(|e| anyhow::anyhow!("failed to reread partition table on {drive}: {e}"))
 }
 
-fn partition_info(number: u32, entry: &gptman::GPTPartitionEntry) -> PartitionInfo {
-    PartitionInfo {
-        number,
-        unique_guid: entry.unique_partition_guid,
-        starting_lba: entry.starting_lba,
-        ending_lba: entry.ending_lba,
-    }
-}
-
 /// Read the EFI partition layout metadata from an existing GPT on `drive`.
 pub fn load_partition_layout(drive: &str) -> Result<PartitionLayout> {
     let mut file = std::fs::OpenOptions::new()
@@ -165,7 +156,7 @@ pub fn load_partition_layout(drive: &str) -> Result<PartitionLayout> {
         let entry = &gpt[number];
         if entry.is_used() && entry.partition_type_guid == PART_TYPE_ESP {
             return Ok(PartitionLayout {
-                efi: partition_info(number, entry),
+                efi: PartitionInfo::from_entry(number, entry),
             });
         }
     }
@@ -208,6 +199,17 @@ pub struct PartitionInfo {
     pub unique_guid: [u8; 16],
     pub starting_lba: u64,
     pub ending_lba: u64,
+}
+
+impl PartitionInfo {
+    fn from_entry(number: u32, entry: &gptman::GPTPartitionEntry) -> Self {
+        Self {
+            number,
+            unique_guid: entry.unique_partition_guid,
+            starting_lba: entry.starting_lba,
+            ending_lba: entry.ending_lba,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
