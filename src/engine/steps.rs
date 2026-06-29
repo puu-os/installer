@@ -588,7 +588,6 @@ fn step_stage_homed_identity(r: &mut Runner) -> Result<()> {
         "enforcePasswordPolicy": false,
         "privileged": {
             "hashedPassword": [&hashed],
-            "password": [&r.ctx.user_password],
         },
     });
 
