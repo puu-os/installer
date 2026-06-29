@@ -636,7 +636,7 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
     ));
     let mounted = pipeline::mount_chroot_binds()?;
     let sync_helper = r.ctx.config.flatpak.sync_helper.clone();
-    let source = Box::new(progress::MarkerProgress::new()) as Box<dyn progress::ProgressSource>;
+    let source = Box::new(progress::MarkerProgress::default()) as Box<dyn progress::ProgressSource>;
     let result = r
         .cmd_tracked(&[sync_helper], source)
         .chroot(TARGET_MOUNT)

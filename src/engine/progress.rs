@@ -74,12 +74,6 @@ pub struct MarkerProgress {
     fraction: Option<f64>,
 }
 
-impl MarkerProgress {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
 impl ProgressSource for MarkerProgress {
     fn fraction(&mut self) -> Option<f64> {
         self.fraction
