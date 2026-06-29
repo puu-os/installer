@@ -139,14 +139,15 @@ fn step_partition(r: &mut Runner) -> Result<()> {
     }
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
-        match unsafe { udev::ffi::udev_queue_get_udev_is_active(queue) } {
-            0 => break,
-            n if n < 0 => {
-                unsafe { udev::ffi::udev_queue_unref(queue) };
-                bail!("udev_queue_get_udev_is_active returned {n}");
-            }
-            _ => {}
+        let is_empty = unsafe { udev::ffi::udev_queue_get_queue_is_empty(queue) };
+        if is_empty > 0 {
+            break;
         }
+        if is_empty < 0 {
+            unsafe { udev::ffi::udev_queue_unref(queue) };
+            bail!("udev_queue_get_queue_is_empty returned {is_empty}");
+        }
+        unsafe { udev::ffi::udev_queue_flush(queue) };
         if std::time::Instant::now() >= deadline {
             unsafe { udev::ffi::udev_queue_unref(queue) };
             bail!("udev settle timed out after 30s");
