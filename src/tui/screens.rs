@@ -49,31 +49,20 @@ const KEYMAPS: &[(&str, &str)] = &[
 
 const SHELLS: &[(&str, &str)] = &[("bash", "/bin/bash"), ("zsh", "/bin/zsh")];
 
-const TIMEZONES: &[&str] = &[
-    "UTC",
-    "Europe/Helsinki",
-    "Europe/Stockholm",
-    "Europe/Oslo",
-    "Europe/Copenhagen",
-    "Europe/Berlin",
-    "Europe/Paris",
-    "Europe/London",
-];
-
 const REBOOT_DELAY: u64 = 30;
 const MIN_SCREEN_COLS: u16 = 80;
 const MIN_SCREEN_ROWS: u16 = 23;
 const INSTALL_LOG_Y: u16 = 13;
 
 // Nord palette (https://www.nordtheme.com/).
-const BG: Color = Color::Rgb(0x2E, 0x34, 0x40); // nord0  Polar Night
+pub(crate) const BG: Color = Color::Rgb(0x2E, 0x34, 0x40); // nord0  Polar Night
 const PANEL: Color = Color::Rgb(0x3B, 0x42, 0x52); // nord1  Polar Night
 const TITLE_BG: Color = Color::Rgb(0x5E, 0x81, 0xAC); // nord10 Frost
 const FG: Color = Color::Rgb(0xE5, 0xE9, 0xF0); // nord5  Snow Storm
-const ACCENT: Color = Color::Rgb(0x88, 0xC0, 0xD0); // nord8  Frost
+pub(crate) const ACCENT: Color = Color::Rgb(0x88, 0xC0, 0xD0); // nord8  Frost
 const ON_ACCENT: Color = Color::Rgb(0x2E, 0x34, 0x40); // nord0  on accent
-const ERR: Color = Color::Rgb(0xBF, 0x61, 0x6A); // nord11 Aurora
-const WARN: Color = Color::Rgb(0xEB, 0xCB, 0x8B); // nord13 Aurora
+pub(crate) const ERR: Color = Color::Rgb(0xBF, 0x61, 0x6A); // nord11 Aurora
+pub(crate) const WARN: Color = Color::Rgb(0xEB, 0xCB, 0x8B); // nord13 Aurora
 const OK: Color = Color::Rgb(0xA3, 0xBE, 0x8C); // nord14 Aurora
 
 const WELCOME_CHOICES: &[(ScreenAction, &str)] = &[
@@ -120,7 +109,7 @@ impl InstallStepState {
     }
 }
 
-fn highlight_style(selected: bool) -> Style {
+pub(crate) fn highlight_style(selected: bool) -> Style {
     if selected {
         Style::default()
             .fg(ON_ACCENT)
@@ -231,10 +220,10 @@ fn id_field<'a>(
     password2: &'a mut String,
 ) -> Option<&'a mut String> {
     match idx {
-        2 => Some(hostname),
-        3 => Some(username),
-        4 => Some(password),
-        5 => Some(password2),
+        1 => Some(hostname),
+        2 => Some(username),
+        3 => Some(password),
+        4 => Some(password2),
         _ => None,
     }
 }
@@ -649,15 +638,6 @@ impl Installer {
             .iter()
             .position(|(_, l)| *l == current_locale)
             .unwrap_or(0);
-        let current_timezone = self.ctx.config.identity.timezone.clone();
-        let mut zones: Vec<String> = TIMEZONES.iter().map(|zone| (*zone).to_string()).collect();
-        if !zones.iter().any(|zone| zone == &current_timezone) {
-            zones.insert(0, current_timezone);
-        }
-        let mut timezone_idx = zones
-            .iter()
-            .position(|zone| zone == &self.ctx.config.identity.timezone)
-            .unwrap_or(0);
         let mut hostname = self.ctx.config.identity.hostname.clone();
         let mut username = self.ctx.username.clone();
         let mut password = self.ctx.user_password.clone();
@@ -671,7 +651,6 @@ impl Installer {
         let mut status = String::new();
         let labels = [
             "Language",
-            "Timezone",
             "Hostname",
             "Username",
             "Password",
@@ -684,7 +663,6 @@ impl Installer {
             let keymap = keymap_for_locale(locale);
             let fields = [
                 format!("{} ({locale}, keymap {keymap})", LANGUAGES[language_idx].0),
-                zones[timezone_idx].clone(),
                 hostname.clone(),
                 username.clone(),
                 password.clone(),
@@ -707,7 +685,7 @@ impl Installer {
                     let style = highlight_style(selected);
 
                     let count = fields[i].chars().count();
-                    let value = if (i == 4 || i == 5) && !reveal {
+                    let value = if (i == 3 || i == 4) && !reveal {
                         "*".repeat(count.min(40))
                     } else if count > 40 {
                         fields[i].chars().skip(count - 40).collect()
@@ -725,7 +703,7 @@ impl Installer {
                     );
                 }
 
-                if matches!(field_idx, 2..=5) {
+                if matches!(field_idx, 1..=4) {
                     let caret = fields[field_idx].chars().count().min(40) as u16;
                     f.set_cursor_position((24 + caret, 4 + field_idx as u16 * 2));
                 }
@@ -762,13 +740,7 @@ impl Installer {
                     KeyCode::Right if field_idx == 0 => {
                         language_idx = (language_idx + 1) % LANGUAGES.len();
                     }
-                    KeyCode::Left if field_idx == 1 => {
-                        timezone_idx = timezone_idx.checked_sub(1).unwrap_or(zones.len() - 1);
-                    }
-                    KeyCode::Right if field_idx == 1 => {
-                        timezone_idx = (timezone_idx + 1) % zones.len();
-                    }
-                    KeyCode::Left | KeyCode::Right if field_idx == 6 => {
+                    KeyCode::Left | KeyCode::Right if field_idx == 5 => {
                         shell_idx = 1 - shell_idx;
                     }
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -802,11 +774,6 @@ impl Installer {
                             let (_, locale) = LANGUAGES[language_idx];
                             self.ctx.locale = locale.to_string();
                             self.ctx.keymap = keymap_for_locale(locale).to_string();
-                            self.ctx
-                                .config
-                                .identity
-                                .timezone
-                                .clone_from(&zones[timezone_idx]);
                             self.ctx.config.identity.hostname = hostname.trim().to_string();
                             self.ctx.username = username.trim().to_string();
                             self.ctx.user_password.clone_from(&password);
@@ -828,8 +795,8 @@ impl Installer {
                             &mut password2,
                         ) {
                             let max = match field_idx {
-                                2 => 253,
-                                3 => 32,
+                                1 => 253,
+                                2 => 32,
                                 _ => usize::MAX,
                             };
                             if f.len() < max {
