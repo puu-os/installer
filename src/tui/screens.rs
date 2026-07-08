@@ -12,6 +12,7 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Paragraph},
 };
+use tachyonfx::{Effect, EffectRenderer, Interpolation, fx};
 
 use crate::engine::block;
 use crate::engine::firmware::{self, SetupModeStatus};
@@ -52,7 +53,15 @@ const SHELLS: &[(&str, &str)] = &[("bash", "/bin/bash"), ("zsh", "/bin/zsh")];
 const REBOOT_DELAY: u64 = 30;
 const MIN_SCREEN_COLS: u16 = 80;
 const MIN_SCREEN_ROWS: u16 = 23;
-const INSTALL_LOG_Y: u16 = 13;
+
+// Install screen vertical layout: rows 0-1 are the title/subtitle (drawn by
+// draw_frame), the bottom row is the footer, and the log fills INSTALL_LOG_Y..
+// down to it. The status band occupies the rows in between.
+const INSTALL_CURRENT_Y: u16 = 2;
+const INSTALL_STEP_BAR_Y: u16 = 3;
+const INSTALL_OVERALL_Y: u16 = 4;
+const INSTALL_LOG_HDR_Y: u16 = 5;
+const INSTALL_LOG_Y: u16 = 6;
 
 // Nord palette (https://www.nordtheme.com/).
 pub(crate) const BG: Color = Color::Rgb(0x2E, 0x34, 0x40); // nord0  Polar Night
@@ -83,30 +92,16 @@ const FALLBACK_CHOICES: &[(ScreenAction, &str)] = &[
     (ScreenAction::Reboot, "Reboot"),
 ];
 
-#[derive(Clone, Copy, strum::Display)]
+// Per-step outcome, tracked to weight the overall progress bar (skipped steps
+// are excluded from the total). The minimal-counter layout no longer renders a
+// per-step marker, so only the variants themselves are needed.
+#[derive(Clone, Copy)]
 enum InstallStepState {
-    #[strum(to_string = "[ ]")]
     Pending,
-    #[strum(to_string = ">>>")]
     Active,
-    #[strum(to_string = "[*]")]
     Done,
-    #[strum(to_string = "[-]")]
     Skipped,
-    #[strum(to_string = "[!]")]
     Failed,
-}
-
-impl InstallStepState {
-    fn style(self) -> Style {
-        match self {
-            Self::Active => Style::default().fg(ON_ACCENT).bg(ACCENT),
-            Self::Done => Style::default().fg(OK).add_modifier(Modifier::BOLD),
-            Self::Failed => Style::default().fg(ERR).add_modifier(Modifier::BOLD),
-            Self::Skipped => Style::default().fg(ACCENT),
-            Self::Pending => Style::default(),
-        }
-    }
 }
 
 pub(crate) fn highlight_style(selected: bool) -> Style {
@@ -129,6 +124,21 @@ fn button_row(f: &mut Frame, choices: &[&str], selected: usize, y: u16, width: u
             Rect::new(4 + i as u16 * width, y, label_width, 1),
         );
     }
+}
+
+/// Draw a full-width horizontal divider at `(x, y)`, using box-drawing dashes
+/// where the terminal supports them and plain hyphens otherwise. Callers may
+/// overpaint a styled label onto the rule to form a titled section header.
+fn rule(f: &mut Frame, x: u16, y: u16, width: u16) {
+    let dash = if crate::engine::util::terminal_is_utf8() {
+        '\u{2500}'
+    } else {
+        '-'
+    };
+    f.render_widget(
+        Paragraph::new(dash.to_string().repeat(width as usize)).style(Style::default().fg(FG)),
+        Rect::new(x, y, width, 1),
+    );
 }
 
 fn keymap_for_locale(locale: &str) -> &str {
@@ -387,7 +397,7 @@ impl Installer {
                 Self::draw_frame(
                     f,
                     &self.title(),
-                    "",
+                    "Choose an option to begin.",
                     "Arrows select, Enter activates, Esc quits",
                 );
                 let area = f.area();
@@ -546,10 +556,7 @@ impl Installer {
                     .style(Style::default().add_modifier(Modifier::BOLD)),
                     Rect::new(0, 4, area.width, 1),
                 );
-                f.render_widget(
-                    Paragraph::new("-".repeat(area.width as usize)),
-                    Rect::new(0, 5, area.width, 1),
-                );
+                rule(f, 0, 5, area.width);
 
                 for (row, dev) in devices[top..(top + visible).min(devices.len())]
                     .iter()
@@ -1058,6 +1065,26 @@ impl Installer {
         let started = Instant::now();
         let mut finished: Option<Instant> = None;
 
+        let install_title = if self.ctx.image_version.is_empty() {
+            format!("Installing {}", self.ctx.config.branding.name)
+        } else {
+            format!(
+                "Installing {} {}",
+                self.ctx.config.branding.name, self.ctx.image_version
+            )
+        };
+
+        // Subtle, isolated eye-candy, gated to terminals that can render it: a
+        // one-shot assemble-in on entry and a soft glow on the status line when
+        // the install completes. On the plain VT console this stays empty and
+        // the screen renders exactly as drawn.
+        let fx_enabled = crate::engine::util::terminal_is_utf8();
+        let mut intro_fx: Option<Effect> =
+            fx_enabled.then(|| fx::coalesce((450, Interpolation::CubicOut)));
+        let mut done_fx: Option<Effect> = None;
+        let mut prev_complete = false;
+        let mut last_draw = Instant::now();
+
         loop {
             while let Ok(evt) = worker.events_rx.try_recv() {
                 match evt {
@@ -1115,10 +1142,19 @@ impl Installer {
             }
 
             let frame = (started.elapsed().as_millis() / 80) as usize;
+
+            let now = Instant::now();
+            let dt = now.duration_since(last_draw);
+            last_draw = now;
+            if fx_enabled && complete && !prev_complete {
+                done_fx = Some(fx::fade_from_fg(FG, (600, Interpolation::QuadOut)));
+            }
+            prev_complete = complete;
+
             term.draw(|f| {
                 Self::draw_frame(
                     f,
-                    &format!("Installing {}", self.ctx.config.branding.name),
+                    &install_title,
                     &format!("Target: {}", self.ctx.drive_label),
                     if complete {
                         "Enter continue"
@@ -1131,33 +1167,17 @@ impl Installer {
                     },
                 );
                 let area = f.area();
+                let width = area.width;
+                let content_w = width.saturating_sub(2);
+                let bold = Style::default().add_modifier(Modifier::BOLD);
+                let sep = if crate::engine::util::terminal_is_utf8() {
+                    " \u{b7} "
+                } else {
+                    " - "
+                };
 
-                f.render_widget(
-                    Paragraph::new("Steps").style(Style::default().add_modifier(Modifier::BOLD)),
-                    Rect::new(2, 4, 40, 1),
-                );
-                let visible_steps = area.height.saturating_sub(6).max(1) as usize;
-                let step_start = current_step.saturating_sub(visible_steps / 2);
-                for (row, i) in
-                    (step_start..steps.len().min(step_start + visible_steps)).enumerate()
-                {
-                    let st = states.get(i).copied().unwrap_or(InstallStepState::Pending);
-                    let marker = if running && matches!(st, InstallStepState::Active) {
-                        format!("{:<3}", spinner(frame))
-                    } else {
-                        st.to_string()
-                    };
-                    let style = st.style();
-                    f.render_widget(
-                        Paragraph::new(format!("{marker} {:02} {}", i + 1, steps[i].title))
-                            .style(style),
-                        Rect::new(2, 5 + row as u16, 40, 1),
-                    );
-                }
-
-                let rx = 44u16;
-                let rw = area.width.saturating_sub(rx + 2).max(20);
-
+                // Current step (row 2): spinner + counter + title, or the final
+                // status message once the run has stopped.
                 let st_style = if failed {
                     Style::default().fg(ERR)
                 } else if complete {
@@ -1165,29 +1185,34 @@ impl Installer {
                 } else {
                     Style::default()
                 };
-                f.render_widget(
-                    Paragraph::new("Current step")
-                        .style(Style::default().add_modifier(Modifier::BOLD)),
-                    Rect::new(rx, 4, rw, 1),
-                );
-                let status_line = if running {
-                    format!("{} {state}", spinner(frame))
+                let current_line = if running {
+                    format!(
+                        "{} Step {}/{}{sep}{state}",
+                        spinner(frame),
+                        current_step + 1,
+                        steps.len()
+                    )
                 } else {
                     state.clone()
                 };
                 f.render_widget(
-                    Paragraph::new(clip_chars(&status_line, rw)).style(st_style),
-                    Rect::new(rx, 5, rw, 1),
+                    Paragraph::new(clip_chars(&current_line, content_w)).style(st_style),
+                    Rect::new(2, INSTALL_CURRENT_Y, content_w, 1),
                 );
 
+                // Progress bars: an 8-wide label column, then a wide bar.
+                let bar_x = 10u16;
                 f.render_widget(
-                    Paragraph::new(progress_bar(step_fraction, rw as usize)),
-                    Rect::new(rx, 7, rw, 1),
+                    Paragraph::new("Step").style(bold),
+                    Rect::new(2, INSTALL_STEP_BAR_Y, 8, 1),
                 );
+                let step_bar_w = width.saturating_sub(bar_x + 2).max(20);
                 f.render_widget(
-                    Paragraph::new("Overall").style(Style::default().add_modifier(Modifier::BOLD)),
-                    Rect::new(rx, 9, rw, 1),
+                    Paragraph::new(progress_bar(step_fraction, step_bar_w as usize)),
+                    Rect::new(bar_x, INSTALL_STEP_BAR_Y, step_bar_w, 1),
                 );
+
+                // Overall bar (row 4) with elapsed time pinned to the right.
                 let runnable_weight = |range: std::ops::Range<usize>| -> u32 {
                     range
                         .filter(|&i| !matches!(states[i], InstallStepState::Skipped))
@@ -1198,55 +1223,87 @@ impl Installer {
                 let done = runnable_weight(0..current_step);
                 let active = f64::from(steps[current_step].weight) * step_fraction.min(1.0);
                 let overall = (f64::from(done) + active) / f64::from(total);
-                f.render_widget(
-                    Paragraph::new(progress_bar(overall, rw as usize)),
-                    Rect::new(rx, 10, rw, 1),
-                );
 
                 let elapsed = finished
                     .unwrap_or_else(Instant::now)
                     .duration_since(started);
+                let elapsed_str = format!("Elapsed {}", format_elapsed(elapsed));
+                let elapsed_w = elapsed_str.chars().count() as u16;
+
                 f.render_widget(
-                    Paragraph::new(format!("Elapsed {}", format_elapsed(elapsed)))
-                        .style(Style::default().fg(ACCENT)),
-                    Rect::new(rx, 11, rw, 1),
+                    Paragraph::new("Overall").style(bold),
+                    Rect::new(2, INSTALL_OVERALL_Y, 8, 1),
+                );
+                let overall_bar_w = width.saturating_sub(bar_x + elapsed_w + 2).max(20);
+                f.render_widget(
+                    Paragraph::new(progress_bar(overall, overall_bar_w as usize)),
+                    Rect::new(bar_x, INSTALL_OVERALL_Y, overall_bar_w, 1),
+                );
+                f.render_widget(
+                    Paragraph::new(elapsed_str).style(Style::default().fg(ACCENT)),
+                    Rect::new(
+                        width.saturating_sub(elapsed_w + 1),
+                        INSTALL_OVERALL_Y,
+                        elapsed_w,
+                        1,
+                    ),
                 );
 
-                let log_header = if log_scroll > 0 {
+                // Log header (row 5): a full-width rule with an inline label.
+                rule(f, 0, INSTALL_LOG_HDR_Y, width);
+                let (log_label, log_style) = if log_scroll > 0 {
                     let arrow = if crate::engine::util::terminal_is_utf8() {
-                        "↑"
+                        "\u{2191}"
                     } else {
                         "^"
                     };
-                    format!("Log  {arrow}{log_scroll}  PgDn to follow")
+                    (
+                        format!(" Log  {arrow}{log_scroll}  PgDn to follow "),
+                        Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+                    )
                 } else {
-                    "Log".to_string()
-                };
-                let log_style = if log_scroll > 0 {
-                    Style::default().fg(WARN).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().add_modifier(Modifier::BOLD)
+                    (" Log ".to_string(), bold)
                 };
                 f.render_widget(
-                    Paragraph::new(log_header).style(log_style),
-                    Rect::new(rx, 12, rw, 1),
+                    Paragraph::new(clip_chars(&log_label, content_w)).style(log_style),
+                    Rect::new(2, INSTALL_LOG_HDR_Y, content_w, 1),
                 );
+
+                // Log pane (rows INSTALL_LOG_Y..): full terminal width.
                 let log_h = area.height.saturating_sub(INSTALL_LOG_Y + 1).max(1) as usize;
-                let log_area = Rect::new(rx, INSTALL_LOG_Y, rw, log_h as u16);
                 f.render_widget(
                     Block::default().style(Style::default().fg(FG).bg(BG)),
-                    log_area,
+                    Rect::new(0, INSTALL_LOG_Y, width, log_h as u16),
                 );
+                let log_w = width.saturating_sub(1);
                 let end = logs.len().saturating_sub(log_scroll);
                 let start = end.saturating_sub(log_h);
                 for (row, line) in logs[start..end].iter().enumerate() {
                     f.render_widget(
-                        Paragraph::new(clip_chars(line, rw)),
-                        Rect::new(rx, INSTALL_LOG_Y + row as u16, rw, 1),
+                        Paragraph::new(clip_chars(line, log_w)),
+                        Rect::new(1, INSTALL_LOG_Y + row as u16, log_w, 1),
+                    );
+                }
+
+                if let Some(effect) = intro_fx.as_mut() {
+                    f.render_effect(effect, area, dt.into());
+                }
+                if let Some(effect) = done_fx.as_mut() {
+                    f.render_effect(
+                        effect,
+                        Rect::new(2, INSTALL_CURRENT_Y, content_w, 1),
+                        dt.into(),
                     );
                 }
             })
             .ok();
+
+            if intro_fx.as_ref().is_some_and(Effect::done) {
+                intro_fx = None;
+            }
+            if done_fx.as_ref().is_some_and(Effect::done) {
+                done_fx = None;
+            }
 
             if event::poll(Duration::from_millis(100)).unwrap_or(false) {
                 if let Ok(Event::Key(key)) = event::read() {
