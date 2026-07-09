@@ -20,6 +20,8 @@ const SEA_DEEP: Color = Color::Indexed(4);
 const SEA_SHIMMER: Color = Color::Indexed(12);
 const LAND_COAST: Color = Color::Indexed(10);
 const PIN_BG: Color = Color::Indexed(1);
+const GUIDE: Color = Color::Indexed(7);
+const GUIDE_STRONG: Color = Color::Indexed(14);
 
 /// Latitude band shown by the map. The poles are cropped (mostly empty ocean
 /// and the featureless Antarctic ice) so the inhabited band — where every
@@ -408,6 +410,14 @@ fn sea_bg_for_row(cy: usize) -> Color {
     if cy % 6 < 2 { SEA_SHIMMER } else { SEA_DEEP }
 }
 
+fn near_lon(lon: f64, target: f64, step: f64) -> bool {
+    lon_delta(lon, target).abs() <= step * 0.5
+}
+
+fn near_lat(lat: f64, target: f64, step: f64) -> bool {
+    (lat - target).abs() <= step * 0.5
+}
+
 /// Draw the filled world map into `rect`. Each terminal cell holds two raster
 /// sub-rows, so a cell is one of `▀` `▄` `█` ` ` with the foreground painted
 /// land-coloured over a sea-coloured background. The visible viewport spans
@@ -421,21 +431,43 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
     let span = LAT_MAX - LAT_MIN;
 
     let lon_step = VIEW_LON_SPAN / width.max(1) as f64;
+    let lat_step = span / total_sub as f64;
+    let selected_lon = pick.selected().filter(|z| z.has_coord).map(|z| z.lon);
     for cy in 0..height {
         let lat_top = LAT_MAX - (2.0 * cy as f64 + 0.5) / total_sub as f64 * span;
         let lat_bot = LAT_MAX - (2.0 * cy as f64 + 1.5) / total_sub as f64 * span;
+        let lat_mid = (lat_top + lat_bot) * 0.5;
         let sea_bg = sea_bg_for_row(cy);
+        let equator_here = near_lat(lat_mid, 0.0, lat_step * 2.0);
         for cx in 0..width {
             let lon = view.lon_at(cx, width);
-            let (kind, ch, fg, bg) = classify_cell(lon, lat_top, lat_bot, lon_step);
+            let (kind, mut ch, mut fg, bg) = classify_cell(lon, lat_top, lat_bot, lon_step);
             let x = rect.x + cx as u16;
             let y = rect.y + cy as u16;
+            let major_meridian = near_lon(lon, 0.0, lon_step) || near_lon(lon, 90.0, lon_step);
+            let zone_meridian = selected_lon.is_some_and(|target| near_lon(lon, target, lon_step));
             if let Some(cell) = buf.cell_mut((x, y)) {
                 let bg = match kind {
                     CellKind::Sea => sea_bg,
                     CellKind::Coast => bg,
                     CellKind::Land => bg,
                 };
+                if major_meridian && matches!(kind, CellKind::Sea) {
+                    ch = '·';
+                    fg = GUIDE;
+                }
+                if equator_here && matches!(kind, CellKind::Sea) {
+                    ch = '─';
+                    fg = GUIDE;
+                }
+                if zone_meridian {
+                    ch = '│';
+                    fg = if equator_here { GUIDE_STRONG } else { WARN };
+                }
+                if major_meridian && equator_here && !zone_meridian {
+                    ch = '┼';
+                    fg = GUIDE_STRONG;
+                }
                 cell.set_char(ch).set_fg(fg).set_bg(bg);
             }
         }
