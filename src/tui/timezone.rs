@@ -15,7 +15,7 @@ const TICK: Duration = Duration::from_millis(80);
 /// Quiet period after the last keypress before the UTC offset is (re)computed.
 const OFFSET_DEBOUNCE: Duration = Duration::from_millis(250);
 const VIEW_LON_SPAN: f64 = 180.0;
-const PAN_STEP_LON: f64 = 15.0;
+const PAN_PAGE_FRACTION: f64 = 0.5;
 const SEA_DEEP: Color = Color::Indexed(4);
 const SEA_SHIMMER: Color = Color::Indexed(12);
 const LAND_COAST: Color = Color::Indexed(10);
@@ -151,6 +151,7 @@ fn format_lon(lon: f64) -> String {
 }
 
 struct MapLayout {
+    overview_y: u16,
     top_marker_y: u16,
     map_y: u16,
     map_h: u16,
@@ -164,15 +165,17 @@ struct MapLayout {
 fn layout(height: u16) -> MapLayout {
     let bottom = height.saturating_sub(1);
     let content = bottom.saturating_sub(2);
-    let max_map = content.saturating_sub(2 + 1 + 3).max(1);
+    let max_map = content.saturating_sub(3 + 1 + 3).max(1);
     let map_h = (height * 11 / 20).clamp(1, max_map);
-    let top_marker_y = 2;
+    let overview_y = 2;
+    let top_marker_y = overview_y + 1;
     let map_y = top_marker_y + 1;
     let bottom_marker_y = map_y + map_h;
     let filter_y = bottom_marker_y + 1;
     let list_top = filter_y + 1;
     let list_h = bottom.saturating_sub(list_top).max(1);
     MapLayout {
+        overview_y,
         top_marker_y,
         map_y,
         map_h,
@@ -204,6 +207,16 @@ impl MapView {
 
     fn pan(&mut self, delta: f64) {
         self.center_lon = wrap_lon(self.center_lon + delta);
+    }
+
+    fn recenter(&mut self, zone: Option<&Zone>) {
+        if let Some(zone) = zone {
+            self.follow(zone);
+        }
+    }
+
+    fn page_pan(&mut self, direction: f64) {
+        self.pan(VIEW_LON_SPAN * PAN_PAGE_FRACTION * direction);
     }
 
     fn start_lon(&self) -> f64 {
@@ -353,16 +366,25 @@ fn draw_marker_row(f: &mut Frame, view: &MapView, zone: Option<&Zone>, rect: Rec
     let Some(raw_x) = view.zone_x(zone, width) else {
         return;
     };
-    let x = raw_x.clamp(0, width as isize - 1) as u16;
-    let ch = if raw_x < 0 {
-        '<'
-    } else if raw_x >= width as isize {
-        '>'
-    } else if top {
-        'v'
-    } else {
-        '^'
-    };
+    if raw_x < 0 {
+        for dx in 0..width.min(3) {
+            if let Some(cell) = buf.cell_mut((rect.x + dx as u16, rect.y)) {
+                cell.set_char('<').set_fg(WARN).set_bg(SEA);
+            }
+        }
+        return;
+    }
+    if raw_x >= width as isize {
+        for dx in 0..width.min(3) {
+            let x = rect.x + width as u16 - 1 - dx as u16;
+            if let Some(cell) = buf.cell_mut((x, rect.y)) {
+                cell.set_char('>').set_fg(WARN).set_bg(SEA);
+            }
+        }
+        return;
+    }
+    let x = raw_x as u16;
+    let ch = if top { 'v' } else { '^' };
     if let Some(cell) = buf.cell_mut((rect.x + x, rect.y)) {
         cell.set_char(ch).set_fg(WARN).set_bg(SEA);
     }
@@ -416,6 +438,28 @@ fn near_lon(lon: f64, target: f64, step: f64) -> bool {
 
 fn near_lat(lat: f64, target: f64, step: f64) -> bool {
     (lat - target).abs() <= step * 0.5
+}
+
+fn draw_overview_row(f: &mut Frame, view: &MapView, zone: Option<&Zone>, rect: Rect) {
+    let buf = f.buffer_mut();
+    let width = rect.width.max(1) as usize;
+    for cx in 0..width {
+        let world_lon = -180.0 + (cx as f64 + 0.5) / width as f64 * 360.0;
+        let in_view = lon_delta(view.center_lon, world_lon).abs() < VIEW_LON_SPAN / 2.0;
+        let ch = if in_view { '=' } else { '·' };
+        let fg = if in_view { GUIDE_STRONG } else { ACCENT };
+        if let Some(cell) = buf.cell_mut((rect.x + cx as u16, rect.y)) {
+            cell.set_char(ch).set_fg(fg).set_bg(SEA);
+        }
+    }
+    if let Some(zone) = zone.filter(|z| z.has_coord) {
+        let x = (((wrap_lon(zone.lon) + 180.0) / 360.0) * width as f64)
+            .floor()
+            .clamp(0.0, width.saturating_sub(1) as f64) as u16;
+        if let Some(cell) = buf.cell_mut((rect.x + x, rect.y)) {
+            cell.set_char('*').set_fg(WARN).set_bg(SEA);
+        }
+    }
 }
 
 /// Draw the filled world map into `rect`. Each terminal cell holds two raster
@@ -509,10 +553,17 @@ fn draw_timezone(f: &mut Frame, pick: &TzPick, view: &MapView, subtitle: &str) {
         f,
         "Select Time Zone",
         subtitle,
-        "Type filter, Up/Down select, Left/Right pan, Enter confirm, Esc back",
+        "Type filter, Up/Down select, Left/Right pan, Home/. recenter, Enter confirm, Esc back",
     );
     let area = f.area();
     let layout = layout(area.height);
+
+    draw_overview_row(
+        f,
+        view,
+        pick.selected(),
+        Rect::new(0, layout.overview_y, area.width, 1),
+    );
 
     draw_marker_row(
         f,
@@ -619,8 +670,9 @@ impl Installer {
                                 view.follow(zone);
                             }
                         }
-                        KeyCode::Left => view.pan(-PAN_STEP_LON),
-                        KeyCode::Right => view.pan(PAN_STEP_LON),
+                        KeyCode::Left => view.page_pan(-1.0),
+                        KeyCode::Right => view.page_pan(1.0),
+                        KeyCode::Home | KeyCode::Char('.') => view.recenter(pick.selected()),
                         KeyCode::Backspace => {
                             pick.backspace();
                             if let Some(zone) = pick.selected() {
