@@ -16,6 +16,10 @@ const TICK: Duration = Duration::from_millis(80);
 const OFFSET_DEBOUNCE: Duration = Duration::from_millis(250);
 const VIEW_LON_SPAN: f64 = 180.0;
 const PAN_STEP_LON: f64 = 15.0;
+const SEA_DEEP: Color = Color::Indexed(4);
+const SEA_SHIMMER: Color = Color::Indexed(12);
+const LAND_COAST: Color = Color::Indexed(10);
+const PIN_BG: Color = Color::Indexed(1);
 
 /// Latitude band shown by the map. The poles are cropped (mostly empty ocean
 /// and the featureless Antarctic ice) so the inhabited band — where every
@@ -362,6 +366,48 @@ fn draw_marker_row(f: &mut Frame, view: &MapView, zone: Option<&Zone>, rect: Rec
     }
 }
 
+enum CellKind {
+    Sea,
+    Coast,
+    Land,
+}
+
+fn classify_cell(
+    lon: f64,
+    lat_top: f64,
+    lat_bot: f64,
+    lon_step: f64,
+) -> (CellKind, char, Color, Color) {
+    let top = is_land(lon, lat_top);
+    let bot = is_land(lon, lat_bot);
+    let left_top = is_land(lon - lon_step, lat_top);
+    let left_bot = is_land(lon - lon_step, lat_bot);
+    let right_top = is_land(lon + lon_step, lat_top);
+    let right_bot = is_land(lon + lon_step, lat_bot);
+    let neighbors = [left_top, left_bot, right_top, right_bot];
+    let touches_land = top || bot;
+    let touches_sea = !top || !bot;
+    let edge =
+        neighbors.iter().any(|&land| land != top) || neighbors.iter().any(|&land| land != bot);
+    let ch = match (top, bot) {
+        (true, true) => '\u{2588}',
+        (true, false) => '\u{2580}',
+        (false, true) => '\u{2584}',
+        (false, false) => ' ',
+    };
+    if touches_land && (touches_sea || edge) {
+        (CellKind::Coast, ch, LAND_COAST, SEA_SHIMMER)
+    } else if touches_land {
+        (CellKind::Land, ch, LAND, SEA_DEEP)
+    } else {
+        (CellKind::Sea, ch, LAND, SEA_DEEP)
+    }
+}
+
+fn sea_bg_for_row(cy: usize) -> Color {
+    if cy % 6 < 2 { SEA_SHIMMER } else { SEA_DEEP }
+}
+
 /// Draw the filled world map into `rect`. Each terminal cell holds two raster
 /// sub-rows, so a cell is one of `▀` `▄` `█` ` ` with the foreground painted
 /// land-coloured over a sea-coloured background. The visible viewport spans
@@ -374,21 +420,23 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
     let total_sub = height * 2;
     let span = LAT_MAX - LAT_MIN;
 
+    let lon_step = VIEW_LON_SPAN / width.max(1) as f64;
     for cy in 0..height {
         let lat_top = LAT_MAX - (2.0 * cy as f64 + 0.5) / total_sub as f64 * span;
         let lat_bot = LAT_MAX - (2.0 * cy as f64 + 1.5) / total_sub as f64 * span;
+        let sea_bg = sea_bg_for_row(cy);
         for cx in 0..width {
             let lon = view.lon_at(cx, width);
-            let ch = match (is_land(lon, lat_top), is_land(lon, lat_bot)) {
-                (true, true) => '\u{2588}',
-                (true, false) => '\u{2580}',
-                (false, true) => '\u{2584}',
-                (false, false) => ' ',
-            };
+            let (kind, ch, fg, bg) = classify_cell(lon, lat_top, lat_bot, lon_step);
             let x = rect.x + cx as u16;
             let y = rect.y + cy as u16;
             if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_char(ch).set_fg(LAND).set_bg(SEA);
+                let bg = match kind {
+                    CellKind::Sea => sea_bg,
+                    CellKind::Coast => bg,
+                    CellKind::Land => bg,
+                };
+                cell.set_char(ch).set_fg(fg).set_bg(bg);
             }
         }
     }
@@ -413,7 +461,7 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
         }
         let cell = buf.cell_mut((rect.x + x as u16, rect.y + y as u16));
         if let Some(cell) = cell {
-            cell.set_char(ch).set_fg(WARN).set_bg(SEA);
+            cell.set_char(ch).set_fg(WARN).set_bg(PIN_BG);
         }
     };
     mark(0, 0, '\u{2588}');
