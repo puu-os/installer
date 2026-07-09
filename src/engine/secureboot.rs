@@ -23,11 +23,11 @@ use openssl::sign::Signer;
 use openssl::stack::Stack;
 use openssl::x509::X509;
 
+use crate::engine::command::LogFn;
 use crate::engine::der::{
     algorithm_identifier, der_int_u8, der_octet, der_oid, der_read, der_seq, der_set, der_tlv,
 };
 use crate::engine::pipeline::{TARGET_EFI_MOUNT, TARGET_MOUNT};
-use crate::engine::subproc::LogFn;
 
 // Object identifiers, expressed as arc sequences and DER-encoded on demand.
 const OID_SPC_INDIRECT_DATA: &[u32] = &[1, 3, 6, 1, 4, 1, 311, 2, 1, 4];

@@ -8,8 +8,8 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use nix::mount::MsFlags;
 
+use crate::engine::command::{self, LogFn};
 use crate::engine::partition::DerivedPartitions;
-use crate::engine::subproc::{self, LogFn};
 
 pub use crate::engine::steps::STEPS;
 
@@ -192,12 +192,12 @@ impl Runner {
         (self.progress)(self.step_index, fraction);
     }
 
-    /// Begin building a subprocess invocation. Use [`subproc::Cmd::env`],
-    /// [`subproc::Cmd::heartbeat`] and [`subproc::Cmd::chroot`] to opt into
-    /// extras, then [`subproc::Cmd::run`] to execute it.
-    pub fn cmd<S: AsRef<str>>(&mut self, argv: &[S]) -> subproc::Cmd<'_> {
+    /// Begin building a subprocess invocation. Use [`command::Command::env`],
+    /// [`command::Command::heartbeat`] and [`command::Command::chroot`] to opt into
+    /// extras, then [`command::Command::run`] to execute it.
+    pub fn cmd<S: AsRef<str>>(&mut self, argv: &[S]) -> command::Command<'_> {
         let argv = argv.iter().map(|a| a.as_ref().to_string()).collect();
-        subproc::Cmd::new(&mut self.log, argv)
+        command::Command::new(&mut self.log, argv)
     }
 
     /// Like [`Runner::cmd`], but samples `source` while the command runs and
@@ -206,12 +206,12 @@ impl Runner {
         &mut self,
         argv: &[S],
         source: Box<dyn crate::engine::progress::ProgressSource>,
-    ) -> subproc::Cmd<'_> {
+    ) -> command::Command<'_> {
         let argv = argv.iter().map(|a| a.as_ref().to_string()).collect();
         let step_index = self.step_index;
         let progress = &mut self.progress;
         let emit = move |fraction: f64| (progress)(step_index, fraction);
-        subproc::Cmd::new(&mut self.log, argv).track(source, Box::new(emit))
+        command::Command::new(&mut self.log, argv).track(source, Box::new(emit))
     }
 
     pub fn execute(

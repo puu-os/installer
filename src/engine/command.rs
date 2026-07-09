@@ -52,16 +52,6 @@ fn format_argv(argv: &[String]) -> String {
     parts.join(" ")
 }
 
-fn push_tail(tail: &mut VecDeque<String>, line: String) {
-    if line.trim().is_empty() {
-        return;
-    }
-    if tail.len() >= OUTPUT_TAIL_LINES {
-        tail.pop_front();
-    }
-    tail.push_back(line);
-}
-
 /// Build a duct expression that creates a new session and merges stderr into
 /// stdout. When `chroot_dir` is set, the child chroots into it before exec,
 /// replacing the external `chroot` helper. The expression is `unchecked`, so a
@@ -110,9 +100,9 @@ unsafe fn enter_chroot(target: Option<&CStr>) -> io::Result<()> {
     Ok(())
 }
 
-/// A subprocess invocation built from [`crate::engine::pipeline::Runner::cmd`]. Merged
+/// A command invocation built from [`crate::engine::pipeline::Runner::cmd`]. Merged
 /// stdout+stderr is streamed to the log; a non-zero exit becomes an error.
-pub struct Cmd<'a> {
+pub struct Command<'a> {
     log: &'a mut LogFn,
     argv: Vec<String>,
     env: Option<&'a [(String, String)]>,
@@ -121,9 +111,9 @@ pub struct Cmd<'a> {
     tracker: Option<ProgressTracker<'a>>,
 }
 
-impl<'a> Cmd<'a> {
+impl<'a> Command<'a> {
     pub fn new(log: &'a mut LogFn, argv: Vec<String>) -> Self {
-        Cmd {
+        Self {
             log,
             argv,
             env: None,
@@ -208,7 +198,10 @@ impl<'a> Cmd<'a> {
                         if let Some((source, _)) = self.tracker.as_mut() {
                             source.observe_line(&line);
                         }
-                        push_tail(&mut output_tail, line.clone());
+                        if output_tail.len() >= OUTPUT_TAIL_LINES {
+                            output_tail.pop_front();
+                        }
+                        output_tail.push_back(line.clone());
                         (self.log)(line);
                     }
                 }

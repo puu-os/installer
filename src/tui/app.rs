@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
 
+use crate::engine::command::LogFn;
 use crate::engine::pipeline::{self, Context, ProgressCb, Runner, SkipCb, StepSelection};
-use crate::engine::subproc::LogFn;
 
 const INSTALL_LOG_PATH: &str = "/run/puu-installer/install.log";
 
