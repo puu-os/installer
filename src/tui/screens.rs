@@ -12,7 +12,6 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Paragraph},
 };
-use tachyonfx::{Effect, EffectRenderer, Interpolation, fx};
 
 use crate::engine::block;
 use crate::engine::firmware::{self, SetupModeStatus};
@@ -63,16 +62,20 @@ const INSTALL_OVERALL_Y: u16 = 4;
 const INSTALL_LOG_HDR_Y: u16 = 5;
 const INSTALL_LOG_Y: u16 = 6;
 
-// Nord palette (https://www.nordtheme.com/).
-pub(crate) const BG: Color = Color::Rgb(0x2E, 0x34, 0x40); // nord0  Polar Night
-const PANEL: Color = Color::Rgb(0x3B, 0x42, 0x52); // nord1  Polar Night
-const TITLE_BG: Color = Color::Rgb(0x5E, 0x81, 0xAC); // nord10 Frost
-const FG: Color = Color::Rgb(0xE5, 0xE9, 0xF0); // nord5  Snow Storm
-pub(crate) const ACCENT: Color = Color::Rgb(0x88, 0xC0, 0xD0); // nord8  Frost
-const ON_ACCENT: Color = Color::Rgb(0x2E, 0x34, 0x40); // nord0  on accent
-pub(crate) const ERR: Color = Color::Rgb(0xBF, 0x61, 0x6A); // nord11 Aurora
-pub(crate) const WARN: Color = Color::Rgb(0xEB, 0xCB, 0x8B); // nord13 Aurora
-const OK: Color = Color::Rgb(0xA3, 0xBE, 0x8C); // nord14 Aurora
+// 16-color ANSI palette. Indexed colors render identically on the Linux VT
+// console and on graphical terminals, so the installer looks the same in a
+// plain TTY and in a terminal emulator.
+pub(crate) const BG: Color = Color::Indexed(0); // black        screen background
+const PANEL: Color = Color::Indexed(8); // bright black  footer / panels
+const TITLE_BG: Color = Color::Indexed(4); // blue           title bar
+const FG: Color = Color::Indexed(15); // white         default text
+pub(crate) const ACCENT: Color = Color::Indexed(6); // cyan   subtitles, rules
+const ON_ACCENT: Color = Color::Indexed(0); // black        text on accent
+pub(crate) const ERR: Color = Color::Indexed(9); // bright red
+pub(crate) const WARN: Color = Color::Indexed(11); // bright yellow
+const OK: Color = Color::Indexed(10); // bright green
+pub(crate) const LAND: Color = Color::Indexed(2); // green   map continents
+pub(crate) const SEA: Color = Color::Indexed(4); // blue    map oceans
 
 const WELCOME_CHOICES: &[(ScreenAction, &str)] = &[
     (ScreenAction::Install, "Install"),
@@ -126,17 +129,13 @@ fn button_row(f: &mut Frame, choices: &[&str], selected: usize, y: u16, width: u
     }
 }
 
-/// Draw a full-width horizontal divider at `(x, y)`, using box-drawing dashes
-/// where the terminal supports them and plain hyphens otherwise. Callers may
-/// overpaint a styled label onto the rule to form a titled section header.
+/// Draw a full-width horizontal divider at `(x, y)` using plain hyphens so
+/// it renders identically on the Linux VT console and in terminal emulators.
+/// Callers may overpaint a styled label onto the rule to form a titled section
+/// header.
 fn rule(f: &mut Frame, x: u16, y: u16, width: u16) {
-    let dash = if crate::engine::util::terminal_is_utf8() {
-        '\u{2500}'
-    } else {
-        '-'
-    };
     f.render_widget(
-        Paragraph::new(dash.to_string().repeat(width as usize)).style(Style::default().fg(FG)),
+        Paragraph::new("-".repeat(width as usize)).style(Style::default().fg(FG)),
         Rect::new(x, y, width, 1),
     );
 }
@@ -258,21 +257,8 @@ fn progress_bar(fraction: f64, width: usize) -> Line<'static> {
     let fraction = fraction.clamp(0.0, 1.0);
     let percent = (fraction * 100.0) as usize;
 
-    let (filled, track) = if crate::engine::util::terminal_is_utf8() {
-        let eighths = (bar_w as f64 * fraction * 8.0) as usize;
-        let full = eighths / 8;
-        let rem = eighths % 8;
-        let mut filled = "█".repeat(full);
-        let partial = rem > 0 && full < bar_w;
-        if partial {
-            filled.push(['▏', '▎', '▍', '▌', '▋', '▊', '▉'][rem - 1]);
-        }
-        let used = full + usize::from(partial);
-        (filled, "░".repeat(bar_w.saturating_sub(used)))
-    } else {
-        let filled = (bar_w as f64 * fraction) as usize;
-        ("#".repeat(filled), "-".repeat(bar_w.saturating_sub(filled)))
-    };
+    let filled = (bar_w as f64 * fraction) as usize;
+    let (filled, track) = ("#".repeat(filled), "-".repeat(bar_w.saturating_sub(filled)));
 
     Line::from(vec![
         Span::raw("["),
@@ -288,13 +274,8 @@ fn format_elapsed(d: Duration) -> String {
 }
 
 fn spinner(frame: usize) -> &'static str {
-    if crate::engine::util::terminal_is_utf8() {
-        const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
-        FRAMES[frame % FRAMES.len()]
-    } else {
-        const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
-        FRAMES[frame % FRAMES.len()]
-    }
+    const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+    FRAMES[frame % FRAMES.len()]
 }
 
 impl Installer {
@@ -1074,17 +1055,6 @@ impl Installer {
             )
         };
 
-        // Subtle, isolated eye-candy, gated to terminals that can render it: a
-        // one-shot assemble-in on entry and a soft glow on the status line when
-        // the install completes. On the plain VT console this stays empty and
-        // the screen renders exactly as drawn.
-        let fx_enabled = crate::engine::util::terminal_is_utf8();
-        let mut intro_fx: Option<Effect> =
-            fx_enabled.then(|| fx::coalesce((450, Interpolation::CubicOut)));
-        let mut done_fx: Option<Effect> = None;
-        let mut prev_complete = false;
-        let mut last_draw = Instant::now();
-
         loop {
             while let Ok(evt) = worker.events_rx.try_recv() {
                 match evt {
@@ -1143,14 +1113,6 @@ impl Installer {
 
             let frame = (started.elapsed().as_millis() / 80) as usize;
 
-            let now = Instant::now();
-            let dt = now.duration_since(last_draw);
-            last_draw = now;
-            if fx_enabled && complete && !prev_complete {
-                done_fx = Some(fx::fade_from_fg(FG, (600, Interpolation::QuadOut)));
-            }
-            prev_complete = complete;
-
             term.draw(|f| {
                 Self::draw_frame(
                     f,
@@ -1170,11 +1132,7 @@ impl Installer {
                 let width = area.width;
                 let content_w = width.saturating_sub(2);
                 let bold = Style::default().add_modifier(Modifier::BOLD);
-                let sep = if crate::engine::util::terminal_is_utf8() {
-                    " \u{b7} "
-                } else {
-                    " - "
-                };
+                let sep = " - ";
 
                 // Current step (row 2): spinner + counter + title, or the final
                 // status message once the run has stopped.
@@ -1252,13 +1210,8 @@ impl Installer {
                 // Log header (row 5): a full-width rule with an inline label.
                 rule(f, 0, INSTALL_LOG_HDR_Y, width);
                 let (log_label, log_style) = if log_scroll > 0 {
-                    let arrow = if crate::engine::util::terminal_is_utf8() {
-                        "\u{2191}"
-                    } else {
-                        "^"
-                    };
                     (
-                        format!(" Log  {arrow}{log_scroll}  PgDn to follow "),
+                        format!(" Log  ^{log_scroll}  PgDn to follow "),
                         Style::default().fg(WARN).add_modifier(Modifier::BOLD),
                     )
                 } else {
@@ -1284,26 +1237,8 @@ impl Installer {
                         Rect::new(1, INSTALL_LOG_Y + row as u16, log_w, 1),
                     );
                 }
-
-                if let Some(effect) = intro_fx.as_mut() {
-                    f.render_effect(effect, area, dt.into());
-                }
-                if let Some(effect) = done_fx.as_mut() {
-                    f.render_effect(
-                        effect,
-                        Rect::new(2, INSTALL_CURRENT_Y, content_w, 1),
-                        dt.into(),
-                    );
-                }
             })
             .ok();
-
-            if intro_fx.as_ref().is_some_and(Effect::done) {
-                intro_fx = None;
-            }
-            if done_fx.as_ref().is_some_and(Effect::done) {
-                done_fx = None;
-            }
 
             if event::poll(Duration::from_millis(100)).unwrap_or(false) {
                 if let Ok(Event::Key(key)) = event::read() {

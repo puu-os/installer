@@ -37,4 +37,3 @@ strum = { version = "0.26", features = ["derive"] }
 tar = "0.4"
 udev = "0.9"
 uuid = { version = "1", features = ["v4"] }
-tachyonfx = "0.20.1"

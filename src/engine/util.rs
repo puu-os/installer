@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use std::sync::OnceLock;
-
 use anyhow::Result;
 
 /// Fill an `N`-byte array with cryptographically secure random bytes.
@@ -68,22 +66,6 @@ pub fn clean_log_line(line: &str) -> String {
 /// The user's login shell from `$SHELL`, falling back to `/bin/sh`.
 pub fn default_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-}
-
-/// Whether the controlling terminal's locale advertises UTF-8.
-pub fn terminal_is_utf8() -> bool {
-    static UTF8: OnceLock<bool> = OnceLock::new();
-    *UTF8.get_or_init(|| {
-        for var in ["LC_ALL", "LC_CTYPE", "LANG"] {
-            if let Ok(value) = std::env::var(var) {
-                if !value.is_empty() {
-                    let value = value.to_ascii_uppercase();
-                    return value.contains("UTF-8") || value.contains("UTF8");
-                }
-            }
-        }
-        false
-    })
 }
 
 /// Validate a hostname accepted by the installer.
