@@ -14,6 +14,8 @@ use crate::tui::screens::{ACCENT, ERR, LAND, SEA, WARN, highlight_style};
 const TICK: Duration = Duration::from_millis(80);
 /// Quiet period after the last keypress before the UTC offset is (re)computed.
 const OFFSET_DEBOUNCE: Duration = Duration::from_millis(250);
+const VIEW_LON_SPAN: f64 = 180.0;
+const PAN_STEP_LON: f64 = 15.0;
 
 /// Latitude band shown by the map. The poles are cropped (mostly empty ocean
 /// and the featureless Antarctic ice) so the inhabited band — where every
@@ -127,18 +129,97 @@ fn tz_offset(name: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Vertical layout of the timezone screen: `(map_h, filter_y, list_top, list_h)`.
-/// The map takes about 60% of the screen height, leaving a filter row and at
-/// least three list rows beneath it.
-fn layout(height: u16) -> (u16, u16, u16, u16) {
-    let bottom = height.saturating_sub(1); // footer row; content occupies rows 2..bottom
+fn wrap_lon(lon: f64) -> f64 {
+    (lon + 180.0).rem_euclid(360.0) - 180.0
+}
+
+fn lon_delta(from: f64, to: f64) -> f64 {
+    wrap_lon(to - from)
+}
+
+fn format_lon(lon: f64) -> String {
+    let lon = wrap_lon(lon);
+    let deg = lon.abs().round() as i32;
+    let hemi = if lon < 0.0 { 'W' } else { 'E' };
+    format!("{deg}{hemi}")
+}
+
+struct MapLayout {
+    top_marker_y: u16,
+    map_y: u16,
+    map_h: u16,
+    bottom_marker_y: u16,
+    filter_y: u16,
+    list_top: u16,
+    list_h: u16,
+}
+
+/// Vertical layout of the timezone screen.
+fn layout(height: u16) -> MapLayout {
+    let bottom = height.saturating_sub(1);
     let content = bottom.saturating_sub(2);
-    let max_map = content.saturating_sub(1 + 3); // reserve filter row + three list rows
-    let map_h = (height * 6 / 10).clamp(1, max_map);
-    let filter_y = 2 + map_h;
+    let max_map = content.saturating_sub(2 + 1 + 3).max(1);
+    let map_h = (height * 11 / 20).clamp(1, max_map);
+    let top_marker_y = 2;
+    let map_y = top_marker_y + 1;
+    let bottom_marker_y = map_y + map_h;
+    let filter_y = bottom_marker_y + 1;
     let list_top = filter_y + 1;
     let list_h = bottom.saturating_sub(list_top).max(1);
-    (map_h, filter_y, list_top, list_h)
+    MapLayout {
+        top_marker_y,
+        map_y,
+        map_h,
+        bottom_marker_y,
+        filter_y,
+        list_top,
+        list_h,
+    }
+}
+
+struct MapView {
+    center_lon: f64,
+}
+
+impl MapView {
+    fn new(selected: Option<&Zone>) -> Self {
+        let mut view = Self { center_lon: 0.0 };
+        if let Some(zone) = selected {
+            view.follow(zone);
+        }
+        view
+    }
+
+    fn follow(&mut self, zone: &Zone) {
+        if zone.has_coord {
+            self.center_lon = wrap_lon(zone.lon);
+        }
+    }
+
+    fn pan(&mut self, delta: f64) {
+        self.center_lon = wrap_lon(self.center_lon + delta);
+    }
+
+    fn start_lon(&self) -> f64 {
+        wrap_lon(self.center_lon - VIEW_LON_SPAN / 2.0)
+    }
+
+    fn end_lon(&self) -> f64 {
+        wrap_lon(self.center_lon + VIEW_LON_SPAN / 2.0)
+    }
+
+    fn lon_at(&self, x: usize, width: usize) -> f64 {
+        wrap_lon(self.start_lon() + (x as f64 + 0.5) / width.max(1) as f64 * VIEW_LON_SPAN)
+    }
+
+    fn zone_x(&self, zone: &Zone, width: usize) -> Option<isize> {
+        if !zone.has_coord || width == 0 {
+            return None;
+        }
+        let delta = lon_delta(self.center_lon, zone.lon);
+        let raw = ((delta + VIEW_LON_SPAN / 2.0) / VIEW_LON_SPAN * width as f64).floor() as isize;
+        Some(raw)
+    }
 }
 
 /// The scrollable, type-to-filter picker state. `sel`/`top` index into `filtered`.
@@ -252,13 +333,41 @@ impl TzPick {
     }
 }
 
+fn draw_marker_row(f: &mut Frame, view: &MapView, zone: Option<&Zone>, rect: Rect, top: bool) {
+    let buf = f.buffer_mut();
+    let width = rect.width.max(1) as usize;
+    for cx in 0..width {
+        if let Some(cell) = buf.cell_mut((rect.x + cx as u16, rect.y)) {
+            cell.set_char(' ').set_fg(ACCENT).set_bg(SEA);
+        }
+    }
+    let Some(zone) = zone else {
+        return;
+    };
+    let Some(raw_x) = view.zone_x(zone, width) else {
+        return;
+    };
+    let x = raw_x.clamp(0, width as isize - 1) as u16;
+    let ch = if raw_x < 0 {
+        '<'
+    } else if raw_x >= width as isize {
+        '>'
+    } else if top {
+        'v'
+    } else {
+        '^'
+    };
+    if let Some(cell) = buf.cell_mut((rect.x + x, rect.y)) {
+        cell.set_char(ch).set_fg(WARN).set_bg(SEA);
+    }
+}
+
 /// Draw the filled world map into `rect`. Each terminal cell holds two raster
 /// sub-rows, so a cell is one of `▀` `▄` `█` ` ` with the foreground painted
-/// land-coloured over a sea-coloured background. These half-block glyphs are
-/// present in the Linux VT console font, so the map renders identically in a
-/// plain TTY and in a terminal emulator. The map is static: only the selection
-/// marker moves.
-fn draw_map(f: &mut Frame, pick: &TzPick, rect: Rect) {
+/// land-coloured over a sea-coloured background. The visible viewport spans
+/// half the globe, which doubles the horizontal sampling density and can be
+/// panned left/right.
+fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
     let buf = f.buffer_mut();
     let width = rect.width.max(1) as usize;
     let height = rect.height.max(1) as usize;
@@ -269,11 +378,11 @@ fn draw_map(f: &mut Frame, pick: &TzPick, rect: Rect) {
         let lat_top = LAT_MAX - (2.0 * cy as f64 + 0.5) / total_sub as f64 * span;
         let lat_bot = LAT_MAX - (2.0 * cy as f64 + 1.5) / total_sub as f64 * span;
         for cx in 0..width {
-            let lon = -180.0 + (cx as f64 + 0.5) / width as f64 * 360.0;
+            let lon = view.lon_at(cx, width);
             let ch = match (is_land(lon, lat_top), is_land(lon, lat_bot)) {
-                (true, true) => '\u{2588}',  // █ full block
-                (true, false) => '\u{2580}', // ▀ upper half
-                (false, true) => '\u{2584}', // ▄ lower half
+                (true, true) => '\u{2588}',
+                (true, false) => '\u{2580}',
+                (false, true) => '\u{2584}',
                 (false, false) => ' ',
             };
             let x = rect.x + cx as u16;
@@ -284,8 +393,6 @@ fn draw_map(f: &mut Frame, pick: &TzPick, rect: Rect) {
         }
     }
 
-    // Selection marker: a small crosshair following the cursor. Out-of-range
-    // latitudes (polar stations below the cropped band) clamp to the edge.
     let Some(z) = pick.selected() else {
         return;
     };
@@ -293,13 +400,11 @@ fn draw_map(f: &mut Frame, pick: &TzPick, rect: Rect) {
         return;
     }
     let lat = z.lat.clamp(LAT_MIN, LAT_MAX);
-    let mx = ((z.lon + 180.0) / 360.0 * width as f64) as isize;
+    let raw_x = view.zone_x(z, width).unwrap_or(0);
+    let cx = raw_x.clamp(0, width as isize - 1) as usize;
     let msub = ((LAT_MAX - lat) / span * total_sub as f64) as isize;
-    let cx = mx.clamp(0, width as isize - 1) as usize;
     let cy = (msub / 2).clamp(0, height as isize - 1) as usize;
 
-    // Center + vertical arms (half-blocks that touch the center) + horizontal
-    // arms, all in the warning colour so the pin stands out on land and sea.
     let mut mark = |dx: i32, dy: i32, ch: char| {
         let x = cx as i32 + dx;
         let y = cy as i32 + dy;
@@ -311,42 +416,61 @@ fn draw_map(f: &mut Frame, pick: &TzPick, rect: Rect) {
             cell.set_char(ch).set_fg(WARN).set_bg(SEA);
         }
     };
-    mark(0, 0, '\u{2588}'); // center
-    mark(0, -1, '\u{2584}'); // arm up (lower half of the cell above)
-    mark(0, 1, '\u{2580}'); // arm down (upper half of the cell below)
-    mark(-1, 0, '\u{2588}'); // arm left
-    mark(1, 0, '\u{2588}'); // arm right
+    mark(0, 0, '\u{2588}');
+    mark(0, -1, '\u{2584}');
+    mark(0, 1, '\u{2580}');
+    mark(-1, 0, '\u{2588}');
+    mark(1, 0, '\u{2588}');
 }
 
 /// Render the whole timezone screen (map band, filter line, scroll list).
-fn draw_timezone(f: &mut Frame, pick: &TzPick, subtitle: &str) {
+fn draw_timezone(f: &mut Frame, pick: &TzPick, view: &MapView, subtitle: &str) {
     Installer::draw_frame(
         f,
         "Select Time Zone",
         subtitle,
-        "Type to filter, Up/Down select, Enter confirm, Esc back",
+        "Type filter, Up/Down select, Left/Right pan, Enter confirm, Esc back",
     );
     let area = f.area();
-    let (map_h, filter_y, list_top, list_h) = layout(area.height);
+    let layout = layout(area.height);
 
-    if map_h > 0 {
-        draw_map(f, pick, Rect::new(0, 2, area.width, map_h));
+    draw_marker_row(
+        f,
+        view,
+        pick.selected(),
+        Rect::new(0, layout.top_marker_y, area.width, 1),
+        true,
+    );
+    if layout.map_h > 0 {
+        draw_map(
+            f,
+            pick,
+            view,
+            Rect::new(0, layout.map_y, area.width, layout.map_h),
+        );
     }
+    draw_marker_row(
+        f,
+        view,
+        pick.selected(),
+        Rect::new(0, layout.bottom_marker_y, area.width, 1),
+        false,
+    );
 
     f.render_widget(
         Paragraph::new(format!(" Filter: {}_", pick.filter)).style(Style::default().fg(ACCENT)),
-        Rect::new(0, filter_y, area.width, 1),
+        Rect::new(0, layout.filter_y, area.width, 1),
     );
 
     if pick.filtered.is_empty() {
         f.render_widget(
             Paragraph::new("  No matching time zones").style(Style::default().fg(ERR)),
-            Rect::new(0, list_top, area.width, 1),
+            Rect::new(0, layout.list_top, area.width, 1),
         );
         return;
     }
 
-    let visible = list_h as usize;
+    let visible = layout.list_h as usize;
     let end = (pick.top + visible).min(pick.filtered.len());
     for (row, &idx) in pick.filtered[pick.top..end].iter().enumerate() {
         let i = pick.top + row;
@@ -355,7 +479,7 @@ fn draw_timezone(f: &mut Frame, pick: &TzPick, subtitle: &str) {
         f.render_widget(
             Paragraph::new(format!("{marker_ch} {}", pick.all[idx].name))
                 .style(highlight_style(is_sel)),
-            Rect::new(0, list_top + row as u16, area.width, 1),
+            Rect::new(0, layout.list_top + row as u16, area.width, 1),
         );
     }
 }
@@ -369,21 +493,28 @@ impl Installer {
         let current = self.ctx.config.identity.timezone.clone();
         let mut pick = TzPick::new(load_zones(), &current);
         pick.update_offset();
+        let mut view = MapView::new(pick.selected());
 
         let mut last_tick = Instant::now();
 
         loop {
             let height = term.size().map_or(24, |s| s.height);
-            let (_, _, _, list_h) = layout(height);
-            pick.reframe(list_h as usize);
+            let layout = layout(height);
+            pick.reframe(layout.list_h as usize);
 
+            let viewport = format!(
+                "view {}..{}",
+                format_lon(view.start_lon()),
+                format_lon(view.end_lon())
+            );
             let subtitle = match pick.selected() {
-                Some(z) if pick.offset_str.is_empty() => z.name.clone(),
-                Some(z) => format!("{}   {}", z.name, pick.offset_str),
-                None => String::new(),
+                Some(z) if pick.offset_str.is_empty() => format!("{}   {viewport}", z.name),
+                Some(z) => format!("{}   {}   {viewport}", z.name, pick.offset_str),
+                None => viewport,
             };
 
-            term.draw(|f| draw_timezone(f, &pick, &subtitle)).ok();
+            term.draw(|f| draw_timezone(f, &pick, &view, &subtitle))
+                .ok();
 
             let timeout = TICK.saturating_sub(last_tick.elapsed());
             if event::poll(timeout).unwrap_or(false) {
@@ -396,13 +527,33 @@ impl Installer {
                                 return ScreenAction::Continue;
                             }
                         }
-                        KeyCode::Up => pick.move_up(),
-                        KeyCode::Down => pick.move_down(),
-                        KeyCode::Backspace => pick.backspace(),
+                        KeyCode::Up => {
+                            pick.move_up();
+                            if let Some(zone) = pick.selected() {
+                                view.follow(zone);
+                            }
+                        }
+                        KeyCode::Down => {
+                            pick.move_down();
+                            if let Some(zone) = pick.selected() {
+                                view.follow(zone);
+                            }
+                        }
+                        KeyCode::Left => view.pan(-PAN_STEP_LON),
+                        KeyCode::Right => view.pan(PAN_STEP_LON),
+                        KeyCode::Backspace => {
+                            pick.backspace();
+                            if let Some(zone) = pick.selected() {
+                                view.follow(zone);
+                            }
+                        }
                         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             pick.filter.clear();
                             pick.refilter();
                             pick.last_input = Instant::now();
+                            if let Some(zone) = pick.selected() {
+                                view.follow(zone);
+                            }
                         }
                         KeyCode::Char(c)
                             if c.is_ascii()
@@ -410,6 +561,9 @@ impl Installer {
                                 && !key.modifiers.contains(KeyModifiers::CONTROL) =>
                         {
                             pick.push_filter(c);
+                            if let Some(zone) = pick.selected() {
+                                view.follow(zone);
+                            }
                         }
                         _ => {}
                     }
