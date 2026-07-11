@@ -631,8 +631,7 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
     let sync =
         Path::new(TARGET_MOUNT).join(r.ctx.config.flatpak.sync_helper.trim_start_matches('/'));
     if !sync.is_file() {
-        r.log("flatpak-seed: flatpak-sync helper missing; skipping");
-        return Ok(());
+        bail!("flatpak-sync helper not found at {}", sync.display());
     }
 
     r.log(&format!(
