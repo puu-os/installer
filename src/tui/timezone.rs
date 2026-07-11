@@ -9,13 +9,15 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use crate::tui::app::{Installer, ScreenAction};
-use crate::tui::screens::{ACCENT, ERR, LAND, SEA, WARN, highlight_style};
+use crate::tui::screens::{ACCENT, ERR, LAND, SEA, WARN};
 
 const TICK: Duration = Duration::from_millis(80);
 /// Quiet period after the last keypress before the UTC offset is (re)computed.
 const OFFSET_DEBOUNCE: Duration = Duration::from_millis(250);
 const VIEW_LON_SPAN: f64 = 180.0;
 const PAN_PAGE_FRACTION: f64 = 0.5;
+const VIEW_SCROLL_SPEED: f64 = 420.0;
+const VIEW_SNAP_EPSILON: f64 = 0.25;
 const SEA_DEEP: Color = Color::Indexed(4);
 const SEA_SHIMMER: Color = Color::Indexed(12);
 const LAND_COAST: Color = Color::Indexed(10);
@@ -188,25 +190,28 @@ fn layout(height: u16) -> MapLayout {
 
 struct MapView {
     center_lon: f64,
+    target_lon: f64,
 }
 
 impl MapView {
     fn new(selected: Option<&Zone>) -> Self {
-        let mut view = Self { center_lon: 0.0 };
-        if let Some(zone) = selected {
-            view.follow(zone);
+        let center_lon = selected
+            .filter(|zone| zone.has_coord)
+            .map_or(0.0, |zone| wrap_lon(zone.lon));
+        Self {
+            center_lon,
+            target_lon: center_lon,
         }
-        view
     }
 
     fn follow(&mut self, zone: &Zone) {
         if zone.has_coord {
-            self.center_lon = wrap_lon(zone.lon);
+            self.target_lon = wrap_lon(zone.lon);
         }
     }
 
     fn pan(&mut self, delta: f64) {
-        self.center_lon = wrap_lon(self.center_lon + delta);
+        self.target_lon = wrap_lon(self.target_lon + delta);
     }
 
     fn recenter(&mut self, zone: Option<&Zone>) {
@@ -217,6 +222,21 @@ impl MapView {
 
     fn page_pan(&mut self, direction: f64) {
         self.pan(VIEW_LON_SPAN * PAN_PAGE_FRACTION * direction);
+    }
+
+    fn on_tick(&mut self, elapsed: Duration) {
+        let delta = lon_delta(self.center_lon, self.target_lon);
+        if delta.abs() <= VIEW_SNAP_EPSILON {
+            self.center_lon = self.target_lon;
+            return;
+        }
+
+        let step = VIEW_SCROLL_SPEED * elapsed.as_secs_f64();
+        if delta.abs() <= step {
+            self.center_lon = self.target_lon;
+        } else {
+            self.center_lon = wrap_lon(self.center_lon + step * delta.signum());
+        }
     }
 
     fn start_lon(&self) -> f64 {
@@ -493,8 +513,7 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 let bg = match kind {
                     CellKind::Sea => sea_bg,
-                    CellKind::Coast => bg,
-                    CellKind::Land => bg,
+                    CellKind::Coast | CellKind::Land => bg,
                 };
                 if major_meridian && matches!(kind, CellKind::Sea) {
                     ch = '·';
@@ -545,6 +564,17 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
     mark(0, 1, '\u{2580}');
     mark(-1, 0, '\u{2588}');
     mark(1, 0, '\u{2588}');
+}
+
+fn timezone_list_style(selected: bool) -> Style {
+    if selected {
+        Style::default()
+            .fg(Color::Indexed(0))
+            .bg(WARN)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    }
 }
 
 /// Render the whole timezone screen (map band, filter line, scroll list).
@@ -606,10 +636,10 @@ fn draw_timezone(f: &mut Frame, pick: &TzPick, view: &MapView, subtitle: &str) {
     for (row, &idx) in pick.filtered[pick.top..end].iter().enumerate() {
         let i = pick.top + row;
         let is_sel = i == pick.sel;
-        let marker_ch = if is_sel { ">" } else { " " };
+        let marker_ch = if is_sel { ">>" } else { "  " };
         f.render_widget(
             Paragraph::new(format!("{marker_ch} {}", pick.all[idx].name))
-                .style(highlight_style(is_sel)),
+                .style(timezone_list_style(is_sel)),
             Rect::new(0, layout.list_top + row as u16, area.width, 1),
         );
     }
@@ -703,8 +733,11 @@ impl Installer {
             }
 
             if last_tick.elapsed() >= TICK {
-                pick.on_tick(Instant::now());
-                last_tick = Instant::now();
+                let now = Instant::now();
+                let elapsed = now.duration_since(last_tick);
+                pick.on_tick(now);
+                view.on_tick(elapsed);
+                last_tick = now;
             }
         }
     }
