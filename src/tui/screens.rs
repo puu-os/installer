@@ -80,7 +80,6 @@ pub(crate) const LAND: Color = Color::Indexed(2); // green   map continents
 
 const WELCOME_CHOICES: &[(ScreenAction, &str)] = &[
     (ScreenAction::Install, "Install"),
-    (ScreenAction::Network, "Network"),
     (ScreenAction::Shell, "Shell"),
     (ScreenAction::Reboot, "Reboot"),
 ];
@@ -146,12 +145,6 @@ fn keymap_for_locale(locale: &str) -> &str {
         .iter()
         .find(|(l, _)| *l == locale)
         .map_or("us", |(_, k)| *k)
-}
-
-fn network_tool() -> Option<&'static str> {
-    ["nmtui", "nmcli", "iwctl"]
-        .into_iter()
-        .find(|&tool| crate::engine::util::which_exists(tool))
 }
 
 /// Handle a terminal I/O Result without panicking: restore terminal and exit cleanly.
@@ -1350,27 +1343,5 @@ impl Installer {
                 }
             }
         }
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) fn run_network(&mut self, term: &mut Terminal<CrosstermBackend<io::Stdout>>) {
-        let Some(tool) = network_tool() else {
-            term.draw(|f| {
-                Self::draw_frame(f, "Network", "", "");
-                f.render_widget(
-                    Paragraph::new("No network CLI found. Expected nmtui, nmcli, or iwctl.")
-                        .style(Style::default().fg(ERR)),
-                    Rect::new(4, 5, f.area().width.saturating_sub(8), 1),
-                );
-                f.render_widget(
-                    Paragraph::new("Press any key to continue..."),
-                    Rect::new(4, 7, f.area().width, 1),
-                );
-            })
-            .ok();
-            let _ = event::read();
-            return;
-        };
-        run_on_console(term, std::process::Command::new(tool));
     }
 }

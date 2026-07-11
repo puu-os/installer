@@ -21,7 +21,6 @@ pub enum Trap {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 pub(crate) enum ScreenAction {
     Install,
-    Network,
     Shell,
     Reboot,
     Continue,
@@ -221,9 +220,6 @@ impl Installer {
                     if let Some(Trap::Reboot) = self.install_flow(term) {
                         return Trap::Reboot;
                     }
-                }
-                ScreenAction::Network => {
-                    self.run_network(term);
                 }
                 ScreenAction::Shell => return Trap::Shell,
                 ScreenAction::Reboot => {
