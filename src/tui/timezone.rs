@@ -9,7 +9,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use crate::tui::app::{Installer, ScreenAction};
-use crate::tui::screens::{ACCENT, ERR, LAND, SEA, WARN};
+use crate::tui::screens::{ACCENT, ERR, LAND, ON_WARN, SEA, WARN};
 
 const TICK: Duration = Duration::from_millis(80);
 /// Quiet period after the last keypress before the UTC offset is (re)computed.
@@ -572,7 +572,7 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
 fn timezone_list_style(selected: bool) -> Style {
     if selected {
         Style::default()
-            .fg(Color::Indexed(0))
+            .fg(ON_WARN)
             .bg(WARN)
             .add_modifier(Modifier::BOLD)
     } else {
