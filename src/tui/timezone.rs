@@ -9,19 +9,18 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use crate::tui::app::{Installer, ScreenAction};
-use crate::tui::screens::{ACCENT, ERR, LAND, ON_WARN, SEA, WARN};
+use crate::tui::screens::{ACCENT, ERR, LAND, ON_SELECT, SELECT};
 
 const TICK: Duration = Duration::from_millis(80);
 /// Quiet period after the last keypress before the UTC offset is (re)computed.
 const OFFSET_DEBOUNCE: Duration = Duration::from_millis(250);
 const VIEW_LON_SPAN: f64 = 180.0;
 const PAN_PAGE_FRACTION: f64 = 0.5;
-const VIEW_SCROLL_SPEED: f64 = 420.0;
+const VIEW_SCROLL_SECONDS: f64 = 0.30;
 const VIEW_SNAP_EPSILON: f64 = 0.25;
 const SEA_DEEP: Color = Color::Indexed(4);
 const SEA_SHIMMER: Color = Color::Indexed(12);
 const LAND_COAST: Color = Color::Indexed(10);
-const PIN_BG: Color = Color::Indexed(1);
 const GUIDE: Color = Color::Indexed(7);
 const GUIDE_STRONG: Color = Color::Indexed(14);
 
@@ -153,11 +152,8 @@ fn format_lon(lon: f64) -> String {
 }
 
 struct MapLayout {
-    overview_y: u16,
-    top_marker_y: u16,
     map_y: u16,
     map_h: u16,
-    bottom_marker_y: u16,
     filter_y: u16,
     list_top: u16,
     list_h: u16,
@@ -167,21 +163,15 @@ struct MapLayout {
 fn layout(height: u16) -> MapLayout {
     let bottom = height.saturating_sub(1);
     let content = bottom.saturating_sub(2);
-    let max_map = content.saturating_sub(3 + 1 + 3).max(1);
+    let max_map = content.saturating_sub(2).max(1);
     let map_h = (height * 11 / 20).clamp(1, max_map);
-    let overview_y = 2;
-    let top_marker_y = overview_y + 1;
-    let map_y = top_marker_y + 1;
-    let bottom_marker_y = map_y + map_h;
-    let filter_y = bottom_marker_y + 1;
+    let map_y = 2;
+    let filter_y = map_y + map_h;
     let list_top = filter_y + 1;
     let list_h = bottom.saturating_sub(list_top).max(1);
     MapLayout {
-        overview_y,
-        top_marker_y,
         map_y,
         map_h,
-        bottom_marker_y,
         filter_y,
         list_top,
         list_h,
@@ -214,12 +204,6 @@ impl MapView {
         self.target_lon = wrap_lon(self.target_lon + delta);
     }
 
-    fn recenter(&mut self, zone: Option<&Zone>) {
-        if let Some(zone) = zone {
-            self.follow(zone);
-        }
-    }
-
     fn page_pan(&mut self, direction: f64) {
         self.pan(VIEW_LON_SPAN * PAN_PAGE_FRACTION * direction);
     }
@@ -231,12 +215,8 @@ impl MapView {
             return;
         }
 
-        let step = VIEW_SCROLL_SPEED * elapsed.as_secs_f64();
-        if delta.abs() <= step {
-            self.center_lon = self.target_lon;
-        } else {
-            self.center_lon = wrap_lon(self.center_lon + step * delta.signum());
-        }
+        let fraction = (elapsed.as_secs_f64() / VIEW_SCROLL_SECONDS).clamp(0.0, 1.0);
+        self.center_lon = wrap_lon(self.center_lon + delta * fraction);
     }
 
     fn start_lon(&self) -> f64 {
@@ -294,6 +274,12 @@ impl TzPick {
 
     fn selected(&self) -> Option<&Zone> {
         self.filtered.get(self.sel).map(|&i| &self.all[i])
+    }
+
+    fn sync_view(&self, view: &mut MapView) {
+        if let Some(zone) = self.selected() {
+            view.follow(zone);
+        }
     }
 
     fn refilter(&mut self) {
@@ -372,44 +358,6 @@ impl TzPick {
     }
 }
 
-fn draw_marker_row(f: &mut Frame, view: &MapView, zone: Option<&Zone>, rect: Rect, top: bool) {
-    let buf = f.buffer_mut();
-    let width = rect.width.max(1) as usize;
-    for cx in 0..width {
-        if let Some(cell) = buf.cell_mut((rect.x + cx as u16, rect.y)) {
-            cell.set_char(' ').set_fg(ACCENT).set_bg(SEA);
-        }
-    }
-    let Some(zone) = zone else {
-        return;
-    };
-    let Some(raw_x) = view.zone_x(zone, width) else {
-        return;
-    };
-    if raw_x < 0 {
-        for dx in 0..width.min(3) {
-            if let Some(cell) = buf.cell_mut((rect.x + dx as u16, rect.y)) {
-                cell.set_char('<').set_fg(WARN).set_bg(SEA);
-            }
-        }
-        return;
-    }
-    if raw_x >= width as isize {
-        for dx in 0..width.min(3) {
-            let x = rect.x + width as u16 - 1 - dx as u16;
-            if let Some(cell) = buf.cell_mut((x, rect.y)) {
-                cell.set_char('>').set_fg(WARN).set_bg(SEA);
-            }
-        }
-        return;
-    }
-    let x = raw_x as u16;
-    let ch = if top { 'v' } else { '^' };
-    if let Some(cell) = buf.cell_mut((rect.x + x, rect.y)) {
-        cell.set_char(ch).set_fg(WARN).set_bg(SEA);
-    }
-}
-
 enum CellKind {
     Sea,
     Coast,
@@ -460,28 +408,6 @@ fn near_lat(lat: f64, target: f64, step: f64) -> bool {
     (lat - target).abs() <= step * 0.5
 }
 
-fn draw_overview_row(f: &mut Frame, view: &MapView, zone: Option<&Zone>, rect: Rect) {
-    let buf = f.buffer_mut();
-    let width = rect.width.max(1) as usize;
-    for cx in 0..width {
-        let world_lon = -180.0 + (cx as f64 + 0.5) / width as f64 * 360.0;
-        let in_view = lon_delta(view.center_lon, world_lon).abs() <= VIEW_LON_SPAN / 2.0;
-        let ch = if in_view { '=' } else { '·' };
-        let fg = if in_view { GUIDE_STRONG } else { ACCENT };
-        if let Some(cell) = buf.cell_mut((rect.x + cx as u16, rect.y)) {
-            cell.set_char(ch).set_fg(fg).set_bg(SEA);
-        }
-    }
-    if let Some(zone) = zone.filter(|z| z.has_coord) {
-        let x = (((wrap_lon(zone.lon) + 180.0) / 360.0) * width as f64)
-            .floor()
-            .clamp(0.0, width.saturating_sub(1) as f64) as u16;
-        if let Some(cell) = buf.cell_mut((rect.x + x, rect.y)) {
-            cell.set_char('*').set_fg(WARN).set_bg(SEA);
-        }
-    }
-}
-
 /// Draw the filled world map into `rect`. Each terminal cell holds two raster
 /// sub-rows, so a cell is one of `▀` `▄` `█` ` ` with the foreground painted
 /// land-coloured over a sea-coloured background. The visible viewport spans
@@ -508,7 +434,10 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
             let (kind, mut ch, mut fg, bg) = classify_cell(lon, lat_top, lat_bot, lon_step);
             let x = rect.x + cx as u16;
             let y = rect.y + cy as u16;
-            let major_meridian = near_lon(lon, 0.0, lon_step) || near_lon(lon, 90.0, lon_step);
+            let major_meridian = near_lon(lon, 0.0, lon_step)
+                || near_lon(lon, 90.0, lon_step)
+                || near_lon(lon, -90.0, lon_step)
+                || near_lon(lon, 180.0, lon_step);
             let zone_meridian = selected_lon.is_some_and(|target| near_lon(lon, target, lon_step));
             if let Some(cell) = buf.cell_mut((x, y)) {
                 let bg = match kind {
@@ -525,7 +454,7 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
                 }
                 if zone_meridian && matches!(kind, CellKind::Sea) {
                     ch = '│';
-                    fg = if equator_here { GUIDE_STRONG } else { WARN };
+                    fg = if equator_here { GUIDE_STRONG } else { SELECT };
                 }
                 if major_meridian && equator_here && !zone_meridian {
                     ch = '┼';
@@ -551,29 +480,17 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
     let msub = ((LAT_MAX - lat) / span * total_sub as f64) as isize;
     let cy = (msub / 2).clamp(0, height as isize - 1) as usize;
 
-    let mut mark = |dx: i32, dy: i32, ch: char| {
-        let x = cx as i32 + dx;
-        let y = cy as i32 + dy;
-        if !(0..width as i32).contains(&x) || !(0..height as i32).contains(&y) {
-            return;
-        }
-        let cell = buf.cell_mut((rect.x + x as u16, rect.y + y as u16));
-        if let Some(cell) = cell {
-            cell.set_char(ch).set_fg(WARN).set_bg(PIN_BG);
-        }
-    };
-    mark(0, 0, '\u{2588}');
-    mark(0, -1, '\u{2584}');
-    mark(0, 1, '\u{2580}');
-    mark(-1, 0, '\u{2588}');
-    mark(1, 0, '\u{2588}');
+    if let Some(cell) = buf.cell_mut((rect.x + cx as u16, rect.y + cy as u16)) {
+        let bg = cell.bg;
+        cell.set_char('X').set_fg(SELECT).set_bg(bg);
+    }
 }
 
 fn timezone_list_style(selected: bool) -> Style {
     if selected {
         Style::default()
-            .fg(ON_WARN)
-            .bg(WARN)
+            .fg(ON_SELECT)
+            .bg(SELECT)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -591,20 +508,6 @@ fn draw_timezone(f: &mut Frame, pick: &TzPick, view: &MapView, subtitle: &str) {
     let area = f.area();
     let layout = layout(area.height);
 
-    draw_overview_row(
-        f,
-        view,
-        pick.selected(),
-        Rect::new(0, layout.overview_y, area.width, 1),
-    );
-
-    draw_marker_row(
-        f,
-        view,
-        pick.selected(),
-        Rect::new(0, layout.top_marker_y, area.width, 1),
-        true,
-    );
     if layout.map_h > 0 {
         draw_map(
             f,
@@ -613,13 +516,6 @@ fn draw_timezone(f: &mut Frame, pick: &TzPick, view: &MapView, subtitle: &str) {
             Rect::new(0, layout.map_y, area.width, layout.map_h),
         );
     }
-    draw_marker_row(
-        f,
-        view,
-        pick.selected(),
-        Rect::new(0, layout.bottom_marker_y, area.width, 1),
-        false,
-    );
 
     f.render_widget(
         Paragraph::new(format!(" Filter: {}_", pick.filter)).style(Style::default().fg(ACCENT)),
@@ -693,32 +589,24 @@ impl Installer {
                         }
                         KeyCode::Up => {
                             pick.move_up();
-                            if let Some(zone) = pick.selected() {
-                                view.follow(zone);
-                            }
+                            pick.sync_view(&mut view);
                         }
                         KeyCode::Down => {
                             pick.move_down();
-                            if let Some(zone) = pick.selected() {
-                                view.follow(zone);
-                            }
+                            pick.sync_view(&mut view);
                         }
                         KeyCode::Left => view.page_pan(-1.0),
                         KeyCode::Right => view.page_pan(1.0),
-                        KeyCode::Home | KeyCode::Char('.') => view.recenter(pick.selected()),
+                        KeyCode::Home | KeyCode::Char('.') => pick.sync_view(&mut view),
                         KeyCode::Backspace => {
                             pick.backspace();
-                            if let Some(zone) = pick.selected() {
-                                view.follow(zone);
-                            }
+                            pick.sync_view(&mut view);
                         }
                         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             pick.filter.clear();
                             pick.refilter();
                             pick.last_input = Instant::now();
-                            if let Some(zone) = pick.selected() {
-                                view.follow(zone);
-                            }
+                            pick.sync_view(&mut view);
                         }
                         KeyCode::Char(c)
                             if c.is_ascii()
@@ -726,9 +614,7 @@ impl Installer {
                                 && !key.modifiers.contains(KeyModifiers::CONTROL) =>
                         {
                             pick.push_filter(c);
-                            if let Some(zone) = pick.selected() {
-                                view.follow(zone);
-                            }
+                            pick.sync_view(&mut view);
                         }
                         _ => {}
                     }

@@ -73,10 +73,10 @@ pub(crate) const ACCENT: Color = Color::Indexed(6); // cyan   subtitles, rules
 const ON_ACCENT: Color = Color::Indexed(0); // black        text on accent
 pub(crate) const ERR: Color = Color::Indexed(9); // bright red
 pub(crate) const WARN: Color = Color::Indexed(11); // bright yellow
-pub(crate) const ON_WARN: Color = Color::Indexed(0); // black        text on warning
+pub(crate) const SELECT: Color = Color::Indexed(13); // bright magenta selection
+pub(crate) const ON_SELECT: Color = Color::Indexed(0); // black        text on selection
 const OK: Color = Color::Indexed(10); // bright green
 pub(crate) const LAND: Color = Color::Indexed(2); // green   map continents
-pub(crate) const SEA: Color = Color::Indexed(4); // blue    map oceans
 
 const WELCOME_CHOICES: &[(ScreenAction, &str)] = &[
     (ScreenAction::Install, "Install"),
