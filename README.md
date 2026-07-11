@@ -76,9 +76,10 @@ kernel:
 
 ## External commands
 
-- `bootc`, for installing the bootc image to the target filesystem. Replacing
-  this with `libostree/container-storage` code is a separate effort.
-- `mkfs.fat`, `mkfs.xfs` and `mke2fs`, for creating the target filesystems.
+- **`bootc`**: installs the bootc image to the target filesystem.
+- **`mke2fs`**: formats the home partition as ext4.
+- **`configure-k3s-cluster`**: stages k3s cluster configuration (chrooted).
+- **`flatpak-sync`**: pre-seeds system Flatpaks (chrooted into the target).
 
 ## Licensing
 
