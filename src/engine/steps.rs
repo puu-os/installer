@@ -558,6 +558,11 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
         argv.push(r.ctx.config.k3s.node_name.clone());
     }
     r.cmd(&argv).chroot(TARGET_MOUNT).run()?;
+
+    if !r.ctx.k3s_token.is_empty() {
+        let token_path = Path::new(TARGET_MOUNT).join("etc/rancher/k3s/puu-token");
+        let _ = std::fs::remove_file(&token_path);
+    }
     r.log(&format!(
         "k3s cluster: staged {} configuration",
         r.ctx.config.k3s.role
