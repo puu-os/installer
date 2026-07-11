@@ -12,8 +12,6 @@ use crate::tui::app::{Installer, ScreenAction};
 use crate::tui::screens::{ACCENT, ERR, LAND, ON_SELECT, SELECT};
 
 const TICK: Duration = Duration::from_millis(80);
-/// Quiet period after the last keypress before the UTC offset is (re)computed.
-const OFFSET_DEBOUNCE: Duration = Duration::from_millis(250);
 const VIEW_LON_SPAN: f64 = 180.0;
 const PAN_PAGE_FRACTION: f64 = 0.5;
 const VIEW_SCROLL_SECONDS: f64 = 0.30;
@@ -99,41 +97,6 @@ fn is_land(lon: f64, lat: f64) -> bool {
     let x = fx.min(MAP_W - 1);
     let byte = WORLD_MASK[fy * ROW_BYTES + x / 8];
     byte & (0x80 >> (x % 8)) != 0
-}
-
-/// Format a `date +%z` value like `+0200` as `UTC+2` / `UTC+5:30` (empty on failure).
-fn format_offset(raw: &str) -> Option<String> {
-    let bytes = raw.as_bytes();
-    if bytes.len() != 5 {
-        return None;
-    }
-    let sign = raw.as_bytes()[0] as char;
-    if sign != '+' && sign != '-' {
-        return None;
-    }
-    let hours: i32 = raw.get(1..3)?.parse().ok()?;
-    let minutes: i32 = raw.get(3..5)?.parse().ok()?;
-    if hours == 0 && minutes == 0 {
-        return Some("UTC".to_string());
-    }
-    if minutes == 0 {
-        Some(format!("UTC{sign}{hours}"))
-    } else {
-        Some(format!("UTC{sign}{hours}:{minutes:02}"))
-    }
-}
-
-/// Ask the system `date` for a zone's current UTC offset. Cosmetic; empty if
-/// `date` is missing or fails.
-fn tz_offset(name: &str) -> String {
-    std::process::Command::new("date")
-        .env("TZ", name)
-        .arg("+%z")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| format_offset(String::from_utf8_lossy(&o.stdout).trim()))
-        .unwrap_or_default()
 }
 
 fn wrap_lon(lon: f64) -> f64 {
@@ -248,9 +211,6 @@ struct TzPick {
     filtered: Vec<usize>,
     sel: usize,
     top: usize,
-    last_input: Instant,
-    offset_zone: String,
-    offset_str: String,
 }
 
 impl TzPick {
@@ -266,9 +226,6 @@ impl TzPick {
             filtered,
             sel,
             top: 0,
-            last_input: Instant::now(),
-            offset_zone: String::new(),
-            offset_str: String::new(),
         }
     }
 
@@ -306,27 +263,23 @@ impl TzPick {
     fn move_up(&mut self) {
         if !self.filtered.is_empty() {
             self.sel = self.sel.checked_sub(1).unwrap_or(self.filtered.len() - 1);
-            self.last_input = Instant::now();
         }
     }
 
     fn move_down(&mut self) {
         if !self.filtered.is_empty() {
             self.sel = (self.sel + 1) % self.filtered.len();
-            self.last_input = Instant::now();
         }
     }
 
     fn push_filter(&mut self, c: char) {
         self.filter.push(c);
         self.refilter();
-        self.last_input = Instant::now();
     }
 
     fn backspace(&mut self) {
         self.filter.pop();
         self.refilter();
-        self.last_input = Instant::now();
     }
 
     /// Keep the selected row inside a `visible`-row window.
@@ -338,22 +291,6 @@ impl TzPick {
         self.top = self.top.min(self.sel);
         if self.sel >= self.top + visible {
             self.top = self.sel + 1 - visible;
-        }
-    }
-
-    fn on_tick(&mut self, now: Instant) {
-        if now.duration_since(self.last_input) > OFFSET_DEBOUNCE {
-            self.update_offset();
-        }
-    }
-
-    fn update_offset(&mut self) {
-        let Some(name) = self.selected().map(|z| z.name.clone()) else {
-            return;
-        };
-        if name != self.offset_zone {
-            self.offset_str = tz_offset(&name);
-            self.offset_zone = name;
         }
     }
 }
@@ -552,7 +489,6 @@ impl Installer {
     ) -> ScreenAction {
         let current = self.ctx.config.identity.timezone.clone();
         let mut pick = TzPick::new(load_zones(), &current);
-        pick.update_offset();
         let mut view = MapView::new(pick.selected());
 
         let mut last_tick = Instant::now();
@@ -568,8 +504,7 @@ impl Installer {
                 format_lon(view.end_lon())
             );
             let subtitle = match pick.selected() {
-                Some(z) if pick.offset_str.is_empty() => format!("{}   {viewport}", z.name),
-                Some(z) => format!("{}   {}   {viewport}", z.name, pick.offset_str),
+                Some(z) => format!("{}   {viewport}", z.name),
                 None => viewport,
             };
 
@@ -605,7 +540,6 @@ impl Installer {
                         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             pick.filter.clear();
                             pick.refilter();
-                            pick.last_input = Instant::now();
                             pick.sync_view(&mut view);
                         }
                         KeyCode::Char(c)
@@ -624,7 +558,6 @@ impl Installer {
             if last_tick.elapsed() >= TICK {
                 let now = Instant::now();
                 let elapsed = now.duration_since(last_tick);
-                pick.on_tick(now);
                 view.on_tick(elapsed);
                 last_tick = now;
             }
