@@ -542,9 +542,12 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
     if !z.has_coord {
         return;
     }
-    let lat = z.lat.clamp(LAT_MIN, LAT_MAX);
     let raw_x = view.zone_x(z, width).unwrap_or(0);
-    let cx = raw_x.clamp(0, width as isize - 1) as usize;
+    if !(0..width as isize).contains(&raw_x) {
+        return;
+    }
+    let lat = z.lat.clamp(LAT_MIN, LAT_MAX);
+    let cx = raw_x as usize;
     let msub = ((LAT_MAX - lat) / span * total_sub as f64) as isize;
     let cy = (msub / 2).clamp(0, height as isize - 1) as usize;
 
