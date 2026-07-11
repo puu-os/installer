@@ -523,7 +523,7 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
                     ch = '─';
                     fg = GUIDE;
                 }
-                if zone_meridian {
+                if zone_meridian && matches!(kind, CellKind::Sea) {
                     ch = '│';
                     fg = if equator_here { GUIDE_STRONG } else { WARN };
                 }
