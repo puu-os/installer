@@ -8,7 +8,7 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
 
 use crate::engine::command::LogFn;
-use crate::engine::pipeline::{self, Context, ProgressCb, Runner, SkipCb, StepSelection};
+use crate::engine::pipeline::{self, Context, ProgressCb, Runner, SkipCb};
 
 const INSTALL_LOG_PATH: &str = "/run/puu-installer/install.log";
 
@@ -72,13 +72,12 @@ pub struct InstallTask {
 
 impl InstallTask {
     #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
-    pub fn start(ctx: &Context, start_index: usize, skip_indices: &[usize]) -> Self {
+    pub fn start(ctx: &Context) -> Self {
         let (events_tx, events_rx) = mpsc::channel();
         let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
 
         let mut pipeline_ctx = ctx.clone();
         pipeline_ctx.parts = crate::engine::partition::DerivedPartitions::default();
-        let skip = skip_indices.to_vec();
 
         let thread = std::thread::spawn(move || {
             let log_file = Arc::new(Mutex::new(open_install_log()));
@@ -110,10 +109,6 @@ impl InstallTask {
             };
 
             let steps = pipeline::STEPS;
-            let selection = StepSelection {
-                start_index,
-                skip_indices: skip,
-            };
 
             let fail = |at: usize, error: anyhow::Error| {
                 let mut log = make_log(events_tx.clone(), log_file.clone());
@@ -121,7 +116,7 @@ impl InstallTask {
                 let _ = events_tx.send(TaskEvent::Failed { at, error });
             };
 
-            match runner.execute(steps, &selection, || cancel_rx.try_recv().is_ok()) {
+            match runner.execute(steps, || cancel_rx.try_recv().is_ok()) {
                 Ok(true) => {
                     let _ = events_tx.send(TaskEvent::Done);
                 }

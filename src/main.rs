@@ -24,48 +24,17 @@ use crate::tui::app::Installer;
 /// Puu system installer.
 #[derive(FromArgs)]
 struct Args {
-    /// path to the YAML configuration file (overrides `PUU_INSTALLER_CONFIG`;
-    /// defaults to /usr/share/puu/machine.yaml)
-    #[argh(option)]
-    config: Option<PathBuf>,
-
-    /// pre-select the target drive (e.g. /dev/nvme0n1)
-    #[argh(option)]
-    drive: Option<String>,
-
     /// override install source with a bootc image dir layout or oci-archive path
     #[argh(option)]
     source_image: Option<PathBuf>,
 
-    /// resume the pipeline at step N (1-indexed)
-    #[argh(option, default = "1")]
-    start_from: usize,
-
-    /// skip step numbers (comma-separated, 1-indexed)
+    /// override k3s cluster role from config ("server" or "agent")
     #[argh(option)]
-    skip: Option<String>,
+    k3s_role: Option<String>,
 
     /// read the k3s cluster token from this file
     #[argh(option)]
     k3s_token_file: Option<PathBuf>,
-}
-
-fn parse_step_list(value: &str, step_count: usize) -> Result<Vec<usize>> {
-    let mut steps = Vec::new();
-    for item in value.split(',') {
-        let item = item.trim();
-        if item.is_empty() {
-            continue;
-        }
-        let n: usize = item.parse().with_context(|| {
-            format!("--skip expects comma-separated step numbers, got '{value}'")
-        })?;
-        if n < 1 || n > step_count {
-            bail!("--skip values must be between 1 and {step_count}: {n}");
-        }
-        steps.push(n);
-    }
-    Ok(steps)
 }
 
 fn read_first_line(path: &std::path::Path) -> Result<String> {
@@ -82,12 +51,19 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let config_path = args
-        .config
-        .or_else(|| std::env::var_os("PUU_INSTALLER_CONFIG").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("/usr/share/puu/machine.yaml"));
+    let config_path = std::env::var_os("PUU_INSTALLER_CONFIG").map_or_else(
+        || PathBuf::from("/usr/share/puu/machine.yaml"),
+        PathBuf::from,
+    );
+    let mut cfg = Config::load(&config_path)?;
 
-    let cfg = Config::load(&config_path)?;
+    if let Some(role) = args.k3s_role {
+        if role != "server" && role != "agent" {
+            eprintln!("--k3s-role must be \"server\" or \"agent\", got \"{role}\".");
+            std::process::exit(1);
+        }
+        cfg.k3s.role = role;
+    }
 
     let source_image = match args.source_image {
         Some(p) => Some(p),
@@ -103,32 +79,13 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let step_count = engine::pipeline::STEPS.len();
-    if args.start_from < 1 || args.start_from > step_count {
-        eprintln!("--start-from must be between 1 and {step_count}");
-        std::process::exit(2);
-    }
-
-    let skip_steps: Vec<usize> = match &args.skip {
-        Some(s) => parse_step_list(s, step_count)?,
-        None => Vec::new(),
-    };
-
     let k3s_token = match &args.k3s_token_file {
         Some(path) => read_first_line(path)?,
         None => String::new(),
     };
 
-    if cfg.k3s.role != "server" && cfg.k3s.role != "agent" {
-        eprintln!(
-            "k3s.role must be \"server\" or \"agent\", got \"{}\".",
-            cfg.k3s.role
-        );
-        std::process::exit(1);
-    }
-
     if cfg.k3s.role == "agent" && (cfg.k3s.server_url.is_empty() || k3s_token.is_empty()) {
-        eprintln!("k3s.role agent requires k3s.serverUrl and --k3s-token-file.");
+        eprintln!("--k3s-role agent requires k3s.serverUrl and --k3s-token-file.");
         std::process::exit(1);
     }
 
@@ -140,10 +97,7 @@ fn main() -> Result<()> {
         source_image,
         target_imgref,
         image_version,
-        drive: args.drive.unwrap_or_default(),
         k3s_token,
-        start_from: args.start_from,
-        skip_steps,
         ..Default::default()
     };
 

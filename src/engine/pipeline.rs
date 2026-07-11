@@ -99,8 +99,6 @@ pub struct Context {
     pub secure_boot: bool,
     pub k3s_token: String,
     pub last_error: String,
-    pub start_from: usize,
-    pub skip_steps: Vec<usize>,
     pub parts: DerivedPartitions,
 }
 
@@ -121,8 +119,6 @@ impl Default for Context {
             secure_boot: true,
             k3s_token: String::new(),
             last_error: String::new(),
-            start_from: 1,
-            skip_steps: Vec::new(),
             parts: DerivedPartitions::default(),
         }
     }
@@ -138,19 +134,6 @@ pub struct Step {
     /// Relative expected cost, used to weight the overall progress bar so it
     /// tracks wall-clock rather than step count.
     pub weight: u32,
-}
-
-pub struct StepSelection {
-    pub start_index: usize,
-    pub skip_indices: Vec<usize>,
-}
-
-impl StepSelection {
-    fn includes(&self, index: usize, step: &Step, secure_boot: bool) -> bool {
-        index >= self.start_index
-            && !self.skip_indices.contains(&index)
-            && (!step.requires_secure_boot || secure_boot)
-    }
 }
 
 /// Stack of cleanup actions that run in reverse order on drop, even if a
@@ -217,7 +200,6 @@ impl Runner {
     pub fn execute(
         &mut self,
         steps: &[Step],
-        selection: &StepSelection,
         mut is_cancelled: impl FnMut() -> bool,
     ) -> Result<bool> {
         let mut committed = false;
@@ -225,7 +207,7 @@ impl Runner {
             if !committed && is_cancelled() {
                 return Ok(false);
             }
-            if !selection.includes(i, step, self.ctx.secure_boot) {
+            if step.requires_secure_boot && !self.ctx.secure_boot {
                 (self.skipped)(i);
                 continue;
             }

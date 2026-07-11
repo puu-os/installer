@@ -1023,22 +1023,14 @@ impl Installer {
         term: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> ScreenAction {
         let steps = pipeline::STEPS;
-        let start_index = (self.ctx.start_from).saturating_sub(1);
-        let skip_indices: Vec<usize> = self
-            .ctx
-            .skip_steps
-            .iter()
-            .map(|s| s.saturating_sub(1))
-            .collect();
-
         let mut states = vec![InstallStepState::Pending; steps.len()];
 
-        let mut worker = crate::tui::app::InstallTask::start(&self.ctx, start_index, &skip_indices);
+        let mut worker = crate::tui::app::InstallTask::start(&self.ctx);
 
         let mut logs: Vec<String> = Vec::new();
         let mut state = "Starting install".to_string();
         let mut step_fraction = 0.0f64;
-        let mut current_step = start_index;
+        let mut current_step = 0;
         let mut log_scroll: usize = 0;
         let mut running = true;
         let mut committed = false;
