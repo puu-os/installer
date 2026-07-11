@@ -465,7 +465,7 @@ fn draw_overview_row(f: &mut Frame, view: &MapView, zone: Option<&Zone>, rect: R
     let width = rect.width.max(1) as usize;
     for cx in 0..width {
         let world_lon = -180.0 + (cx as f64 + 0.5) / width as f64 * 360.0;
-        let in_view = lon_delta(view.center_lon, world_lon).abs() < VIEW_LON_SPAN / 2.0;
+        let in_view = lon_delta(view.center_lon, world_lon).abs() <= VIEW_LON_SPAN / 2.0;
         let ch = if in_view { '=' } else { '·' };
         let fg = if in_view { GUIDE_STRONG } else { ACCENT };
         if let Some(cell) = buf.cell_mut((rect.x + cx as u16, rect.y)) {
