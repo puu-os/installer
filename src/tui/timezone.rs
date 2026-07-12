@@ -107,13 +107,6 @@ fn lon_delta(from: f64, to: f64) -> f64 {
     wrap_lon(to - from)
 }
 
-fn format_lon(lon: f64) -> String {
-    let lon = wrap_lon(lon);
-    let deg = lon.abs().round() as i32;
-    let hemi = if lon < 0.0 { 'W' } else { 'E' };
-    format!("{deg}{hemi}")
-}
-
 struct MapLayout {
     map_y: u16,
     map_h: u16,
@@ -184,10 +177,6 @@ impl MapView {
 
     fn start_lon(&self) -> f64 {
         wrap_lon(self.center_lon - VIEW_LON_SPAN / 2.0)
-    }
-
-    fn end_lon(&self) -> f64 {
-        wrap_lon(self.center_lon + VIEW_LON_SPAN / 2.0)
     }
 
     fn lon_at(&self, x: usize, width: usize) -> f64 {
@@ -498,15 +487,7 @@ impl Installer {
             let layout = layout(height);
             pick.reframe(layout.list_h as usize);
 
-            let viewport = format!(
-                "view {}..{}",
-                format_lon(view.start_lon()),
-                format_lon(view.end_lon())
-            );
-            let subtitle = match pick.selected() {
-                Some(z) => format!("{}   {viewport}", z.name),
-                None => viewport,
-            };
+            let subtitle = pick.selected().map_or(String::new(), |z| z.name.clone());
 
             term.draw(|f| draw_timezone(f, &pick, &view, &subtitle))
                 .ok();
