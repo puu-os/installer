@@ -2,7 +2,6 @@
 // Copyright (C) Opinsys Oy 2026
 
 use std::io;
-use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::prelude::*;
@@ -11,11 +10,8 @@ use ratatui::widgets::Paragraph;
 use crate::tui::app::{Installer, ScreenAction};
 use crate::tui::screens::{ACCENT, ERR, LAND, ON_SELECT, SELECT};
 
-const TICK: Duration = Duration::from_millis(80);
 const VIEW_LON_SPAN: f64 = 180.0;
 const PAN_PAGE_FRACTION: f64 = 0.5;
-const VIEW_SCROLL_SECONDS: f64 = 0.30;
-const VIEW_SNAP_EPSILON: f64 = 0.25;
 const SEA_DEEP: Color = Color::Indexed(4);
 const SEA_SHIMMER: Color = Color::Indexed(12);
 const LAND_COAST: Color = Color::Indexed(10);
@@ -136,7 +132,6 @@ fn layout(height: u16) -> MapLayout {
 
 struct MapView {
     center_lon: f64,
-    target_lon: f64,
 }
 
 impl MapView {
@@ -144,35 +139,21 @@ impl MapView {
         let center_lon = selected
             .filter(|zone| zone.has_coord)
             .map_or(0.0, |zone| wrap_lon(zone.lon));
-        Self {
-            center_lon,
-            target_lon: center_lon,
-        }
+        Self { center_lon }
     }
 
     fn follow(&mut self, zone: &Zone) {
         if zone.has_coord {
-            self.target_lon = wrap_lon(zone.lon);
+            self.center_lon = wrap_lon(zone.lon);
         }
     }
 
     fn pan(&mut self, delta: f64) {
-        self.target_lon = wrap_lon(self.target_lon + delta);
+        self.center_lon = wrap_lon(self.center_lon + delta);
     }
 
     fn page_pan(&mut self, direction: f64) {
         self.pan(VIEW_LON_SPAN * PAN_PAGE_FRACTION * direction);
-    }
-
-    fn on_tick(&mut self, elapsed: Duration) {
-        let delta = lon_delta(self.center_lon, self.target_lon);
-        if delta.abs() <= VIEW_SNAP_EPSILON {
-            self.center_lon = self.target_lon;
-            return;
-        }
-
-        let fraction = (elapsed.as_secs_f64() / VIEW_SCROLL_SECONDS).clamp(0.0, 1.0);
-        self.center_lon = wrap_lon(self.center_lon + delta * fraction);
     }
 
     fn start_lon(&self) -> f64 {
@@ -480,8 +461,6 @@ impl Installer {
         let mut pick = TzPick::new(load_zones(), &current);
         let mut view = MapView::new(pick.selected());
 
-        let mut last_tick = Instant::now();
-
         loop {
             let height = term.size().map_or(24, |s| s.height);
             let layout = layout(height);
@@ -492,55 +471,45 @@ impl Installer {
             term.draw(|f| draw_timezone(f, &pick, &view, &subtitle))
                 .ok();
 
-            let timeout = TICK.saturating_sub(last_tick.elapsed());
-            if event::poll(timeout).unwrap_or(false) {
-                if let Ok(Event::Key(key)) = event::read() {
-                    match key.code {
-                        KeyCode::Esc => return ScreenAction::Back,
-                        KeyCode::Enter => {
-                            if let Some(z) = pick.selected() {
-                                self.ctx.config.identity.timezone.clone_from(&z.name);
-                                return ScreenAction::Continue;
-                            }
+            if let Ok(Event::Key(key)) = event::read() {
+                match key.code {
+                    KeyCode::Esc => return ScreenAction::Back,
+                    KeyCode::Enter => {
+                        if let Some(z) = pick.selected() {
+                            self.ctx.config.identity.timezone.clone_from(&z.name);
+                            return ScreenAction::Continue;
                         }
-                        KeyCode::Up => {
-                            pick.move_up();
-                            pick.sync_view(&mut view);
-                        }
-                        KeyCode::Down => {
-                            pick.move_down();
-                            pick.sync_view(&mut view);
-                        }
-                        KeyCode::Left => view.page_pan(-1.0),
-                        KeyCode::Right => view.page_pan(1.0),
-                        KeyCode::Home | KeyCode::Char('.') => pick.sync_view(&mut view),
-                        KeyCode::Backspace => {
-                            pick.backspace();
-                            pick.sync_view(&mut view);
-                        }
-                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            pick.filter.clear();
-                            pick.refilter();
-                            pick.sync_view(&mut view);
-                        }
-                        KeyCode::Char(c)
-                            if c.is_ascii()
-                                && c >= ' '
-                                && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            pick.push_filter(c);
-                            pick.sync_view(&mut view);
-                        }
-                        _ => {}
                     }
+                    KeyCode::Up => {
+                        pick.move_up();
+                        pick.sync_view(&mut view);
+                    }
+                    KeyCode::Down => {
+                        pick.move_down();
+                        pick.sync_view(&mut view);
+                    }
+                    KeyCode::Left => view.page_pan(-1.0),
+                    KeyCode::Right => view.page_pan(1.0),
+                    KeyCode::Home | KeyCode::Char('.') => pick.sync_view(&mut view),
+                    KeyCode::Backspace => {
+                        pick.backspace();
+                        pick.sync_view(&mut view);
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        pick.filter.clear();
+                        pick.refilter();
+                        pick.sync_view(&mut view);
+                    }
+                    KeyCode::Char(c)
+                        if c.is_ascii()
+                            && c >= ' '
+                            && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        pick.push_filter(c);
+                        pick.sync_view(&mut view);
+                    }
+                    _ => {}
                 }
-            }
-
-            if last_tick.elapsed() >= TICK {
-                let now = Instant::now();
-                let elapsed = now.duration_since(last_tick);
-                view.on_tick(elapsed);
-                last_tick = now;
             }
         }
     }
