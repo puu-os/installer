@@ -8,7 +8,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use crate::tui::app::{Installer, ScreenAction};
-use crate::tui::screens::{ACCENT, ERR, LAND, ON_SELECT, SELECT};
+use crate::tui::screens::{ACCENT, ERR, LAND, ON_SELECT, SELECT, WARN};
 
 const VIEW_LON_SPAN: f64 = 180.0;
 const PAN_PAGE_FRACTION: f64 = 0.5;
@@ -389,7 +389,7 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
 
     if let Some(cell) = buf.cell_mut((rect.x + cx as u16, rect.y + cy as u16)) {
         let bg = cell.bg;
-        cell.set_char('X').set_fg(SELECT).set_bg(bg);
+        cell.set_char('X').set_fg(WARN).set_bg(bg);
     }
 }
 
