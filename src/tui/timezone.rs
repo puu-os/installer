@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::tui::app::{Installer, ScreenAction};
-use crate::tui::render::{Color, Frame, Modifier, Paragraph, Rect, Style, Terminal, fatal_io};
+use crate::tui::render::{
+    Color, Frame, Modifier, Paragraph, Rect, Style, Terminal, next_key_event, tui_or_exit,
+};
 use crate::tui::screens::{ACCENT, ERR, LAND, ON_SELECT, SELECT};
 
 const VIEW_LON_SPAN: f64 = 180.0;
@@ -15,21 +17,6 @@ const LAND_COAST: Color = Color::Indexed(10);
 const GUIDE: Color = Color::Indexed(7);
 const GUIDE_STRONG: Color = Color::Indexed(14);
 
-fn tui_or_exit<T>(result: std::io::Result<T>, ctx: &str) -> T {
-    match result {
-        Ok(v) => v,
-        Err(e) => fatal_io(e, ctx),
-    }
-}
-
-fn next_key_event() -> Option<KeyEvent> {
-    match tui_or_exit(event::read(), "event::read") {
-        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-            Some(key)
-        }
-        _ => None,
-    }
-}
 
 /// Latitude band shown by the map. The poles are cropped (mostly empty ocean
 /// and the featureless Antarctic ice) so the inhabited band — where every

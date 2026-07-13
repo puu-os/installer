@@ -6,6 +6,7 @@ use std::process::{Command, ExitStatus};
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
+    event::{self, Event, KeyEvent, KeyEventKind},
     execute, queue,
     style::{
         Attribute, Color as CrosstermColor, Print, ResetColor, SetAttribute, SetBackgroundColor,
@@ -578,6 +579,29 @@ pub(crate) fn fatal_io(err: io::Error, ctx: &str) -> ! {
     let _ = stdout.flush();
     eprintln!("Terminal error ({ctx}): {err}");
     std::process::exit(1);
+}
+
+pub(crate) fn tui_or_exit<T>(result: io::Result<T>, ctx: &str) -> T {
+    match result {
+        Ok(v) => v,
+        Err(e) => fatal_io(e, ctx),
+    }
+}
+
+pub(crate) fn next_key_event() -> Option<KeyEvent> {
+    match tui_or_exit(event::read(), "event::read") {
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            Some(key)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn poll_key_event(timeout: std::time::Duration) -> Option<KeyEvent> {
+    if !tui_or_exit(event::poll(timeout), "event::poll") {
+        return None;
+    }
+    next_key_event()
 }
 
 #[cfg(test)]

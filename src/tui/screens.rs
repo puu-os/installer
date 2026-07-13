@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use std::io;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::render::{
-    Block, Color, Frame, Line, Modifier, Paragraph, Rect, Span, Style, Terminal, fatal_io,
+    Block, Color, Frame, Line, Modifier, Paragraph, Rect, Span, Style, Terminal,
+    next_key_event, poll_key_event, tui_or_exit,
 };
 
 use crate::engine::block;
@@ -144,34 +145,11 @@ fn keymap_for_locale(locale: &str) -> &str {
         .map_or("us", |(_, k)| *k)
 }
 
-/// Handle a terminal I/O Result without panicking: restore terminal and exit cleanly.
-fn tui_or_exit<T>(result: io::Result<T>, ctx: &str) -> T {
-    match result {
-        Ok(v) => v,
-        Err(e) => fatal_io(e, ctx),
-    }
-}
-
-fn next_key_event() -> Option<KeyEvent> {
-    match tui_or_exit(event::read(), "event::read") {
-        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-            Some(key)
-        }
-        _ => None,
-    }
-}
-
-fn poll_key_event(timeout: Duration) -> Option<KeyEvent> {
-    if !tui_or_exit(event::poll(timeout), "event::poll") {
-        return None;
-    }
-    next_key_event()
-}
 
 /// Suspend the TUI, run an interactive command on the real terminal, then
 /// restore the alternate screen and raw mode.
-fn run_on_console(term: &mut Terminal, mut command: std::process::Command) {
-    let _ = tui_or_exit(term.suspend_command(&mut command), "suspend_command");
+fn run_on_console(term: &mut Terminal, mut command: Command) {
+    tui_or_exit(term.suspend_command(&mut command), "suspend_command");
 }
 
 /// Validate POSIX username.
