@@ -13,7 +13,7 @@ use crate::engine::partition::DerivedPartitions;
 
 pub use crate::engine::steps::STEPS;
 
-pub const DEPENDENCIES: &[&str] = &["bootc", "mke2fs"];
+pub const DEPENDENCIES: &[&str] = &["bootc", "mke2fs", "mkfs.fat", "mkfs.xfs"];
 
 pub const TARGET_MOUNT: &str = "/run/puu-installer/target";
 pub const TARGET_EFI_MOUNT: &str = "/run/puu-installer/target/efi";

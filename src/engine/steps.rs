@@ -166,31 +166,8 @@ fn step_format_efi(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.efi_part.clone();
     pipeline::wait_for_block_device(r, &part)?;
     r.log(&format!("formatting {part} as FAT32 (label EFI)"));
-    format_efi_fat(&part)?;
+    r.cmd(&["mkfs.fat", "-F32", "-n", "EFI", &part]).run()?;
     r.ctx.parts.efi_uuid = crate::engine::block::capture_partuuid(&part)?;
-    Ok(())
-}
-
-/// Write a fresh FAT32 filesystem to `part` natively with the `fatfs` crate,
-/// replacing `mkfs.fat -F32 -n EFI`. The disk size is taken from the device
-/// itself, and the partition is always freshly created here.
-fn format_efi_fat(part: &str) -> Result<()> {
-    let mut label = [b' '; 11];
-    label[..3].copy_from_slice(b"EFI");
-    let volume_id = crate::engine::util::random_bytes::<4>()?;
-
-    let mut device = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(part)
-        .map_err(|e| anyhow::anyhow!("failed to open {part}: {e}"))?;
-    let options = fatfs::FormatVolumeOptions::new()
-        .fat_type(fatfs::FatType::Fat32)
-        .volume_id(u32::from_le_bytes(volume_id))
-        .volume_label(label);
-    fatfs::format_volume(&mut device, options)
-        .map_err(|e| anyhow::anyhow!("failed to write FAT32 filesystem to {part}: {e}"))?;
-    device.sync_all()?;
     Ok(())
 }
 
@@ -199,31 +176,8 @@ fn step_format_root(r: &mut Runner) -> Result<()> {
     let label = r.ctx.config.labels.root.clone();
     pipeline::wait_for_block_device(r, &part)?;
     r.log(&format!("formatting {part} as XFS (label {label})"));
-    format_root_xfs(&part, &label)?;
+    r.cmd(&["mkfs.xfs", "-f", "-L", &label, &part]).run()?;
     r.ctx.parts.root_uuid = crate::engine::block::capture_uuid(&part)?;
-    Ok(())
-}
-
-/// Write a fresh XFS filesystem to `part` natively with the `mkfs-xfs` crate,
-/// replacing `mkfs.xfs -f -L <label>`. The partition is always freshly
-/// created here, so overwriting it unconditionally matches `mkfs.xfs -f`.
-fn format_root_xfs(part: &str, label: &str) -> Result<()> {
-    let uuid = crate::engine::util::random_bytes::<16>()?;
-
-    let mut options = mkfs_xfs::FormatOptions::from_target(part, uuid)
-        .map_err(|e| anyhow::anyhow!("failed to inspect {part} for XFS formatting: {e}"))?;
-    options.label = Some(label.into());
-
-    let plan = mkfs_xfs::FormatPlan::new(options)
-        .map_err(|e| anyhow::anyhow!("invalid XFS geometry for {part}: {e}"))?;
-
-    let mut device = std::fs::OpenOptions::new()
-        .write(true)
-        .open(part)
-        .map_err(|e| anyhow::anyhow!("failed to open {part}: {e}"))?;
-    mkfs_xfs::image::write_plan_to(&plan, &mut device)
-        .map_err(|e| anyhow::anyhow!("failed to write XFS metadata to {part}: {e}"))?;
-    device.sync_all()?;
     Ok(())
 }
 

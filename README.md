@@ -77,7 +77,7 @@ kernel:
 ## External commands
 
 - **`bootc`**: installs the bootc image to the target filesystem.
-- **`mke2fs`**: formats the home partition as ext4.
+- **`mkfs.fat`, `mkfs.xfs` and `mke2fs`**: create the target filesystems.
 - **`configure-k3s-cluster`**: stages k3s cluster configuration (chrooted).
 - **`flatpak-sync`**: pre-seeds system Flatpaks (chrooted into the target).
 

@@ -20,12 +20,10 @@ blkid = "1"
 crossterm = "0.28"
 duct = "1.1"
 efivar = "2"
-fatfs = { version = "0.3", default-features = false, features = ["std"] }
 gptman = { version = "3", features = ["nix"] }
 hex = "0.4"
 iso6709parse = "1"
 libc = "0.2"
-mkfs-xfs = "0.1"
 nix = { version = "0.29", features = [ "mount", "ioctl", "reboot", "fs", "user", "signal", "process", ] }
 openssl = "0.10"
 ostree = "0.20"
