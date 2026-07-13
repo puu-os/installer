@@ -257,7 +257,6 @@ impl Buffer<'_> {
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct Frame {
     area: Rect,
     cells: Vec<Cell>,
@@ -369,7 +368,6 @@ pub(crate) struct Terminal {
     stdout: Stdout,
     active: bool,
     color_mode: ColorMode,
-    previous_frame: Option<Frame>,
 }
 
 impl Terminal {
@@ -385,7 +383,6 @@ impl Terminal {
             stdout,
             active: false,
             color_mode,
-            previous_frame: None,
         }
     }
 
@@ -404,7 +401,6 @@ impl Terminal {
             MoveTo(0, 0)
         )?;
         self.stdout.flush()?;
-        self.previous_frame = None;
         self.active = true;
         Ok(())
     }
@@ -422,7 +418,6 @@ impl Terminal {
         )
         .and_then(|()| self.stdout.flush());
         self.active = false;
-        self.previous_frame = None;
         let _ = terminal::disable_raw_mode();
         result
     }
@@ -446,30 +441,17 @@ impl Terminal {
             self.stdout,
             Hide,
             ResetColor,
-            SetAttribute(Attribute::Reset)
+            SetAttribute(Attribute::Reset),
+            Clear(ClearType::All)
         )?;
 
-        let previous = self.previous_frame.as_ref();
         for y in 0..frame.area.height {
-            let mut x = 0;
-            while x < frame.area.width {
-                if !cell_changed(previous, frame, x, y) {
-                    x += 1;
-                    continue;
-                }
-
-                queue!(self.stdout, MoveTo(x, y))?;
-                let mut style = None;
-                while x < frame.area.width && cell_changed(previous, frame, x, y) {
-                    let cell = frame.cells
-                        [usize::from(y) * usize::from(frame.area.width) + usize::from(x)];
-                    if style != Some(cell.style) {
-                        apply_style(&mut self.stdout, cell.style, self.color_mode)?;
-                        style = Some(cell.style);
-                    }
-                    queue!(self.stdout, Print(cell.ch))?;
-                    x += 1;
-                }
+            queue!(self.stdout, MoveTo(0, y))?;
+            for x in 0..frame.area.width {
+                let index = usize::from(y) * usize::from(frame.area.width) + usize::from(x);
+                let cell = frame.cells[index];
+                apply_style(&mut self.stdout, cell.style, self.color_mode)?;
+                queue!(self.stdout, Print(cell.ch))?;
             }
         }
 
@@ -484,9 +466,7 @@ impl Terminal {
         } else {
             queue!(self.stdout, Hide)?;
         }
-        self.stdout.flush()?;
-        self.previous_frame = Some(frame.clone());
-        Ok(())
+        self.stdout.flush()
     }
 
     pub(crate) fn suspend_command(&mut self, command: &mut Command) -> io::Result<ExitStatus> {
@@ -504,13 +484,6 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = self.deactivate();
     }
-}
-
-fn cell_changed(previous: Option<&Frame>, frame: &Frame, x: u16, y: u16) -> bool {
-    let index = usize::from(y) * usize::from(frame.area.width) + usize::from(x);
-    previous.is_none_or(|previous| {
-        previous.area != frame.area || previous.cells[index] != frame.cells[index]
-    })
 }
 
 fn apply_style(stdout: &mut Stdout, style: Style, color_mode: ColorMode) -> io::Result<()> {
@@ -617,4 +590,30 @@ pub(crate) fn poll_key_event(timeout: std::time::Duration) -> Option<KeyEvent> {
         return None;
     }
     next_key_event()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Frame, Paragraph, Rect, Size, sanitize_text};
+
+    #[test]
+    fn sanitize_text_keeps_ascii() {
+        assert_eq!(sanitize_text("abc XYZ 123"), "abc XYZ 123");
+    }
+
+    #[test]
+    fn sanitize_text_maps_common_unicode() {
+        assert_eq!(sanitize_text("a→b — c≤d"), "a->b - c<=d");
+    }
+
+    #[test]
+    fn paragraph_render_clips_expanded_ascii() {
+        let mut frame = Frame::new(Size {
+            width: 5,
+            height: 1,
+        });
+        frame.render_widget(Paragraph::new("A→BCD"), Rect::new(0, 0, 5, 1));
+        let rendered: String = frame.cells.iter().map(|cell| cell.ch).collect();
+        assert_eq!(rendered, "A->BC");
+    }
 }
