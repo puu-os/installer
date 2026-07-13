@@ -4,13 +4,10 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ratatui::{
-    prelude::*,
-    widgets::{Block, Paragraph},
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+use crate::tui::render::{
+    Block, Color, Frame, Line, Modifier, Paragraph, Rect, Span, Style, Terminal, fatal_io,
 };
 
 use crate::engine::block;
@@ -151,25 +148,30 @@ fn keymap_for_locale(locale: &str) -> &str {
 fn tui_or_exit<T>(result: io::Result<T>, ctx: &str) -> T {
     match result {
         Ok(v) => v,
-        Err(e) => {
-            let _ = terminal::disable_raw_mode();
-            eprintln!("Terminal error ({ctx}): {e}");
-            std::process::exit(1);
-        }
+        Err(e) => fatal_io(e, ctx),
     }
+}
+
+fn next_key_event() -> Option<KeyEvent> {
+    match tui_or_exit(event::read(), "event::read") {
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            Some(key)
+        }
+        _ => None,
+    }
+}
+
+fn poll_key_event(timeout: Duration) -> Option<KeyEvent> {
+    if !tui_or_exit(event::poll(timeout), "event::poll") {
+        return None;
+    }
+    next_key_event()
 }
 
 /// Suspend the TUI, run an interactive command on the real terminal, then
 /// restore the alternate screen and raw mode.
-fn run_on_console(
-    term: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    mut command: std::process::Command,
-) {
-    tui_or_exit(terminal::disable_raw_mode(), "disable_raw_mode");
-    let _ = crossterm::execute!(term.backend_mut(), LeaveAlternateScreen);
-    let _ = command.status();
-    tui_or_exit(terminal::enable_raw_mode(), "enable_raw_mode");
-    let _ = crossterm::execute!(term.backend_mut(), EnterAlternateScreen);
+fn run_on_console(term: &mut Terminal, mut command: std::process::Command) {
+    let _ = tui_or_exit(term.suspend_command(&mut command), "suspend_command");
 }
 
 /// Validate POSIX username.
@@ -246,7 +248,7 @@ fn toggle_choice(selected: &mut usize, key: &KeyEvent) -> bool {
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-fn progress_bar(fraction: f64, width: usize) -> Line<'static> {
+fn progress_bar(fraction: f64, width: usize) -> Line {
     let bar_w = (width.saturating_sub(8)).clamp(10, 40);
     let fraction = fraction.clamp(0.0, 1.0);
     let percent = (fraction * 100.0) as usize;
@@ -324,40 +326,39 @@ impl Installer {
     )]
     pub(crate) fn screen_too_small(
         &self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        term: &mut Terminal,
     ) -> bool {
-        let Ok(size) = term.size() else {
-            return true;
-        };
+        let size = tui_or_exit(term.size(), "term.size");
         size.height < MIN_SCREEN_ROWS || size.width < MIN_SCREEN_COLS
     }
 
     pub(crate) fn welcome_screen(
         &mut self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        term: &mut Terminal,
     ) -> ScreenAction {
         let choices: Vec<&str> = WELCOME_CHOICES.iter().map(|(_, label)| *label).collect();
         let mut selected: usize = 0;
 
         loop {
             if self.screen_too_small(term) {
-                term.draw(|f| {
-                    Self::draw_frame(
-                        f,
-                        &self.title(),
-                        "",
-                        "Esc/Ctrl-C to quit, resize terminal to continue",
-                    );
-                    let area = f.area();
-                    let msg = Paragraph::new(format!(
-                        "Current size {}x{}; minimum {}x{}",
-                        area.width, area.height, MIN_SCREEN_COLS, MIN_SCREEN_ROWS
-                    ))
-                    .style(Style::default().fg(WARN));
-                    f.render_widget(msg, Rect::new(2, 3, area.width.saturating_sub(4), 3));
-                })
-                .ok();
-                if let Ok(Event::Key(key)) = event::read() {
+                tui_or_exit(term.draw(|f| {
+                        Self::draw_frame(
+                            f,
+                            &self.title(),
+                            "",
+                            "Esc/Ctrl-C to quit, resize terminal to continue",
+                        );
+                        let area = f.area();
+                        let msg = Paragraph::new(format!(
+                            "Current size {}x{}; minimum {}x{}",
+                            area.width, area.height, MIN_SCREEN_COLS, MIN_SCREEN_ROWS
+                        ))
+                        .style(Style::default().fg(WARN));
+                        f.render_widget(msg, Rect::new(2, 3, area.width.saturating_sub(4), 3));
+                    }),
+                    "draw",
+                );
+                if let Some(key) = next_key_event() {
                     if matches!(key.code, KeyCode::Esc)
                         || (matches!(key.code, KeyCode::Char('c'))
                             && key.modifiers.contains(KeyModifiers::CONTROL))
@@ -368,7 +369,7 @@ impl Installer {
                 continue;
             }
 
-            term.draw(|f| {
+            tui_or_exit(term.draw(|f| {
                 Self::draw_frame(
                     f,
                     &self.title(),
@@ -385,10 +386,9 @@ impl Installer {
                         Rect::new(2, menu_start_y + i as u16, 20, 1),
                     );
                 }
-            })
-            .ok();
+            }), "draw");
 
-            if let Ok(Event::Key(key)) = event::read() {
+            if let Some(key) = next_key_event() {
                 match key.code {
                     KeyCode::Up => {
                         selected = selected.checked_sub(1).unwrap_or(choices.len() - 1);
@@ -416,7 +416,7 @@ impl Installer {
     #[allow(clippy::unused_self, clippy::cast_possible_truncation)]
     pub(crate) fn confirm(
         &mut self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        term: &mut Terminal,
         title: &str,
         body: &str,
         danger: bool,
@@ -424,7 +424,7 @@ impl Installer {
         let mut selected = 0usize;
 
         loop {
-            term.draw(|f| {
+            tui_or_exit(term.draw(|f| {
                 Self::draw_frame(
                     f,
                     title,
@@ -448,10 +448,9 @@ impl Installer {
 
                 let y = 8 + lines.len() as u16;
                 button_row(f, &["No", "Yes"], selected, y, 10);
-            })
-            .ok();
+            }), "draw");
 
-            if let Ok(Event::Key(key)) = event::read() {
+            if let Some(key) = next_key_event() {
                 if !toggle_choice(&mut selected, &key) {
                     match key.code {
                         KeyCode::Enter => return selected == 1,
@@ -466,7 +465,7 @@ impl Installer {
     #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
     pub(crate) fn target_screen(
         &mut self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        term: &mut Terminal,
     ) -> ScreenAction {
         let mut selected: usize = 0;
         let mut top: usize = 0;
@@ -503,10 +502,7 @@ impl Installer {
         refresh(&mut devices, &mut selected, &mut status, &self.ctx.drive);
 
         loop {
-            let size = term.size().unwrap_or(Size {
-                width: 80,
-                height: 24,
-            });
+            let size = tui_or_exit(term.size(), "term.size");
             let visible = (size.height.saturating_sub(9)).max(1) as usize;
             top = top.min(selected);
             if selected >= top + visible {
@@ -514,7 +510,7 @@ impl Installer {
             }
 
             let drive_for_refresh = self.ctx.drive.clone();
-            term.draw(|f| {
+            tui_or_exit(term.draw(|f| {
                 Self::draw_frame(
                     f,
                     "Select Target Drive",
@@ -570,10 +566,9 @@ impl Installer {
                         1,
                     ),
                 );
-            })
-            .ok();
+            }), "draw");
 
-            if let Ok(Event::Key(key)) = event::read() {
+            if let Some(key) = next_key_event() {
                 match key.code {
                     KeyCode::Up if !devices.is_empty() => {
                         selected = selected.checked_sub(1).unwrap_or(devices.len() - 1);
@@ -609,7 +604,7 @@ impl Installer {
     #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
     pub(crate) fn identity_screen(
         &mut self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        term: &mut Terminal,
     ) -> ScreenAction {
         let current_locale = if self.ctx.locale.is_empty() {
             self.ctx.config.identity.locale.as_str()
@@ -652,7 +647,7 @@ impl Installer {
                 SHELLS[shell_idx].0.to_string(),
             ];
 
-            term.draw(|f| {
+            tui_or_exit(term.draw(|f| {
                 Self::draw_frame(
                     f,
                     "System Identity",
@@ -704,10 +699,9 @@ impl Installer {
                         Rect::new(4, 19, area.width, 1),
                     );
                 }
-            })
-            .ok();
+            }), "draw");
 
-            if let Ok(Event::Key(key)) = event::read() {
+            if let Some(key) = next_key_event() {
                 match key.code {
                     KeyCode::Esc => return ScreenAction::Back,
                     KeyCode::Tab | KeyCode::Down => {
@@ -794,7 +788,7 @@ impl Installer {
 
     pub(crate) fn secureboot_screen(
         &mut self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        term: &mut Terminal,
     ) -> ScreenAction {
         let status = firmware::detect_setup_mode();
         if status.setup_mode == Some(true) {
@@ -806,7 +800,7 @@ impl Installer {
 
     pub(crate) fn secureboot_enroll_screen(
         &mut self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        term: &mut Terminal,
         status: &SetupModeStatus,
     ) -> ScreenAction {
         let mut selected = 1usize;
@@ -817,7 +811,7 @@ impl Installer {
         };
 
         loop {
-            term.draw(|f| {
+            tui_or_exit(term.draw(|f| {
                 Self::draw_frame(
                     f,
                     "Secure Boot",
@@ -840,10 +834,9 @@ impl Installer {
                     Rect::new(4, 7, area.width.saturating_sub(8), 1),
                 );
                 button_row(f, &["Back", "Enroll keys"], selected, 10, 16);
-            })
-            .ok();
+            }), "draw");
 
-            if let Ok(Event::Key(key)) = event::read() {
+            if let Some(key) = next_key_event() {
                 if !toggle_choice(&mut selected, &key) {
                     match key.code {
                         KeyCode::Esc => return ScreenAction::Back,
@@ -863,7 +856,7 @@ impl Installer {
 
     pub(crate) fn secureboot_fallback_screen(
         &mut self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        term: &mut Terminal,
         status: &SetupModeStatus,
     ) -> ScreenAction {
         let mut selected = 1usize;
@@ -887,7 +880,7 @@ impl Installer {
         };
 
         loop {
-            term.draw(|f| {
+            tui_or_exit(term.draw(|f| {
                 Self::draw_frame(
                     f,
                     "Secure Boot",
@@ -906,10 +899,9 @@ impl Installer {
                 let y = 8 + lines.len() as u16;
                 let choices: Vec<&str> = FALLBACK_CHOICES.iter().map(|(_, label)| *label).collect();
                 button_row(f, &choices, selected, y, 14);
-            })
-            .ok();
+            }), "draw");
 
-            if let Ok(Event::Key(key)) = event::read() {
+            if let Some(key) = next_key_event() {
                 match key.code {
                     KeyCode::Esc => return ScreenAction::Back,
                     KeyCode::Left => {
@@ -935,7 +927,7 @@ impl Installer {
 
     pub(crate) fn review_screen(
         &mut self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        term: &mut Terminal,
     ) -> ScreenAction {
         let mut selected = 1usize;
 
@@ -971,7 +963,7 @@ impl Installer {
                 ("Secure Boot", secure_boot),
             ];
 
-            term.draw(|f| {
+            tui_or_exit(term.draw(|f| {
                 Self::draw_frame(
                     f,
                     "Does this look right?",
@@ -995,10 +987,9 @@ impl Installer {
                 );
 
                 button_row(f, &["Back", "Start install"], selected, 19, 18);
-            })
-            .ok();
+            }), "draw");
 
-            if let Ok(Event::Key(key)) = event::read() {
+            if let Some(key) = next_key_event() {
                 if !toggle_choice(&mut selected, &key) {
                     match key.code {
                         KeyCode::Enter if selected == 1 => return ScreenAction::Install,
@@ -1013,7 +1004,7 @@ impl Installer {
     #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
     pub(crate) fn install_screen(
         &mut self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        term: &mut Terminal,
     ) -> ScreenAction {
         let steps = pipeline::STEPS;
         let mut states = vec![InstallStepState::Pending; steps.len()];
@@ -1099,7 +1090,7 @@ impl Installer {
 
             let frame = (started.elapsed().as_millis() / 80) as usize;
 
-            term.draw(|f| {
+            tui_or_exit(term.draw(|f| {
                 Self::draw_frame(
                     f,
                     &install_title,
@@ -1223,55 +1214,52 @@ impl Installer {
                         Rect::new(1, INSTALL_LOG_Y + row as u16, log_w, 1),
                     );
                 }
-            })
-            .ok();
+            }), "draw");
 
-            if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-                if let Ok(Event::Key(key)) = event::read() {
-                    match key.code {
-                        KeyCode::PageDown => {
-                            log_scroll = log_scroll.saturating_sub(10);
-                        }
-                        KeyCode::PageUp => {
-                            log_scroll = (log_scroll + 10).min(logs.len().saturating_sub(1));
-                        }
-                        KeyCode::Esc
-                            if running
-                                && !committed
-                                && self.confirm(
-                                    term,
-                                    "Cancel install?",
-                                    "The installer will stop and clean up mounts.",
-                                    false,
-                                ) =>
-                        {
-                            state = "Cancelling install...".into();
-                            worker.cancel();
-                        }
-                        KeyCode::Char('c')
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
-                                && running
-                                && !committed
-                                && self.confirm(
-                                    term,
-                                    "Cancel install?",
-                                    "The installer will stop and clean up mounts.",
-                                    false,
-                                ) =>
-                        {
-                            state = "Cancelling install...".into();
-                            worker.cancel();
-                        }
-                        KeyCode::Enter if complete => {
-                            worker.join();
-                            return ScreenAction::Reboot;
-                        }
-                        KeyCode::Enter if failed => {
-                            worker.join();
-                            return ScreenAction::Menu;
-                        }
-                        _ => {}
+            if let Some(key) = poll_key_event(Duration::from_millis(100)) {
+                match key.code {
+                    KeyCode::PageDown => {
+                        log_scroll = log_scroll.saturating_sub(10);
                     }
+                    KeyCode::PageUp => {
+                        log_scroll = (log_scroll + 10).min(logs.len().saturating_sub(1));
+                    }
+                    KeyCode::Esc
+                        if running
+                            && !committed
+                            && self.confirm(
+                                term,
+                                "Cancel install?",
+                                "The installer will stop and clean up mounts.",
+                                false,
+                            ) =>
+                    {
+                        state = "Cancelling install...".into();
+                        worker.cancel();
+                    }
+                    KeyCode::Char('c')
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && running
+                            && !committed
+                            && self.confirm(
+                                term,
+                                "Cancel install?",
+                                "The installer will stop and clean up mounts.",
+                                false,
+                            ) =>
+                    {
+                        state = "Cancelling install...".into();
+                        worker.cancel();
+                    }
+                    KeyCode::Enter if complete => {
+                        worker.join();
+                        return ScreenAction::Reboot;
+                    }
+                    KeyCode::Enter if failed => {
+                        worker.join();
+                        return ScreenAction::Menu;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1279,7 +1267,7 @@ impl Installer {
 
     pub(crate) fn reboot_screen(
         &mut self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        term: &mut Terminal,
     ) -> Trap {
         let mut selected = 1usize;
         #[allow(clippy::cast_possible_wrap)]
@@ -1299,7 +1287,7 @@ impl Installer {
                 }
             }
 
-            term.draw(|f| {
+            tui_or_exit(term.draw(|f| {
                 Self::draw_frame(
                     f,
                     "Install Complete",
@@ -1326,22 +1314,50 @@ impl Installer {
                     Rect::new(4, 9, area.width.saturating_sub(8), 1),
                 );
                 button_row(f, &["Shell", "Reboot"], selected, 12, 14);
-            })
-            .ok();
+            }), "draw");
 
-            if event::poll(Duration::from_millis(200)).unwrap_or(false) {
-                if let Ok(Event::Key(key)) = event::read() {
-                    countdown = false;
-                    if !toggle_choice(&mut selected, &key) && key.code == KeyCode::Enter {
-                        if selected == 0 {
-                            let shell = crate::engine::util::default_shell();
-                            run_on_console(term, std::process::Command::new(&shell));
-                        } else {
-                            return Trap::Reboot;
-                        }
+            if let Some(key) = poll_key_event(Duration::from_millis(200)) {
+                countdown = false;
+                if !toggle_choice(&mut selected, &key) && key.code == KeyCode::Enter {
+                    if selected == 0 {
+                        let shell = crate::engine::util::default_shell();
+                        run_on_console(term, std::process::Command::new(&shell));
+                    } else {
+                        return Trap::Reboot;
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{toggle_choice, validate_account, valid_username};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    #[test]
+    fn valid_username_accepts_installer_format() {
+        assert!(valid_username("user_01"));
+        assert!(!valid_username("User"));
+        assert!(!valid_username("bad name"));
+    }
+
+    #[test]
+    fn validate_account_catches_mismatch() {
+        assert_eq!(validate_account("user", "pw1", "pw2"), "Passwords do not match.");
+    }
+
+    #[test]
+    fn toggle_choice_switches_selection() {
+        let mut selected = 0;
+        let key = KeyEvent {
+            code: KeyCode::Tab,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        assert!(toggle_choice(&mut selected, &key));
+        assert_eq!(selected, 1);
     }
 }

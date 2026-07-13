@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use std::io;
-
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use ratatui::prelude::*;
-use ratatui::widgets::Paragraph;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::tui::app::{Installer, ScreenAction};
+use crate::tui::render::{Color, Frame, Modifier, Paragraph, Rect, Style, Terminal, fatal_io};
 use crate::tui::screens::{ACCENT, ERR, LAND, ON_SELECT, SELECT};
 
 const VIEW_LON_SPAN: f64 = 180.0;
@@ -17,6 +14,22 @@ const SEA_SHIMMER: Color = Color::Indexed(12);
 const LAND_COAST: Color = Color::Indexed(10);
 const GUIDE: Color = Color::Indexed(7);
 const GUIDE_STRONG: Color = Color::Indexed(14);
+
+fn tui_or_exit<T>(result: std::io::Result<T>, ctx: &str) -> T {
+    match result {
+        Ok(v) => v,
+        Err(e) => fatal_io(e, ctx),
+    }
+}
+
+fn next_key_event() -> Option<KeyEvent> {
+    match tui_or_exit(event::read(), "event::read") {
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            Some(key)
+        }
+        _ => None,
+    }
+}
 
 /// Latitude band shown by the map. The poles are cropped (mostly empty ocean
 /// and the featureless Antarctic ice) so the inhabited band — where every
@@ -289,10 +302,9 @@ fn classify_cell(
     let edge =
         neighbors.iter().any(|&land| land != top) || neighbors.iter().any(|&land| land != bot);
     let ch = match (top, bot) {
-        (true, true) => '\u{2588}',
-        (true, false) => '\u{2580}',
-        (false, true) => '\u{2584}',
-        (false, false) => ' ',
+        (true, true) => '#',
+        (true, false) | (false, true) => ':',
+        (false, false) => '.',
     };
     if touches_land && (touches_sea || edge) {
         (CellKind::Coast, ch, LAND_COAST, SEA_SHIMMER)
@@ -321,7 +333,7 @@ fn near_lat(lat: f64, target: f64, step: f64) -> bool {
 /// half the globe, which doubles the horizontal sampling density and can be
 /// panned left/right.
 fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
-    let buf = f.buffer_mut();
+    let mut buf = f.buffer_mut();
     let width = rect.width.max(1) as usize;
     let height = rect.height.max(1) as usize;
     let total_sub = height * 2;
@@ -352,19 +364,19 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
                     CellKind::Coast | CellKind::Land => bg,
                 };
                 if major_meridian && matches!(kind, CellKind::Sea) {
-                    ch = '·';
+                    ch = '.';
                     fg = GUIDE;
                 }
                 if equator_here && matches!(kind, CellKind::Sea) {
-                    ch = '─';
+                    ch = '-';
                     fg = GUIDE;
                 }
                 if zone_meridian && matches!(kind, CellKind::Sea) {
-                    ch = '│';
+                    ch = '|';
                     fg = if equator_here { GUIDE_STRONG } else { SELECT };
                 }
                 if major_meridian && equator_here && !zone_meridian {
-                    ch = '┼';
+                    ch = '+';
                     fg = GUIDE_STRONG;
                 }
                 cell.set_char(ch).set_fg(fg).set_bg(bg);
@@ -459,23 +471,22 @@ impl Installer {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn timezone_screen(
         &mut self,
-        term: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        term: &mut Terminal,
     ) -> ScreenAction {
         let current = self.ctx.config.identity.timezone.clone();
         let mut pick = TzPick::new(load_zones(), &current);
         let mut view = MapView::new(pick.selected());
 
         loop {
-            let height = term.size().map_or(24, |s| s.height);
+            let height = tui_or_exit(term.size(), "term.size").height;
             let layout = layout(height);
             pick.reframe(layout.list_h as usize);
 
             let subtitle = pick.selected().map_or(String::new(), |z| z.name.clone());
 
-            term.draw(|f| draw_timezone(f, &pick, &view, &subtitle))
-                .ok();
+            tui_or_exit(term.draw(|f| draw_timezone(f, &pick, &view, &subtitle)), "draw");
 
-            if let Ok(Event::Key(key)) = event::read() {
+            if let Some(key) = next_key_event() {
                 match key.code {
                     KeyCode::Esc => return ScreenAction::Back,
                     KeyCode::Enter => {
@@ -516,5 +527,47 @@ impl Installer {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MapView, TzPick, Zone, load_zones};
+
+    #[test]
+    fn load_zones_pins_utc_first() {
+        let zones = load_zones();
+        assert_eq!(zones.first().map(|zone| zone.name.as_str()), Some("UTC"));
+    }
+
+    #[test]
+    fn refilter_keeps_matching_timezones() {
+        let zones = vec![
+            Zone {
+                name: "UTC".into(),
+                lat: 0.0,
+                lon: 0.0,
+                has_coord: false,
+            },
+            Zone {
+                name: "Europe/Helsinki".into(),
+                lat: 60.0,
+                lon: 25.0,
+                has_coord: true,
+            },
+            Zone {
+                name: "America/New_York".into(),
+                lat: 40.0,
+                lon: -74.0,
+                has_coord: true,
+            },
+        ];
+        let mut pick = TzPick::new(zones, "UTC");
+        let mut view = MapView::new(pick.selected());
+        pick.push_filter('e');
+        pick.push_filter('u');
+        pick.sync_view(&mut view);
+        assert_eq!(pick.filtered.len(), 1);
+        assert_eq!(pick.selected().map(|zone| zone.name.as_str()), Some("Europe/Helsinki"));
     }
 }

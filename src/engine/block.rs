@@ -25,7 +25,7 @@ impl std::fmt::Display for BusyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Mounted { ident, mountpoint } => {
-                write!(f, "mounted: {ident} → {mountpoint}")
+                write!(f, "mounted: {ident} -> {mountpoint}")
             }
             Self::Mapping { kind, ident } => write!(f, "{kind}: {ident}"),
         }
@@ -143,7 +143,7 @@ fn disk_size(dev: &udev::Device) -> String {
         .and_then(|s| s.trim().parse::<u64>().ok());
     match sectors {
         Some(s) if s > 0 => crate::engine::util::human_size(s * 512),
-        _ => "—".into(),
+        _ => "-".into(),
     }
 }
 
@@ -156,7 +156,7 @@ fn disk_transport(dev: &udev::Device, sysname: &str) -> String {
     if sysname.starts_with("nvme") {
         return "NVME".into();
     }
-    "—".into()
+    "-".into()
 }
 
 pub fn list_disks() -> Result<Vec<Device>> {

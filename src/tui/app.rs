@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use std::io::{self, Write, stdout};
+use std::io::Write;
 use std::sync::{Arc, Mutex, mpsc};
 
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
-use ratatui::prelude::*;
+use crate::tui::render::{Terminal, fatal_io};
 
 use crate::engine::command::LogFn;
 use crate::engine::pipeline::{self, Context, ProgressCb, Runner, SkipCb};
@@ -195,25 +194,15 @@ impl Installer {
     }
 
     pub fn run(&mut self) -> Trap {
-        let _ = terminal::enable_raw_mode();
         let _console_log_level = ConsoleLogLevelGuard::quiet();
-        let backend = CrosstermBackend::new(stdout());
-        let mut terminal = Terminal::new(backend).unwrap_or_else(|e| {
-            let _ = terminal::disable_raw_mode();
-            eprintln!("Terminal error (Terminal::new): {e}");
-            std::process::exit(1);
-        });
-
-        let _ = crossterm::execute!(terminal.backend_mut(), EnterAlternateScreen);
-
-        let result = self.run_screens(&mut terminal);
-
-        let _ = terminal::disable_raw_mode();
-        let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
-        result
+        let mut terminal = Terminal::new(std::io::stdout());
+        if let Err(e) = terminal.activate() {
+            fatal_io(e, "activate terminal");
+        }
+        self.run_screens(&mut terminal)
     }
 
-    fn run_screens(&mut self, term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Trap {
+    fn run_screens(&mut self, term: &mut Terminal) -> Trap {
         loop {
             match self.welcome_screen(term) {
                 ScreenAction::Install => {
@@ -237,7 +226,7 @@ impl Installer {
         }
     }
 
-    fn install_flow(&mut self, term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Option<Trap> {
+    fn install_flow(&mut self, term: &mut Terminal) -> Option<Trap> {
         let mut step = InstallFlowStep::Target;
 
         loop {

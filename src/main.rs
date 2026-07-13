@@ -3,7 +3,6 @@
 
 #![deny(clippy::all)]
 #![deny(clippy::pedantic)]
-// ratatui Rect::new takes u16; TUI coordinates are always small
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
