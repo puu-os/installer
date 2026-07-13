@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::tui::app::{Installer, ScreenAction};
 use crate::tui::render::{
-    Color, Frame, Modifier, Paragraph, Rect, Style, Terminal, poll_key_event, tui_or_exit,
+    Color, Frame, Input, Modifier, Paragraph, Rect, Style, Terminal, poll_input, read_input,
+    screen_size, tui_or_exit,
 };
 use crate::tui::screens::{ACCENT, ERR, LAND, ON_SELECT, SELECT};
 
@@ -22,6 +25,28 @@ const GUIDE_STRONG: Color = Color::Indexed(14);
 /// timezone actually lives — gets more rows and is easier to read.
 const LAT_MIN: f64 = -60.0;
 const LAT_MAX: f64 = 78.0;
+
+/// The map animates at 60 Hz while it is panning, and blocks on input when it
+/// is not.
+const FRAME: Duration = Duration::from_micros(16_667);
+
+/// Exponential time constant of the pan: each second the centre closes
+/// `1 - exp(-1/PAN_TAU)` of the distance to its target.
+const PAN_TAU: f64 = 0.12;
+/// Speed floor, so the tail of an ease does not crawl, and ceiling, so a fly-to
+/// across the globe stays legible rather than teleporting. Degrees per second.
+const PAN_MIN_SPEED: f64 = 12.0;
+const PAN_MAX_SPEED: f64 = 900.0;
+/// Distance below which the centre simply lands on the target, in degrees.
+const PAN_SNAP: f64 = 0.02;
+/// Degrees each Left/Right press pushes the target ahead of the centre, and the
+/// furthest ahead it is allowed to get.
+const PAN_KEY_STEP: f64 = 10.0;
+const PAN_MAX_LEAD: f64 = 20.0;
+/// Longest frame the pan will integrate. Without this, the first frame after the
+/// loop has been blocked on input would advance by the whole idle duration and
+/// the map would jump.
+const MAX_FRAME_DT: f64 = 0.05;
 
 /// A selectable timezone with its representative location.
 #[derive(Clone)]
@@ -45,6 +70,10 @@ const WORLD_MASK: &[u8] = include_bytes!("world_mask.bin");
 const MAP_W: usize = 720;
 const MAP_H: usize = 360;
 const ROW_BYTES: usize = MAP_W / 8;
+
+/// Raster columns per degree of longitude, and raster rows per degree of latitude.
+const LON_SCALE: f64 = MAP_W as f64 / 360.0;
+const LAT_SCALE: f64 = MAP_H as f64 / 180.0;
 
 /// Parse one `zone1970.tab` data row (`codes \t coord \t name \t comment`) into a
 /// `Zone`. Returns `None` for comment/blank/short lines. The coordinate is a
@@ -84,14 +113,55 @@ pub(crate) fn load_zones() -> Vec<Zone> {
     zones
 }
 
-/// Land/sea lookup against the embedded raster. Longitude wraps at ±180 deg so
-/// the date-line seam never produces a blank edge.
-fn is_land(lon: f64, lat: f64) -> bool {
-    let fx = ((lon + 180.0).rem_euclid(360.0) / 360.0 * MAP_W as f64) as usize;
-    let fy = ((90.0 - lat) / 180.0 * MAP_H as f64).clamp(0.0, (MAP_H - 1) as f64) as usize;
-    let x = fx.min(MAP_W - 1);
-    let byte = WORLD_MASK[fy * ROW_BYTES + x / 8];
-    byte & (0x80 >> (x % 8)) != 0
+/// Land bits in raster row `ry`, over columns `x0..x1` of that row.
+fn row_land_count(ry: usize, x0: usize, x1: usize) -> u32 {
+    if x0 >= x1 {
+        return 0;
+    }
+    let row = &WORLD_MASK[ry * ROW_BYTES..(ry + 1) * ROW_BYTES];
+    let first = x0 / 8;
+    let last = (x1 - 1) / 8;
+
+    // Bits run MSB-first, so column x0 is bit 7 - (x0 % 8) of its byte.
+    let head = 0xffu8 >> (x0 % 8);
+    let tail = 0xffu8 << (7 - ((x1 - 1) % 8));
+
+    if first == last {
+        return (row[first] & head & tail).count_ones();
+    }
+
+    let mut count = (row[first] & head).count_ones();
+    for byte in &row[first + 1..last] {
+        count += byte.count_ones();
+    }
+    count + (row[last] & tail).count_ones()
+}
+
+/// Land bits in raster row `ry` over `len` columns starting at `x0`, wrapping at
+/// the date line so the seam never shows a blank edge.
+fn row_land_count_wrapped(ry: usize, x0: usize, len: usize) -> u32 {
+    let x0 = x0 % MAP_W;
+    let end = x0 + len;
+    if end <= MAP_W {
+        return row_land_count(ry, x0, end);
+    }
+    row_land_count(ry, x0, MAP_W) + row_land_count(ry, 0, end - MAP_W)
+}
+
+/// Fraction of the raster footprint `x0..x0+cols` by `y0..y0+rows` that is land,
+/// in `0.0..=1.0`.
+///
+/// This is an exact box filter over the 1-bit raster: at 80 columns one map cell
+/// covers about 4.5 raster columns and 7 raster rows, so the single point sample
+/// the map used before threw away some thirty pixels per cell. That discarded
+/// detail *is* the jagged coastline; averaging it back in is what lets a cell
+/// shade instead of snapping to land or sea.
+fn land_fraction(x0: usize, cols: usize, y0: usize, rows: usize) -> f64 {
+    let mut count = 0u32;
+    for ry in y0..(y0 + rows).min(MAP_H) {
+        count += row_land_count_wrapped(ry, x0, cols);
+    }
+    f64::from(count) / (cols * rows) as f64
 }
 
 fn wrap_lon(lon: f64) -> f64 {
@@ -115,7 +185,7 @@ fn layout(height: u16) -> MapLayout {
     let bottom = height.saturating_sub(1);
     let content = bottom.saturating_sub(2);
     let max_map = content.saturating_sub(2).max(1);
-    let map_h = (height * 11 / 20).clamp(1, max_map);
+    let map_h = ((u32::from(height) * 11 / 20) as u16).clamp(1, max_map);
     let map_y = 2;
     let filter_y = map_y + map_h;
     let list_top = filter_y + 1;
@@ -145,27 +215,55 @@ impl MapView {
         }
     }
 
+    /// Glide to a zone. Unclamped on purpose: selecting a far-away zone should
+    /// fly there quickly, bounded only by `PAN_MAX_SPEED`.
     fn follow(&mut self, zone: &Zone) {
         if zone.has_coord {
             self.target_lon = wrap_lon(zone.lon);
         }
     }
 
+    /// Pan by a key press. A tty has no key-up event, so holding Left or Right
+    /// arrives as a stream of presses: each one pushes the target further ahead,
+    /// but the lead is clamped, which turns the stream into a steady glide that
+    /// decays a moment after the key is released instead of coasting on.
+    fn nudge(&mut self, direction: f64) {
+        let lead = (lon_delta(self.center_lon, self.target_lon) + direction * PAN_KEY_STEP)
+            .clamp(-PAN_MAX_LEAD, PAN_MAX_LEAD);
+        self.target_lon = wrap_lon(self.center_lon + lead);
+    }
+
     fn page_pan(&mut self, direction: f64) {
         self.target_lon = wrap_lon(self.target_lon + VIEW_LON_SPAN * PAN_PAGE_FRACTION * direction);
     }
 
-    fn tick(&mut self, elapsed: std::time::Duration) -> bool {
-        const PAN_SPEED: f64 = 360.0;
+    fn is_animating(&self) -> bool {
+        lon_delta(self.center_lon, self.target_lon).abs() > PAN_SNAP
+    }
 
+    /// Ease the centre toward the target. Returns whether the map moved, i.e.
+    /// whether the caller has to redraw.
+    ///
+    /// Closing a fixed *fraction* of the remaining distance per unit time makes
+    /// the motion frame-rate independent: the same pan takes the same wall-clock
+    /// time at 30 fps as at 60.
+    fn tick(&mut self, elapsed: Duration) -> bool {
         let delta = lon_delta(self.center_lon, self.target_lon);
-        let step = PAN_SPEED * elapsed.as_secs_f64();
-        if delta.abs() <= step {
-            self.center_lon = self.target_lon;
-        } else {
-            self.center_lon = wrap_lon(self.center_lon + delta.signum() * step);
+        if delta == 0.0 {
+            return false;
         }
-        delta != 0.0
+        if delta.abs() <= PAN_SNAP {
+            self.center_lon = self.target_lon;
+            return true;
+        }
+
+        let dt = elapsed.as_secs_f64().min(MAX_FRAME_DT);
+        let step = (delta.abs() * (1.0 - (-dt / PAN_TAU).exp()))
+            .max(PAN_MIN_SPEED * dt)
+            .min(PAN_MAX_SPEED * dt)
+            .min(delta.abs());
+        self.center_lon = wrap_lon(self.center_lon + delta.signum() * step);
+        true
     }
 
     fn start_lon(&self) -> f64 {
@@ -283,35 +381,51 @@ enum CellKind {
     Land,
 }
 
-fn classify_cell(
-    lon: f64,
-    lat_top: f64,
-    lat_bot: f64,
-    lon_step: f64,
-) -> (CellKind, char, Color, Color) {
-    let top = is_land(lon, lat_top);
-    let bot = is_land(lon, lat_bot);
-    let left_top = is_land(lon - lon_step, lat_top);
-    let left_bot = is_land(lon - lon_step, lat_bot);
-    let right_top = is_land(lon + lon_step, lat_top);
-    let right_bot = is_land(lon + lon_step, lat_bot);
-    let neighbors = [left_top, left_bot, right_top, right_bot];
-    let touches_land = top || bot;
-    let touches_sea = !top || !bot;
-    let edge =
-        neighbors.iter().any(|&land| land != top) || neighbors.iter().any(|&land| land != bot);
-    let ch = match (top, bot) {
-        (true, true) => '#',
-        (true, false) | (false, true) => ':',
-        (false, false) => '.',
-    };
-    if touches_land && (touches_sea || edge) {
-        (CellKind::Coast, ch, LAND_COAST, SEA_SHIMMER)
-    } else if touches_land {
-        (CellKind::Land, ch, LAND, SEA_DEEP)
-    } else {
-        (CellKind::Sea, ch, LAND, SEA_DEEP)
+/// The console-safe shading ramp, as `(glyph, ink in the top half, ink in the
+/// bottom half)`. Every glyph is a CP437 block element, so it renders on a plain
+/// Linux VT as well as in a terminal emulator.
+const SHADES: [(char, f64, f64); 7] = [
+    (' ', 0.00, 0.00),
+    ('\u{2591}', 0.25, 0.25), // light shade
+    ('\u{2592}', 0.50, 0.50), // medium shade
+    ('\u{2593}', 0.75, 0.75), // dark shade
+    ('\u{2588}', 1.00, 1.00), // full block
+    ('\u{2580}', 1.00, 0.00), // upper half block
+    ('\u{2584}', 0.00, 1.00), // lower half block
+];
+
+/// Pick the glyph whose ink best matches the land coverage measured in the two
+/// halves of the cell.
+///
+/// For coverage that is already all-or-nothing this degenerates exactly to the
+/// half-block map the installer drew before: `█` for a full cell, `▀`/`▄` for one
+/// half, a blank for open sea. Partial coverage now shades instead of snapping.
+fn pick_glyph(top: f64, bot: f64) -> char {
+    let mut best = ' ';
+    let mut best_err = f64::MAX;
+    for (ch, ink_top, ink_bot) in SHADES {
+        let err = (ink_top - top).powi(2) + (ink_bot - bot).powi(2);
+        if err < best_err {
+            best_err = err;
+            best = ch;
+        }
     }
+    best
+}
+
+/// Classify a cell from the land coverage of its two halves. A partially covered
+/// cell *is* a coastline cell, which is a better edge test than the neighbour
+/// probing this replaced — and it costs two raster reads instead of six.
+fn classify_cell(top: f64, bot: f64) -> (CellKind, char) {
+    let ink = (top + bot) * 0.5;
+    let kind = if ink <= 0.0 {
+        CellKind::Sea
+    } else if ink >= 1.0 {
+        CellKind::Land
+    } else {
+        CellKind::Coast
+    };
+    (kind, pick_glyph(top, bot))
 }
 
 fn sea_bg_for_row(cy: usize) -> Color {
@@ -326,59 +440,106 @@ fn near_lat(lat: f64, target: f64, step: f64) -> bool {
     (lat - target).abs() <= step * 0.5
 }
 
-/// Draw the filled ASCII world map into `rect`. Each terminal cell samples two
-/// raster sub-rows and renders one of `#` `:` `.` or a guide marker, with the
-/// foreground painted over a sea-coloured background. The visible viewport spans
-/// half the globe, which doubles the horizontal sampling density and can be
+/// The raster footprint of one cell column or one cell half-row.
+struct Footprint {
+    start: usize,
+    len: usize,
+}
+
+/// Raster columns covered by each cell column, tiled edge to edge so no raster
+/// column is sampled twice or skipped.
+fn column_footprints(view: &MapView, width: usize) -> Vec<Footprint> {
+    let base = ((view.start_lon() + 180.0) * LON_SCALE).round() as usize;
+    let edge = |cx: usize| (cx as f64 / width as f64 * VIEW_LON_SPAN * LON_SCALE).round() as usize;
+    (0..width)
+        .map(|cx| Footprint {
+            start: (base + edge(cx)) % MAP_W,
+            len: (edge(cx + 1) - edge(cx)).max(1),
+        })
+        .collect()
+}
+
+/// Raster rows covered by each half-row of the map band.
+fn row_footprints(sub_rows: usize) -> Vec<Footprint> {
+    let span = LAT_MAX - LAT_MIN;
+    let edge = |sr: usize| {
+        (((90.0 - LAT_MAX) + sr as f64 / sub_rows as f64 * span) * LAT_SCALE).round() as usize
+    };
+    (0..sub_rows)
+        .map(|sr| Footprint {
+            start: edge(sr).min(MAP_H - 1),
+            len: (edge(sr + 1) - edge(sr)).max(1),
+        })
+        .collect()
+}
+
+/// Draw the filled world map into `rect`. Each terminal cell measures the land
+/// coverage of the two raster footprints stacked inside it and renders the block
+/// glyph that best matches, over a sea-coloured background. The visible viewport
+/// spans half the globe, which doubles the horizontal sampling density and can be
 /// panned left/right.
 fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
-    let mut buf = f.buffer_mut();
     let width = rect.width.max(1) as usize;
     let height = rect.height.max(1) as usize;
-    let total_sub = height * 2;
+    let sub_rows = height * 2;
     let span = LAT_MAX - LAT_MIN;
 
-    let lon_step = VIEW_LON_SPAN / width.max(1) as f64;
-    let lat_step = span / total_sub as f64;
+    let columns = column_footprints(view, width);
+    let rows = row_footprints(sub_rows);
+
+    let lon_step = VIEW_LON_SPAN / width as f64;
+    let lat_step = span / sub_rows as f64;
     let selected_lon = pick.selected().filter(|z| z.has_coord).map(|z| z.lon);
+
+    let mut buf = f.buffer_mut();
     for cy in 0..height {
-        let lat_top = LAT_MAX - (2.0 * cy as f64 + 0.5) / total_sub as f64 * span;
-        let lat_bot = LAT_MAX - (2.0 * cy as f64 + 1.5) / total_sub as f64 * span;
-        let lat_mid = (lat_top + lat_bot) * 0.5;
+        let lat_mid = LAT_MAX - (2.0 * cy as f64 + 1.0) / sub_rows as f64 * span;
         let sea_bg = sea_bg_for_row(cy);
         let equator_here = near_lat(lat_mid, 0.0, lat_step * 2.0);
-        for cx in 0..width {
-            let lon = view.lon_at(cx, width);
-            let (kind, mut ch, mut fg, bg) = classify_cell(lon, lat_top, lat_bot, lon_step);
-            let x = rect.x + cx as u16;
-            let y = rect.y + cy as u16;
-            let major_meridian = near_lon(lon, 0.0, lon_step)
-                || near_lon(lon, 90.0, lon_step)
-                || near_lon(lon, -90.0, lon_step)
-                || near_lon(lon, 180.0, lon_step);
-            let zone_meridian = selected_lon.is_some_and(|target| near_lon(lon, target, lon_step));
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                let bg = match kind {
-                    CellKind::Sea => sea_bg,
-                    CellKind::Coast | CellKind::Land => bg,
-                };
-                if major_meridian && matches!(kind, CellKind::Sea) {
-                    ch = '.';
-                    fg = GUIDE;
+
+        for (cx, column) in columns.iter().enumerate() {
+            let top_row = &rows[cy * 2];
+            let bottom_row = &rows[cy * 2 + 1];
+            let top = land_fraction(column.start, column.len, top_row.start, top_row.len);
+            let bot = land_fraction(column.start, column.len, bottom_row.start, bottom_row.len);
+            let (kind, mut ch) = classify_cell(top, bot);
+
+            let mut fg = match kind {
+                CellKind::Sea => GUIDE,
+                CellKind::Coast => LAND_COAST,
+                CellKind::Land => LAND,
+            };
+
+            // Guides are drawn only over open sea, so they never eat a coastline.
+            if matches!(kind, CellKind::Sea) {
+                let lon = view.lon_at(cx, width);
+                let major_meridian = near_lon(lon, 0.0, lon_step)
+                    || near_lon(lon, 90.0, lon_step)
+                    || near_lon(lon, -90.0, lon_step)
+                    || near_lon(lon, 180.0, lon_step);
+                let zone_meridian =
+                    selected_lon.is_some_and(|target| near_lon(lon, target, lon_step));
+
+                if major_meridian {
+                    ch = '\u{00b7}'; // middle dot
                 }
-                if equator_here && matches!(kind, CellKind::Sea) {
-                    ch = '-';
-                    fg = GUIDE;
+                if equator_here {
+                    ch = '\u{2500}'; // light horizontal
                 }
-                if zone_meridian && matches!(kind, CellKind::Sea) {
-                    ch = '|';
+                if zone_meridian {
+                    ch = '\u{2502}'; // light vertical
                     fg = if equator_here { GUIDE_STRONG } else { SELECT };
                 }
                 if major_meridian && equator_here && !zone_meridian {
-                    ch = '+';
+                    ch = '\u{253c}'; // light cross
                     fg = GUIDE_STRONG;
                 }
-                cell.set_char(ch).set_fg(fg).set_bg(bg);
+            }
+
+            let x = rect.x + cx as u16;
+            let y = rect.y + cy as u16;
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(ch).set_fg(fg).set_bg(sea_bg);
             }
         }
     }
@@ -395,7 +556,7 @@ fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
     }
     let lat = z.lat.clamp(LAT_MIN, LAT_MAX);
     let cx = raw_x as usize;
-    let msub = ((LAT_MAX - lat) / span * total_sub as f64) as isize;
+    let msub = ((LAT_MAX - lat) / span * sub_rows as f64) as isize;
     let cy = (msub / 2).clamp(0, height as isize - 1) as usize;
 
     if let Some(cell) = buf.cell_mut((rect.x + cx as u16, rect.y + cy as u16)) {
@@ -467,68 +628,87 @@ fn draw_timezone(f: &mut Frame, pick: &TzPick, view: &MapView, subtitle: &str) {
 }
 
 impl Installer {
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn timezone_screen(&mut self, term: &mut Terminal) -> ScreenAction {
         let current = self.ctx.config.identity.timezone.clone();
         let mut pick = TzPick::new(load_zones(), &current);
         let mut view = MapView::new(pick.selected());
 
-        let mut last_frame = std::time::Instant::now();
+        let mut dirty = true;
+        let mut last_frame = Instant::now();
+
         loop {
-            let now = std::time::Instant::now();
-            view.tick(now.saturating_duration_since(last_frame));
+            let now = Instant::now();
+            dirty |= view.tick(now.saturating_duration_since(last_frame));
             last_frame = now;
 
-            let height = tui_or_exit(Terminal::size(), "term.size").height;
-            let layout = layout(height);
-            pick.reframe(layout.list_h as usize);
+            if dirty {
+                let height = tui_or_exit(screen_size(), "term.size").height;
+                pick.reframe(layout(height).list_h as usize);
+                let subtitle = pick.selected().map_or(String::new(), |z| z.name.clone());
+                tui_or_exit(
+                    term.draw(|f| draw_timezone(f, &pick, &view, &subtitle)),
+                    "draw",
+                );
+                dirty = false;
+            }
 
-            let subtitle = pick.selected().map_or(String::new(), |z| z.name.clone());
+            // Hold a 60 Hz cadence while the map is moving; otherwise block, so
+            // an idle screen costs nothing at all.
+            let input = if view.is_animating() {
+                poll_input(FRAME.saturating_sub(now.elapsed()))
+            } else {
+                read_input()
+            };
 
-            tui_or_exit(
-                term.draw(|f| draw_timezone(f, &pick, &view, &subtitle)),
-                "draw",
-            );
-
-            if let Some(key) = poll_key_event(std::time::Duration::from_millis(16)) {
-                match key.code {
-                    KeyCode::Esc => return ScreenAction::Back,
-                    KeyCode::Enter => {
-                        if let Some(z) = pick.selected() {
-                            self.ctx.config.identity.timezone.clone_from(&z.name);
-                            return ScreenAction::Continue;
-                        }
-                    }
-                    KeyCode::Up => {
-                        pick.move_up();
-                        pick.sync_view(&mut view);
-                    }
-                    KeyCode::Down => {
-                        pick.move_down();
-                        pick.sync_view(&mut view);
-                    }
-                    KeyCode::Left => view.page_pan(-1.0),
-                    KeyCode::Right => view.page_pan(1.0),
-                    KeyCode::Home | KeyCode::Char('.') => pick.sync_view(&mut view),
-                    KeyCode::Backspace => {
-                        pick.backspace();
-                        pick.sync_view(&mut view);
-                    }
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        pick.filter.clear();
-                        pick.refilter();
-                        pick.sync_view(&mut view);
-                    }
-                    KeyCode::Char(c)
-                        if c.is_ascii()
-                            && c >= ' '
-                            && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-                    {
-                        pick.push_filter(c);
-                        pick.sync_view(&mut view);
-                    }
-                    _ => {}
+            let key = match input {
+                None => continue,
+                Some(Input::Resize) => {
+                    dirty = true;
+                    continue;
                 }
+                Some(Input::Key(key)) => key,
+            };
+
+            dirty = true;
+            match key.code {
+                KeyCode::Esc => return ScreenAction::Back,
+                KeyCode::Enter => {
+                    if let Some(z) = pick.selected() {
+                        self.ctx.config.identity.timezone.clone_from(&z.name);
+                        return ScreenAction::Continue;
+                    }
+                }
+                KeyCode::Up => {
+                    pick.move_up();
+                    pick.sync_view(&mut view);
+                }
+                KeyCode::Down => {
+                    pick.move_down();
+                    pick.sync_view(&mut view);
+                }
+                KeyCode::Left => view.nudge(-1.0),
+                KeyCode::Right => view.nudge(1.0),
+                KeyCode::PageUp => view.page_pan(-1.0),
+                KeyCode::PageDown => view.page_pan(1.0),
+                KeyCode::Home | KeyCode::Char('.') => pick.sync_view(&mut view),
+                KeyCode::Backspace => {
+                    pick.backspace();
+                    pick.sync_view(&mut view);
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    pick.filter.clear();
+                    pick.refilter();
+                    pick.sync_view(&mut view);
+                }
+                KeyCode::Char(c)
+                    if c.is_ascii()
+                        && c >= ' '
+                        && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    pick.push_filter(c);
+                    pick.sync_view(&mut view);
+                }
+                _ => {}
             }
         }
     }

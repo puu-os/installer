@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::render::{
     Block, Color, Frame, Line, Modifier, Paragraph, Rect, Span, Style, Terminal, next_key_event,
-    poll_key_event, tui_or_exit,
+    poll_key_event, screen_size, tui_or_exit,
 };
 
 use crate::engine::block;
@@ -302,7 +302,7 @@ impl Installer {
         clippy::cast_sign_loss
     )]
     pub(crate) fn screen_too_small(&self) -> bool {
-        let size = tui_or_exit(Terminal::size(), "term.size");
+        let size = tui_or_exit(screen_size(), "term.size");
         size.height < MIN_SCREEN_ROWS || size.width < MIN_SCREEN_COLS
     }
 
@@ -478,7 +478,7 @@ impl Installer {
         refresh(&mut devices, &mut selected, &mut status, &self.ctx.drive);
 
         loop {
-            let size = tui_or_exit(Terminal::size(), "term.size");
+            let size = tui_or_exit(screen_size(), "term.size");
             let visible = (size.height.saturating_sub(9)).max(1) as usize;
             top = top.min(selected);
             if selected >= top + visible {

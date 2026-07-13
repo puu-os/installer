@@ -3,20 +3,72 @@
 
 use std::io::{self, Stdout, Write};
 use std::process::{Command, ExitStatus};
+use std::time::Duration;
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyEvent, KeyEventKind},
-    execute, queue,
-    style::{
-        Attribute, Color as CrosstermColor, Print, ResetColor, SetAttribute, SetBackgroundColor,
-        SetForegroundColor,
-    },
+    execute,
+    style::{Attribute, ResetColor, SetAttribute},
     terminal::{
         self, Clear, ClearType, DisableLineWrap, EnableLineWrap, EnterAlternateScreen,
         LeaveAlternateScreen,
     },
 };
+
+/// The 16-colour ANSI palette, as the two SGR runs that carry it: 30-37 and
+/// 90-97 for the foreground, 40-47 and 100-107 for the background.
+///
+/// These are emitted by hand rather than through crossterm, which renders even
+/// a plain ANSI colour as a 256-colour `38;5;N` sequence. The short form is half
+/// the bytes and asks less of the terminal — a plain VT100-class serial console
+/// understands it — and the installer only ever uses these 16 colours.
+const FG_SGR: [&[u8]; 16] = [
+    b"\x1b[30m",
+    b"\x1b[31m",
+    b"\x1b[32m",
+    b"\x1b[33m",
+    b"\x1b[34m",
+    b"\x1b[35m",
+    b"\x1b[36m",
+    b"\x1b[37m",
+    b"\x1b[90m",
+    b"\x1b[91m",
+    b"\x1b[92m",
+    b"\x1b[93m",
+    b"\x1b[94m",
+    b"\x1b[95m",
+    b"\x1b[96m",
+    b"\x1b[97m",
+];
+const BG_SGR: [&[u8]; 16] = [
+    b"\x1b[40m",
+    b"\x1b[41m",
+    b"\x1b[42m",
+    b"\x1b[43m",
+    b"\x1b[44m",
+    b"\x1b[45m",
+    b"\x1b[46m",
+    b"\x1b[47m",
+    b"\x1b[100m",
+    b"\x1b[101m",
+    b"\x1b[102m",
+    b"\x1b[103m",
+    b"\x1b[104m",
+    b"\x1b[105m",
+    b"\x1b[106m",
+    b"\x1b[107m",
+];
+const SGR_RESET: &[u8] = b"\x1b[0m";
+const SGR_FG_DEFAULT: &[u8] = b"\x1b[39m";
+const SGR_BG_DEFAULT: &[u8] = b"\x1b[49m";
+const SGR_BOLD: &[u8] = b"\x1b[1m";
+const SGR_DIM: &[u8] = b"\x1b[2m";
+const SGR_REVERSE: &[u8] = b"\x1b[7m";
+const SGR_NO_REVERSE: &[u8] = b"\x1b[27m";
+const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
+const CURSOR_SHOW: &[u8] = b"\x1b[?25h";
+const CURSOR_HIDE: &[u8] = b"\x1b[?25l";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Color {
@@ -24,25 +76,11 @@ pub(crate) enum Color {
 }
 
 impl Color {
-    fn to_crossterm(self) -> CrosstermColor {
-        match self {
-            Self::Indexed(0) => CrosstermColor::Black,
-            Self::Indexed(1) => CrosstermColor::DarkRed,
-            Self::Indexed(2) => CrosstermColor::DarkGreen,
-            Self::Indexed(3) => CrosstermColor::DarkYellow,
-            Self::Indexed(4) => CrosstermColor::DarkBlue,
-            Self::Indexed(5) => CrosstermColor::DarkMagenta,
-            Self::Indexed(6) => CrosstermColor::DarkCyan,
-            Self::Indexed(7) => CrosstermColor::Grey,
-            Self::Indexed(8) => CrosstermColor::DarkGrey,
-            Self::Indexed(9) => CrosstermColor::Red,
-            Self::Indexed(10) => CrosstermColor::Green,
-            Self::Indexed(11) => CrosstermColor::Yellow,
-            Self::Indexed(12) => CrosstermColor::Blue,
-            Self::Indexed(13) => CrosstermColor::Magenta,
-            Self::Indexed(14) => CrosstermColor::Cyan,
-            Self::Indexed(15 | _) => CrosstermColor::White,
-        }
+    /// Index into the 16-colour palette. Anything above the palette clamps to
+    /// white rather than running off the end of the SGR tables.
+    const fn index(self) -> usize {
+        let Self::Indexed(index) = self;
+        if index > 15 { 15 } else { index as usize }
     }
 }
 
@@ -297,6 +335,29 @@ impl Frame {
         self.area
     }
 
+    const fn size(&self) -> Size {
+        Size {
+            width: self.area.width,
+            height: self.area.height,
+        }
+    }
+
+    /// Reset every cell to the blank default. `Vec::fill` on a `Copy` cell is a
+    /// memset, so this replaces the per-frame `Vec` allocation of the old
+    /// renderer.
+    fn blank(&mut self) {
+        self.cells.fill(Cell::default());
+        self.cursor = None;
+    }
+
+    fn resize(&mut self, size: Size) {
+        self.area = Rect::new(0, 0, size.width, size.height);
+        let len = usize::from(size.width) * usize::from(size.height);
+        self.cells.clear();
+        self.cells.resize(len, Cell::default());
+        self.cursor = None;
+    }
+
     pub(crate) fn render_widget<W: Widget>(&mut self, widget: W, rect: Rect) {
         widget.render(self, clip_rect(rect, self.area));
     }
@@ -322,6 +383,12 @@ impl Frame {
         }
         let index = usize::from(y) * usize::from(self.area.width) + usize::from(x);
         self.cells.get_mut(index)
+    }
+
+    /// Read a cell that is known to be inside the frame.
+    fn cell_at(&self, x: u16, y: u16) -> Cell {
+        let index = usize::from(y) * usize::from(self.area.width) + usize::from(x);
+        self.cells[index]
     }
 }
 
@@ -365,14 +432,21 @@ fn render_line(frame: &mut Frame, x: u16, y: u16, width: u16, line: Line, base_s
 
     for span in line.spans {
         let style = base_style.patch(span.style);
-        for ch in sanitize_text(&span.content).chars() {
-            if cursor_x >= limit {
-                return;
+        for ch in span.content.chars() {
+            let mut utf8 = [0u8; 4];
+            let text = match expand_char(ch) {
+                Some(text) => text,
+                None => &*ch.encode_utf8(&mut utf8),
+            };
+            for ch in text.chars() {
+                if cursor_x >= limit {
+                    return;
+                }
+                if let Some(cell) = frame.cell_mut(cursor_x, y) {
+                    cell.set_char(ch).set_style(style);
+                }
+                cursor_x += 1;
             }
-            if let Some(cell) = frame.cell_mut(cursor_x, y) {
-                cell.set_char(ch).set_style(style);
-            }
-            cursor_x += 1;
         }
     }
 }
@@ -383,15 +457,39 @@ enum ColorMode {
     Ansi16,
 }
 
-pub(crate) struct Terminal {
-    stdout: Stdout,
+/// A double-buffered terminal that writes one diffed, run-batched frame per
+/// `draw` call.
+///
+/// The renderer models the escape state the terminal is actually in (`wire_*`)
+/// so a frame only emits what changed: cells that differ from the previous
+/// frame, the SGR sequences that differ from the last one emitted, and a cursor
+/// move only when the cursor is not already in place. An unchanged frame emits
+/// nothing at all and never touches the writer.
+///
+/// Generic over the writer so tests can render into a `Vec<u8>` without a tty.
+pub(crate) struct Terminal<W: Write = Stdout> {
+    out: W,
     active: bool,
     color_mode: ColorMode,
-    last_frame: Option<Frame>,
+    /// The frame being drawn.
+    back: Frame,
+    /// What the terminal is currently showing.
+    front: Frame,
+    /// Reusable escape-sequence buffer, flushed once per frame.
+    bytes: Vec<u8>,
+    /// Reusable run of same-styled characters, printed as one string.
+    run: String,
+    wire_style: Style,
+    wire_cursor: Option<(u16, u16)>,
+    cursor_shown: bool,
+    full_repaint: bool,
+    /// Size to render at instead of asking the tty. Only set by headless test
+    /// terminals; `None` in production.
+    size_override: Option<Size>,
 }
 
-impl Terminal {
-    pub(crate) fn new(stdout: Stdout) -> Self {
+impl<W: Write> Terminal<W> {
+    pub(crate) fn new(out: W) -> Self {
         let color_mode = if std::env::var_os("NO_COLOR").is_some()
             || std::env::var("TERM").is_ok_and(|term| term == "dumb")
         {
@@ -399,12 +497,35 @@ impl Terminal {
         } else {
             ColorMode::Ansi16
         };
+        let empty = Size {
+            width: 0,
+            height: 0,
+        };
         Self {
-            stdout,
+            out,
             active: false,
             color_mode,
-            last_frame: None,
+            back: Frame::new(empty),
+            front: Frame::new(empty),
+            bytes: Vec::new(),
+            run: String::new(),
+            wire_style: Style::default(),
+            wire_cursor: None,
+            cursor_shown: false,
+            full_repaint: true,
+            size_override: None,
         }
+    }
+
+    /// Forget everything we believe about the terminal's escape state. Called
+    /// whenever something else may have written to the terminal behind our back
+    /// (`activate` after `suspend_command`), so the next frame re-establishes it.
+    fn reset_wire_state(&mut self) {
+        self.wire_style = Style::default();
+        self.wire_cursor = None;
+        self.cursor_shown = false;
+        self.full_repaint = true;
+        self.front.blank();
     }
 
     pub(crate) fn activate(&mut self) -> io::Result<()> {
@@ -413,7 +534,7 @@ impl Terminal {
         }
         terminal::enable_raw_mode()?;
         execute!(
-            self.stdout,
+            self.out,
             EnterAlternateScreen,
             DisableLineWrap,
             Hide,
@@ -422,8 +543,8 @@ impl Terminal {
             Clear(ClearType::All),
             MoveTo(0, 0)
         )?;
-        self.stdout.flush()?;
-        self.last_frame = None;
+        self.out.flush()?;
+        self.reset_wire_state();
         self.active = true;
         Ok(())
     }
@@ -433,80 +554,123 @@ impl Terminal {
             return Ok(());
         }
         let result = execute!(
-            self.stdout,
+            self.out,
             ResetColor,
             SetAttribute(Attribute::Reset),
             Show,
             EnableLineWrap,
             LeaveAlternateScreen
         )
-        .and_then(|()| self.stdout.flush());
+        .and_then(|()| self.out.flush());
         self.active = false;
-        self.last_frame = None;
+        self.reset_wire_state();
         let _ = terminal::disable_raw_mode();
         result
-    }
-
-    pub(crate) fn size() -> io::Result<Size> {
-        let (width, height) = terminal::size()?;
-        Ok(Size { width, height })
     }
 
     pub(crate) fn draw<F>(&mut self, draw: F) -> io::Result<()>
     where
         F: FnOnce(&mut Frame),
     {
-        let mut frame = Frame::new(Self::size()?);
-        draw(&mut frame);
-        self.flush_frame(&frame)
+        let size = match self.size_override {
+            Some(size) => size,
+            None => screen_size()?,
+        };
+        if size != self.back.size() {
+            self.back.resize(size);
+            self.front.resize(size);
+            self.full_repaint = true;
+        }
+
+        self.back.blank();
+        draw(&mut self.back);
+        self.emit();
+        std::mem::swap(&mut self.front, &mut self.back);
+
+        if self.bytes.is_empty() {
+            return Ok(());
+        }
+        self.out.write_all(&self.bytes)?;
+        self.out.flush()
     }
 
-    fn flush_frame(&mut self, frame: &Frame) -> io::Result<()> {
-        queue!(
-            self.stdout,
-            Hide,
-            ResetColor,
-            SetAttribute(Attribute::Reset)
-        )?;
+    /// Diff `back` against `front` into `bytes`. Writing to a `Vec` cannot fail,
+    /// so the whole hot path is infallible and the caller does the one write.
+    fn emit(&mut self) {
+        let Self {
+            color_mode,
+            back,
+            front,
+            bytes,
+            run,
+            wire_style,
+            wire_cursor,
+            cursor_shown,
+            full_repaint,
+            ..
+        } = self;
 
-        let last_frame = self.last_frame.as_ref();
-        for y in 0..frame.area.height {
+        bytes.clear();
+
+        if *full_repaint {
+            bytes.extend_from_slice(SGR_RESET);
+            bytes.extend_from_slice(CLEAR_SCREEN);
+            // A cleared screen is blank in the default style, so diffing against
+            // that keeps a full repaint from re-emitting the empty cells.
+            front.blank();
+            *wire_style = Style::default();
+            *wire_cursor = None;
+            *full_repaint = false;
+        }
+
+        let Size { width, height } = back.size();
+        for y in 0..height {
             let mut x = 0;
-            while x < frame.area.width {
-                if !frame_cell_changed(last_frame, frame, x, y) {
+            while x < width {
+                if back.cell_at(x, y) == front.cell_at(x, y) {
                     x += 1;
                     continue;
                 }
 
-                queue!(self.stdout, MoveTo(x, y))?;
-                let mut style = None;
-                while x < frame.area.width && frame_cell_changed(last_frame, frame, x, y) {
-                    let index = usize::from(y) * usize::from(frame.area.width) + usize::from(x);
-                    let cell = frame.cells[index];
-                    if style != Some(cell.style) {
-                        apply_style(&mut self.stdout, cell.style, self.color_mode)?;
-                        style = Some(cell.style);
+                if *wire_cursor != Some((x, y)) {
+                    push_move_to(bytes, x, y);
+                }
+
+                while x < width && back.cell_at(x, y) != front.cell_at(x, y) {
+                    let cell = back.cell_at(x, y);
+                    if cell.style != *wire_style {
+                        flush_run(bytes, run);
+                        emit_style(bytes, wire_style, cell.style, *color_mode);
                     }
-                    queue!(self.stdout, Print(cell.ch))?;
+                    run.push(cell.ch);
                     x += 1;
                 }
+                flush_run(bytes, run);
+
+                // Line wrap is disabled, so a run that reaches the right margin
+                // leaves the cursor pinned there rather than on the next row.
+                *wire_cursor = if x < width { Some((x, y)) } else { None };
             }
         }
 
-        queue!(
-            self.stdout,
-            ResetColor,
-            SetAttribute(Attribute::Reset),
-            MoveTo(0, 0)
-        )?;
-        if let Some((x, y)) = frame.cursor {
-            queue!(self.stdout, Show, MoveTo(x, y))?;
-        } else {
-            queue!(self.stdout, Hide)?;
+        match back.cursor {
+            Some((x, y)) => {
+                if *wire_cursor != Some((x, y)) {
+                    push_move_to(bytes, x, y);
+                    *wire_cursor = Some((x, y));
+                }
+                if !*cursor_shown {
+                    bytes.extend_from_slice(CURSOR_SHOW);
+                    *cursor_shown = true;
+                }
+            }
+            None => {
+                if *cursor_shown {
+                    bytes.extend_from_slice(CURSOR_HIDE);
+                    *cursor_shown = false;
+                }
+            }
         }
-        self.stdout.flush()?;
-        self.last_frame = Some(frame.clone());
-        Ok(())
     }
 
     pub(crate) fn suspend_command(&mut self, command: &mut Command) -> io::Result<ExitStatus> {
@@ -520,51 +684,91 @@ impl Terminal {
     }
 }
 
-impl Drop for Terminal {
+impl<W: Write> Drop for Terminal<W> {
     fn drop(&mut self) {
         let _ = self.deactivate();
     }
 }
 
-fn frame_cell_changed(last_frame: Option<&Frame>, frame: &Frame, x: u16, y: u16) -> bool {
-    let index = usize::from(y) * usize::from(frame.area.width) + usize::from(x);
-    last_frame.is_none_or(|last_frame| {
-        last_frame.area != frame.area || last_frame.cells[index] != frame.cells[index]
-    })
+fn flush_run(bytes: &mut Vec<u8>, run: &mut String) {
+    if run.is_empty() {
+        return;
+    }
+    bytes.extend_from_slice(run.as_bytes());
+    run.clear();
 }
 
-fn apply_style(stdout: &mut Stdout, style: Style, color_mode: ColorMode) -> io::Result<()> {
-    queue!(stdout, ResetColor, SetAttribute(Attribute::Reset))?;
+fn push_num(bytes: &mut Vec<u8>, mut n: u16) {
+    let mut digits = [0u8; 5];
+    let mut i = digits.len();
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    bytes.extend_from_slice(&digits[i..]);
+}
+
+fn push_move_to(bytes: &mut Vec<u8>, x: u16, y: u16) {
+    bytes.extend_from_slice(b"\x1b[");
+    push_num(bytes, y + 1);
+    bytes.push(b';');
+    push_num(bytes, x + 1);
+    bytes.push(b'H');
+}
+
+/// Emit only the escape sequences needed to move the terminal from the style it
+/// is in (`wire`) to `next`, and update `wire` to match.
+///
+/// An individual attribute cannot be switched off, so dropping one costs a full
+/// SGR reset — which also drops the colours, hence the re-emit that follows.
+fn emit_style(bytes: &mut Vec<u8>, wire: &mut Style, next: Style, color_mode: ColorMode) {
+    if *wire == next {
+        return;
+    }
+
+    if wire.modifiers.0 & !next.modifiers.0 != 0 {
+        bytes.extend_from_slice(SGR_RESET);
+        *wire = Style::default();
+    }
 
     match color_mode {
         ColorMode::Ansi16 => {
-            if let Some(color) = style.fg {
-                queue!(stdout, SetForegroundColor(color.to_crossterm()))?;
+            if wire.fg != next.fg {
+                match next.fg {
+                    Some(color) => bytes.extend_from_slice(FG_SGR[color.index()]),
+                    None => bytes.extend_from_slice(SGR_FG_DEFAULT),
+                }
             }
-            if let Some(color) = style.bg {
-                queue!(stdout, SetBackgroundColor(color.to_crossterm()))?;
-            }
-            if style.modifiers.contains(Modifier::BOLD) {
-                queue!(stdout, SetAttribute(Attribute::Bold))?;
-            }
-            if style.modifiers.contains(Modifier::DIM) {
-                queue!(stdout, SetAttribute(Attribute::Dim))?;
+            if wire.bg != next.bg {
+                match next.bg {
+                    Some(color) => bytes.extend_from_slice(BG_SGR[color.index()]),
+                    None => bytes.extend_from_slice(SGR_BG_DEFAULT),
+                }
             }
         }
         ColorMode::Mono => {
-            if style.bg.is_some() {
-                queue!(stdout, SetAttribute(Attribute::Reverse))?;
-            }
-            if style.modifiers.contains(Modifier::BOLD) {
-                queue!(stdout, SetAttribute(Attribute::Bold))?;
-            }
-            if style.modifiers.contains(Modifier::DIM) {
-                queue!(stdout, SetAttribute(Attribute::Dim))?;
+            if wire.bg.is_some() != next.bg.is_some() {
+                if next.bg.is_some() {
+                    bytes.extend_from_slice(SGR_REVERSE);
+                } else {
+                    bytes.extend_from_slice(SGR_NO_REVERSE);
+                }
             }
         }
     }
 
-    Ok(())
+    if next.modifiers.contains(Modifier::BOLD) && !wire.modifiers.contains(Modifier::BOLD) {
+        bytes.extend_from_slice(SGR_BOLD);
+    }
+    if next.modifiers.contains(Modifier::DIM) && !wire.modifiers.contains(Modifier::DIM) {
+        bytes.extend_from_slice(SGR_DIM);
+    }
+
+    *wire = next;
 }
 
 fn clip_rect(rect: Rect, area: Rect) -> Rect {
@@ -575,30 +779,63 @@ fn clip_rect(rect: Rect, area: Rect) -> Rect {
     Rect::new(x, y, width, height)
 }
 
+/// The non-ASCII glyphs a cell is allowed to hold.
+///
+/// Every one of these is a CP437 glyph, so it exists in the VGA and Linux
+/// console fonts as well as in every terminal-emulator font. Quadrant blocks
+/// (U+2596..U+259F) and Braille (U+2800..) are deliberately absent: they are
+/// not in the console fonts, and the installer's primary target is a Linux VT.
+const fn is_console_glyph(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{00b0}'      // degree sign
+        | '\u{00b7}'    // middle dot
+        | '\u{2500}'    // box drawings light horizontal
+        | '\u{2502}'    // box drawings light vertical
+        | '\u{250c}' | '\u{2510}' | '\u{2514}' | '\u{2518}'  // light corners
+        | '\u{251c}' | '\u{2524}' | '\u{252c}' | '\u{2534}'  // light tees
+        | '\u{253c}'    // box drawings light vertical and horizontal
+        | '\u{2580}'    // upper half block
+        | '\u{2584}'    // lower half block
+        | '\u{2588}'    // full block
+        | '\u{258c}' | '\u{2590}'   // left half block, right half block
+        | '\u{2591}' | '\u{2592}' | '\u{2593}'  // light, medium, dark shade
+        | '\u{25a0}' // black square
+    )
+}
+
+/// Fold one source character into the single narrow glyph a cell can hold.
+///
+/// Anything wide, combining, control or simply absent from the console font
+/// becomes `?`, so no string — a disk model name, a timezone, a subprocess log
+/// line — can ever break the cell grid.
 fn sanitize_char(ch: char) -> char {
     match ch {
-        c if c.is_ascii() && !c.is_ascii_control() => c,
-        '—' | '–' => '-',
+        ' ' | '\t' | '\n' | '\r' => ' ',
+        c if c.is_ascii_graphic() => c,
+        '\u{2014}' | '\u{2013}' | '\u{2212}' => '-', // em dash, en dash, minus
+        '\u{2018}' | '\u{2019}' => '\'',             // curly single quotes
+        '\u{201c}' | '\u{201d}' => '"',              // curly double quotes
+        c if is_console_glyph(c) => c,
         _ => '?',
     }
 }
 
-pub(crate) fn sanitize_text(text: &str) -> String {
-    let mut out = String::new();
-    for ch in text.chars() {
-        match ch {
-            '\n' => out.push('\n'),
-            '\t' => out.push(' '),
-            c if c.is_ascii() && !c.is_ascii_control() => out.push(c),
-            '—' | '–' => out.push('-'),
-            '→' => out.push_str("->"),
-            '←' => out.push_str("<-"),
-            '≥' => out.push_str(">="),
-            '≤' => out.push_str("<="),
-            _ => out.push('?'),
-        }
+/// Characters that fold to *more than one* cell. Kept separate from
+/// `sanitize_char`, which is per-cell and cannot widen.
+fn expand_char(ch: char) -> Option<&'static str> {
+    match ch {
+        '\u{2192}' => Some("->"),
+        '\u{2190}' => Some("<-"),
+        '\u{2265}' => Some(">="),
+        '\u{2264}' => Some("<="),
+        _ => None,
     }
-    out
+}
+
+pub(crate) fn screen_size() -> io::Result<Size> {
+    let (width, height) = terminal::size()?;
+    Ok(Size { width, height })
 }
 
 pub(crate) fn fatal_io(err: &io::Error, ctx: &str) -> ! {
@@ -623,18 +860,46 @@ pub(crate) fn tui_or_exit<T>(result: io::Result<T>, ctx: &str) -> T {
     }
 }
 
-pub(crate) fn next_key_event() -> Option<KeyEvent> {
-    match tui_or_exit(event::read(), "event::read") {
+/// A terminal event a screen cares about. Screens that redraw unconditionally
+/// use the `*_key_event` helpers and never see `Resize`; screens that only
+/// redraw when dirty must handle it.
+pub(crate) enum Input {
+    Key(KeyEvent),
+    Resize,
+}
+
+fn to_input(event: &Event) -> Option<Input> {
+    match event {
         Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-            Some(key)
+            Some(Input::Key(*key))
         }
+        Event::Resize(_, _) => Some(Input::Resize),
         _ => None,
     }
 }
 
-pub(crate) fn poll_key_event(timeout: std::time::Duration) -> Option<KeyEvent> {
+pub(crate) fn read_input() -> Option<Input> {
+    let event = tui_or_exit(event::read(), "event::read");
+    to_input(&event)
+}
+
+pub(crate) fn poll_input(timeout: Duration) -> Option<Input> {
     if !tui_or_exit(event::poll(timeout), "event::poll") {
         return None;
     }
-    next_key_event()
+    read_input()
+}
+
+pub(crate) fn next_key_event() -> Option<KeyEvent> {
+    match read_input() {
+        Some(Input::Key(key)) => Some(key),
+        _ => None,
+    }
+}
+
+pub(crate) fn poll_key_event(timeout: Duration) -> Option<KeyEvent> {
+    match poll_input(timeout) {
+        Some(Input::Key(key)) => Some(key),
+        _ => None,
+    }
 }
