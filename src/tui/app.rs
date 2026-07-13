@@ -197,7 +197,7 @@ impl Installer {
         let _console_log_level = ConsoleLogLevelGuard::quiet();
         let mut terminal = Terminal::new(std::io::stdout());
         if let Err(e) = terminal.activate() {
-            fatal_io(e, "activate terminal");
+            fatal_io(&e, "activate terminal");
         }
         self.run_screens(&mut terminal)
     }

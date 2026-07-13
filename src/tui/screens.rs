@@ -301,8 +301,8 @@ impl Installer {
         clippy::cast_possible_wrap,
         clippy::cast_sign_loss
     )]
-    pub(crate) fn screen_too_small(&self, term: &mut Terminal) -> bool {
-        let size = tui_or_exit(term.size(), "term.size");
+    pub(crate) fn screen_too_small(&self) -> bool {
+        let size = tui_or_exit(Terminal::size(), "term.size");
         size.height < MIN_SCREEN_ROWS || size.width < MIN_SCREEN_COLS
     }
 
@@ -311,7 +311,7 @@ impl Installer {
         let mut selected: usize = 0;
 
         loop {
-            if self.screen_too_small(term) {
+            if self.screen_too_small() {
                 tui_or_exit(
                     term.draw(|f| {
                         Self::draw_frame(
@@ -478,7 +478,7 @@ impl Installer {
         refresh(&mut devices, &mut selected, &mut status, &self.ctx.drive);
 
         loop {
-            let size = tui_or_exit(term.size(), "term.size");
+            let size = tui_or_exit(Terminal::size(), "term.size");
             let visible = (size.height.saturating_sub(9)).max(1) as usize;
             top = top.min(selected);
             if selected >= top + visible {

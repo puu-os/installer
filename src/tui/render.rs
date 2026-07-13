@@ -246,7 +246,7 @@ pub(crate) struct Buffer<'a> {
     cells: &'a mut [Cell],
 }
 
-impl<'a> Buffer<'a> {
+impl Buffer<'_> {
     pub(crate) fn cell_mut(&mut self, pos: (u16, u16)) -> Option<&mut Cell> {
         let (x, y) = pos;
         if x >= self.width || y >= self.height {
@@ -416,13 +416,13 @@ impl Terminal {
             Show,
             LeaveAlternateScreen
         )
-        .and_then(|_| self.stdout.flush());
+        .and_then(|()| self.stdout.flush());
         self.active = false;
         let _ = terminal::disable_raw_mode();
         result
     }
 
-    pub(crate) fn size(&self) -> io::Result<Size> {
+    pub(crate) fn size() -> io::Result<Size> {
         let (width, height) = terminal::size()?;
         Ok(Size { width, height })
     }
@@ -431,12 +431,12 @@ impl Terminal {
     where
         F: FnOnce(&mut Frame),
     {
-        let mut frame = Frame::new(self.size()?);
+        let mut frame = Frame::new(Self::size()?);
         draw(&mut frame);
-        self.flush_frame(frame)
+        self.flush_frame(&frame)
     }
 
-    fn flush_frame(&mut self, frame: Frame) -> io::Result<()> {
+    fn flush_frame(&mut self, frame: &Frame) -> io::Result<()> {
         queue!(
             self.stdout,
             Hide,
@@ -475,8 +475,7 @@ impl Terminal {
         let reactivate = self.activate();
         match (status, reactivate) {
             (Ok(status), Ok(())) => Ok(status),
-            (Err(err), _) => Err(err),
-            (_, Err(err)) => Err(err),
+            (Err(err), _) | (_, Err(err)) => Err(err),
         }
     }
 }
@@ -555,7 +554,7 @@ pub(crate) fn sanitize_text(text: &str) -> String {
     out
 }
 
-pub(crate) fn fatal_io(err: io::Error, ctx: &str) -> ! {
+pub(crate) fn fatal_io(err: &io::Error, ctx: &str) -> ! {
     let _ = terminal::disable_raw_mode();
     let mut stdout = io::stdout();
     let _ = execute!(
@@ -573,7 +572,7 @@ pub(crate) fn fatal_io(err: io::Error, ctx: &str) -> ! {
 pub(crate) fn tui_or_exit<T>(result: io::Result<T>, ctx: &str) -> T {
     match result {
         Ok(v) => v,
-        Err(e) => fatal_io(e, ctx),
+        Err(e) => fatal_io(&e, ctx),
     }
 }
 

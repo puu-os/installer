@@ -461,7 +461,7 @@ impl Installer {
         let mut view = MapView::new(pick.selected());
 
         loop {
-            let height = tui_or_exit(term.size(), "term.size").height;
+            let height = tui_or_exit(Terminal::size(), "term.size").height;
             let layout = layout(height);
             pick.reframe(layout.list_h as usize);
 
