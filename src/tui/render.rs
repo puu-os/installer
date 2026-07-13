@@ -48,17 +48,6 @@ pub(crate) struct Style {
 }
 
 impl Style {
-    pub(crate) fn default() -> Self {
-        Self::new()
-    }
-
-    pub(crate) const fn new() -> Self {
-        Self {
-            fg: None,
-            bg: None,
-            modifiers: Modifier(0),
-        }
-    }
 
     pub(crate) fn fg(mut self, color: Color) -> Self {
         self.fg = Some(color);
@@ -209,11 +198,6 @@ pub(crate) struct Block {
 }
 
 impl Block {
-    pub(crate) fn default() -> Self {
-        Self {
-            style: Style::default(),
-        }
-    }
 
     pub(crate) fn style(mut self, style: Style) -> Self {
         self.style = self.style.patch(style);
