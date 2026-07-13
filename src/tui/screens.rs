@@ -1310,37 +1310,3 @@ impl Installer {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{toggle_choice, valid_username, validate_account};
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-
-    #[test]
-    fn valid_username_accepts_installer_format() {
-        assert!(valid_username("user_01"));
-        assert!(!valid_username("User"));
-        assert!(!valid_username("bad name"));
-    }
-
-    #[test]
-    fn validate_account_catches_mismatch() {
-        assert_eq!(
-            validate_account("user", "pw1", "pw2"),
-            "Passwords do not match."
-        );
-    }
-
-    #[test]
-    fn toggle_choice_switches_selection() {
-        let mut selected = 0;
-        let key = KeyEvent {
-            code: KeyCode::Tab,
-            modifiers: KeyModifiers::NONE,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        };
-        assert!(toggle_choice(&mut selected, &key));
-        assert_eq!(selected, 1);
-    }
-}

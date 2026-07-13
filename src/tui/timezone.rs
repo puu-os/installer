@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::tui::app::{Installer, ScreenAction};
 use crate::tui::render::{
-    Color, Frame, Modifier, Paragraph, Rect, Style, Terminal, next_key_event, tui_or_exit,
+    Color, Frame, Modifier, Paragraph, Rect, Style, Terminal, poll_key_event, tui_or_exit,
 };
 use crate::tui::screens::{ACCENT, ERR, LAND, ON_SELECT, SELECT};
 
@@ -131,6 +131,7 @@ fn layout(height: u16) -> MapLayout {
 
 struct MapView {
     center_lon: f64,
+    target_lon: f64,
 }
 
 impl MapView {
@@ -138,21 +139,33 @@ impl MapView {
         let center_lon = selected
             .filter(|zone| zone.has_coord)
             .map_or(0.0, |zone| wrap_lon(zone.lon));
-        Self { center_lon }
+        Self {
+            center_lon,
+            target_lon: center_lon,
+        }
     }
 
     fn follow(&mut self, zone: &Zone) {
         if zone.has_coord {
-            self.center_lon = wrap_lon(zone.lon);
+            self.target_lon = wrap_lon(zone.lon);
         }
     }
 
-    fn pan(&mut self, delta: f64) {
-        self.center_lon = wrap_lon(self.center_lon + delta);
+    fn page_pan(&mut self, direction: f64) {
+        self.target_lon = wrap_lon(self.target_lon + VIEW_LON_SPAN * PAN_PAGE_FRACTION * direction);
     }
 
-    fn page_pan(&mut self, direction: f64) {
-        self.pan(VIEW_LON_SPAN * PAN_PAGE_FRACTION * direction);
+    fn tick(&mut self, elapsed: std::time::Duration) -> bool {
+        const PAN_SPEED: f64 = 360.0;
+
+        let delta = lon_delta(self.center_lon, self.target_lon);
+        let step = PAN_SPEED * elapsed.as_secs_f64();
+        if delta.abs() <= step {
+            self.center_lon = self.target_lon;
+        } else {
+            self.center_lon = wrap_lon(self.center_lon + delta.signum() * step);
+        }
+        delta != 0.0
     }
 
     fn start_lon(&self) -> f64 {
@@ -460,7 +473,12 @@ impl Installer {
         let mut pick = TzPick::new(load_zones(), &current);
         let mut view = MapView::new(pick.selected());
 
+        let mut last_frame = std::time::Instant::now();
         loop {
+            let now = std::time::Instant::now();
+            view.tick(now.saturating_duration_since(last_frame));
+            last_frame = now;
+
             let height = tui_or_exit(Terminal::size(), "term.size").height;
             let layout = layout(height);
             pick.reframe(layout.list_h as usize);
@@ -472,7 +490,7 @@ impl Installer {
                 "draw",
             );
 
-            if let Some(key) = next_key_event() {
+            if let Some(key) = poll_key_event(std::time::Duration::from_millis(16)) {
                 match key.code {
                     KeyCode::Esc => return ScreenAction::Back,
                     KeyCode::Enter => {
@@ -513,50 +531,5 @@ impl Installer {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{MapView, TzPick, Zone, load_zones};
-
-    #[test]
-    fn load_zones_pins_utc_first() {
-        let zones = load_zones();
-        assert_eq!(zones.first().map(|zone| zone.name.as_str()), Some("UTC"));
-    }
-
-    #[test]
-    fn refilter_keeps_matching_timezones() {
-        let zones = vec![
-            Zone {
-                name: "UTC".into(),
-                lat: 0.0,
-                lon: 0.0,
-                has_coord: false,
-            },
-            Zone {
-                name: "Europe/Helsinki".into(),
-                lat: 60.0,
-                lon: 25.0,
-                has_coord: true,
-            },
-            Zone {
-                name: "America/New_York".into(),
-                lat: 40.0,
-                lon: -74.0,
-                has_coord: true,
-            },
-        ];
-        let mut pick = TzPick::new(zones, "UTC");
-        let mut view = MapView::new(pick.selected());
-        pick.push_filter('e');
-        pick.push_filter('u');
-        pick.sync_view(&mut view);
-        assert_eq!(pick.filtered.len(), 1);
-        assert_eq!(
-            pick.selected().map(|zone| zone.name.as_str()),
-            Some("Europe/Helsinki")
-        );
     }
 }

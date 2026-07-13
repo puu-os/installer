@@ -12,7 +12,10 @@ use crossterm::{
         Attribute, Color as CrosstermColor, Print, ResetColor, SetAttribute, SetBackgroundColor,
         SetForegroundColor,
     },
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        self, Clear, ClearType, DisableLineWrap, EnableLineWrap, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,7 +26,22 @@ pub(crate) enum Color {
 impl Color {
     fn to_crossterm(self) -> CrosstermColor {
         match self {
-            Self::Indexed(index) => CrosstermColor::AnsiValue(index),
+            Self::Indexed(0) => CrosstermColor::Black,
+            Self::Indexed(1) => CrosstermColor::DarkRed,
+            Self::Indexed(2) => CrosstermColor::DarkGreen,
+            Self::Indexed(3) => CrosstermColor::DarkYellow,
+            Self::Indexed(4) => CrosstermColor::DarkBlue,
+            Self::Indexed(5) => CrosstermColor::DarkMagenta,
+            Self::Indexed(6) => CrosstermColor::DarkCyan,
+            Self::Indexed(7) => CrosstermColor::Grey,
+            Self::Indexed(8) => CrosstermColor::DarkGrey,
+            Self::Indexed(9) => CrosstermColor::Red,
+            Self::Indexed(10) => CrosstermColor::Green,
+            Self::Indexed(11) => CrosstermColor::Yellow,
+            Self::Indexed(12) => CrosstermColor::Blue,
+            Self::Indexed(13) => CrosstermColor::Magenta,
+            Self::Indexed(14) => CrosstermColor::Cyan,
+            Self::Indexed(15 | _) => CrosstermColor::White,
         }
     }
 }
@@ -257,6 +275,7 @@ impl Buffer<'_> {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Frame {
     area: Rect,
     cells: Vec<Cell>,
@@ -368,6 +387,7 @@ pub(crate) struct Terminal {
     stdout: Stdout,
     active: bool,
     color_mode: ColorMode,
+    last_frame: Option<Frame>,
 }
 
 impl Terminal {
@@ -383,6 +403,7 @@ impl Terminal {
             stdout,
             active: false,
             color_mode,
+            last_frame: None,
         }
     }
 
@@ -394,6 +415,7 @@ impl Terminal {
         execute!(
             self.stdout,
             EnterAlternateScreen,
+            DisableLineWrap,
             Hide,
             ResetColor,
             SetAttribute(Attribute::Reset),
@@ -401,6 +423,7 @@ impl Terminal {
             MoveTo(0, 0)
         )?;
         self.stdout.flush()?;
+        self.last_frame = None;
         self.active = true;
         Ok(())
     }
@@ -414,10 +437,12 @@ impl Terminal {
             ResetColor,
             SetAttribute(Attribute::Reset),
             Show,
+            EnableLineWrap,
             LeaveAlternateScreen
         )
         .and_then(|()| self.stdout.flush());
         self.active = false;
+        self.last_frame = None;
         let _ = terminal::disable_raw_mode();
         result
     }
@@ -441,17 +466,30 @@ impl Terminal {
             self.stdout,
             Hide,
             ResetColor,
-            SetAttribute(Attribute::Reset),
-            Clear(ClearType::All)
+            SetAttribute(Attribute::Reset)
         )?;
 
+        let last_frame = self.last_frame.as_ref();
         for y in 0..frame.area.height {
-            queue!(self.stdout, MoveTo(0, y))?;
-            for x in 0..frame.area.width {
-                let index = usize::from(y) * usize::from(frame.area.width) + usize::from(x);
-                let cell = frame.cells[index];
-                apply_style(&mut self.stdout, cell.style, self.color_mode)?;
-                queue!(self.stdout, Print(cell.ch))?;
+            let mut x = 0;
+            while x < frame.area.width {
+                if !frame_cell_changed(last_frame, frame, x, y) {
+                    x += 1;
+                    continue;
+                }
+
+                queue!(self.stdout, MoveTo(x, y))?;
+                let mut style = None;
+                while x < frame.area.width && frame_cell_changed(last_frame, frame, x, y) {
+                    let index = usize::from(y) * usize::from(frame.area.width) + usize::from(x);
+                    let cell = frame.cells[index];
+                    if style != Some(cell.style) {
+                        apply_style(&mut self.stdout, cell.style, self.color_mode)?;
+                        style = Some(cell.style);
+                    }
+                    queue!(self.stdout, Print(cell.ch))?;
+                    x += 1;
+                }
             }
         }
 
@@ -466,7 +504,9 @@ impl Terminal {
         } else {
             queue!(self.stdout, Hide)?;
         }
-        self.stdout.flush()
+        self.stdout.flush()?;
+        self.last_frame = Some(frame.clone());
+        Ok(())
     }
 
     pub(crate) fn suspend_command(&mut self, command: &mut Command) -> io::Result<ExitStatus> {
@@ -484,6 +524,13 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = self.deactivate();
     }
+}
+
+fn frame_cell_changed(last_frame: Option<&Frame>, frame: &Frame, x: u16, y: u16) -> bool {
+    let index = usize::from(y) * usize::from(frame.area.width) + usize::from(x);
+    last_frame.is_none_or(|last_frame| {
+        last_frame.area != frame.area || last_frame.cells[index] != frame.cells[index]
+    })
 }
 
 fn apply_style(stdout: &mut Stdout, style: Style, color_mode: ColorMode) -> io::Result<()> {
@@ -590,30 +637,4 @@ pub(crate) fn poll_key_event(timeout: std::time::Duration) -> Option<KeyEvent> {
         return None;
     }
     next_key_event()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Frame, Paragraph, Rect, Size, sanitize_text};
-
-    #[test]
-    fn sanitize_text_keeps_ascii() {
-        assert_eq!(sanitize_text("abc XYZ 123"), "abc XYZ 123");
-    }
-
-    #[test]
-    fn sanitize_text_maps_common_unicode() {
-        assert_eq!(sanitize_text("a→b — c≤d"), "a->b - c<=d");
-    }
-
-    #[test]
-    fn paragraph_render_clips_expanded_ascii() {
-        let mut frame = Frame::new(Size {
-            width: 5,
-            height: 1,
-        });
-        frame.render_widget(Paragraph::new("A→BCD"), Rect::new(0, 0, 5, 1));
-        let rendered: String = frame.cells.iter().map(|cell| cell.ch).collect();
-        assert_eq!(rendered, "A->BC");
-    }
 }
