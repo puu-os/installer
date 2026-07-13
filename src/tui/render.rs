@@ -48,7 +48,6 @@ pub(crate) struct Style {
 }
 
 impl Style {
-
     pub(crate) fn fg(mut self, color: Color) -> Self {
         self.fg = Some(color);
         self
@@ -198,7 +197,6 @@ pub(crate) struct Block {
 }
 
 impl Block {
-
     pub(crate) fn style(mut self, style: Style) -> Self {
         self.style = self.style.patch(style);
         self
@@ -330,7 +328,14 @@ impl Widget for Paragraph {
             if row >= usize::from(rect.height) {
                 break;
             }
-            render_line(frame, rect.x, rect.y + row as u16, rect.width, line, self.style);
+            render_line(
+                frame,
+                rect.x,
+                rect.y + row as u16,
+                rect.width,
+                line,
+                self.style,
+            );
         }
     }
 }

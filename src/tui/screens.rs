@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::render::{
-    Block, Color, Frame, Line, Modifier, Paragraph, Rect, Span, Style, Terminal,
-    next_key_event, poll_key_event, tui_or_exit,
+    Block, Color, Frame, Line, Modifier, Paragraph, Rect, Span, Style, Terminal, next_key_event,
+    poll_key_event, tui_or_exit,
 };
 
 use crate::engine::block;
@@ -144,7 +144,6 @@ fn keymap_for_locale(locale: &str) -> &str {
         .find(|(l, _)| *l == locale)
         .map_or("us", |(_, k)| *k)
 }
-
 
 /// Suspend the TUI, run an interactive command on the real terminal, then
 /// restore the alternate screen and raw mode.
@@ -302,24 +301,19 @@ impl Installer {
         clippy::cast_possible_wrap,
         clippy::cast_sign_loss
     )]
-    pub(crate) fn screen_too_small(
-        &self,
-        term: &mut Terminal,
-    ) -> bool {
+    pub(crate) fn screen_too_small(&self, term: &mut Terminal) -> bool {
         let size = tui_or_exit(term.size(), "term.size");
         size.height < MIN_SCREEN_ROWS || size.width < MIN_SCREEN_COLS
     }
 
-    pub(crate) fn welcome_screen(
-        &mut self,
-        term: &mut Terminal,
-    ) -> ScreenAction {
+    pub(crate) fn welcome_screen(&mut self, term: &mut Terminal) -> ScreenAction {
         let choices: Vec<&str> = WELCOME_CHOICES.iter().map(|(_, label)| *label).collect();
         let mut selected: usize = 0;
 
         loop {
             if self.screen_too_small(term) {
-                tui_or_exit(term.draw(|f| {
+                tui_or_exit(
+                    term.draw(|f| {
                         Self::draw_frame(
                             f,
                             &self.title(),
@@ -347,24 +341,28 @@ impl Installer {
                 continue;
             }
 
-            tui_or_exit(term.draw(|f| {
-                Self::draw_frame(
-                    f,
-                    &self.title(),
-                    "Choose an option to begin.",
-                    "Arrows select, Enter activates, Esc quits",
-                );
-                let area = f.area();
-                let menu_start_y = 4.max((area.height as i16 - choices.len() as i16) / 2) as u16;
-                for (i, choice) in choices.iter().enumerate() {
-                    let marker = if i == selected { ">" } else { " " };
-                    let style = highlight_style(i == selected);
-                    f.render_widget(
-                        Paragraph::new(format!("{marker} {choice}")).style(style),
-                        Rect::new(2, menu_start_y + i as u16, 20, 1),
+            tui_or_exit(
+                term.draw(|f| {
+                    Self::draw_frame(
+                        f,
+                        &self.title(),
+                        "Choose an option to begin.",
+                        "Arrows select, Enter activates, Esc quits",
                     );
-                }
-            }), "draw");
+                    let area = f.area();
+                    let menu_start_y =
+                        4.max((area.height as i16 - choices.len() as i16) / 2) as u16;
+                    for (i, choice) in choices.iter().enumerate() {
+                        let marker = if i == selected { ">" } else { " " };
+                        let style = highlight_style(i == selected);
+                        f.render_widget(
+                            Paragraph::new(format!("{marker} {choice}")).style(style),
+                            Rect::new(2, menu_start_y + i as u16, 20, 1),
+                        );
+                    }
+                }),
+                "draw",
+            );
 
             if let Some(key) = next_key_event() {
                 match key.code {
@@ -402,31 +400,34 @@ impl Installer {
         let mut selected = 0usize;
 
         loop {
-            tui_or_exit(term.draw(|f| {
-                Self::draw_frame(
-                    f,
-                    title,
-                    "",
-                    "Left/Right select, Enter activates, Esc cancels",
-                );
-                let area = f.area();
-
-                let body_style = if danger {
-                    Style::default().fg(ERR)
-                } else {
-                    Style::default()
-                };
-                let lines: Vec<&str> = body.lines().collect();
-                for (i, line) in lines.iter().enumerate() {
-                    f.render_widget(
-                        Paragraph::new(*line).style(body_style),
-                        Rect::new(4, 5 + i as u16, area.width.saturating_sub(8), 1),
+            tui_or_exit(
+                term.draw(|f| {
+                    Self::draw_frame(
+                        f,
+                        title,
+                        "",
+                        "Left/Right select, Enter activates, Esc cancels",
                     );
-                }
+                    let area = f.area();
 
-                let y = 8 + lines.len() as u16;
-                button_row(f, &["No", "Yes"], selected, y, 10);
-            }), "draw");
+                    let body_style = if danger {
+                        Style::default().fg(ERR)
+                    } else {
+                        Style::default()
+                    };
+                    let lines: Vec<&str> = body.lines().collect();
+                    for (i, line) in lines.iter().enumerate() {
+                        f.render_widget(
+                            Paragraph::new(*line).style(body_style),
+                            Rect::new(4, 5 + i as u16, area.width.saturating_sub(8), 1),
+                        );
+                    }
+
+                    let y = 8 + lines.len() as u16;
+                    button_row(f, &["No", "Yes"], selected, y, 10);
+                }),
+                "draw",
+            );
 
             if let Some(key) = next_key_event() {
                 if !toggle_choice(&mut selected, &key) {
@@ -441,10 +442,7 @@ impl Installer {
     }
 
     #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
-    pub(crate) fn target_screen(
-        &mut self,
-        term: &mut Terminal,
-    ) -> ScreenAction {
+    pub(crate) fn target_screen(&mut self, term: &mut Terminal) -> ScreenAction {
         let mut selected: usize = 0;
         let mut top: usize = 0;
         let mut devices: Vec<block::Device> = Vec::new();
@@ -488,63 +486,66 @@ impl Installer {
             }
 
             let drive_for_refresh = self.ctx.drive.clone();
-            tui_or_exit(term.draw(|f| {
-                Self::draw_frame(
-                    f,
-                    "Select Target Drive",
-                    "",
-                    "Up/Down select, Enter continue, Ctrl-R refresh, Esc back",
-                );
-                let area = f.area();
-
-                f.render_widget(
-                    Paragraph::new(format!(
-                        "  {:<19} {:<10} {:<8} {:<20} {}",
-                        "Device", "Size", "Bus", "Model", "Status"
-                    ))
-                    .style(Style::default().add_modifier(Modifier::BOLD)),
-                    Rect::new(0, 4, area.width, 1),
-                );
-                rule(f, 0, 5, area.width);
-
-                for (row, dev) in devices[top..(top + visible).min(devices.len())]
-                    .iter()
-                    .enumerate()
-                {
-                    let idx = top + row;
-                    let status_text = if dev.busy_reason.is_some() {
-                        "BUSY"
-                    } else {
-                        "available"
-                    };
-                    let marker = if idx == selected { ">" } else { " " };
-                    let style = highlight_style(idx == selected);
-                    let model: String = dev.model.chars().take(20).collect();
-                    let line = format!(
-                        "{marker} {:<19} {:<10} {:<8} {model:<20} {status_text}",
-                        dev.path, dev.size, dev.transport
+            tui_or_exit(
+                term.draw(|f| {
+                    Self::draw_frame(
+                        f,
+                        "Select Target Drive",
+                        "",
+                        "Up/Down select, Enter continue, Ctrl-R refresh, Esc back",
                     );
+                    let area = f.area();
+
                     f.render_widget(
-                        Paragraph::new(line).style(style),
-                        Rect::new(0, 6 + row as u16, area.width, 1),
+                        Paragraph::new(format!(
+                            "  {:<19} {:<10} {:<8} {:<20} {}",
+                            "Device", "Size", "Bus", "Model", "Status"
+                        ))
+                        .style(Style::default().add_modifier(Modifier::BOLD)),
+                        Rect::new(0, 4, area.width, 1),
                     );
-                }
+                    rule(f, 0, 5, area.width);
 
-                let status_style = if status.contains("Failed") || status.contains("busy") {
-                    Style::default().fg(ERR)
-                } else {
-                    Style::default().fg(ACCENT)
-                };
-                f.render_widget(
-                    Paragraph::new(status.as_str()).style(status_style),
-                    Rect::new(
-                        2,
-                        area.height.saturating_sub(3),
-                        area.width.saturating_sub(4),
-                        1,
-                    ),
-                );
-            }), "draw");
+                    for (row, dev) in devices[top..(top + visible).min(devices.len())]
+                        .iter()
+                        .enumerate()
+                    {
+                        let idx = top + row;
+                        let status_text = if dev.busy_reason.is_some() {
+                            "BUSY"
+                        } else {
+                            "available"
+                        };
+                        let marker = if idx == selected { ">" } else { " " };
+                        let style = highlight_style(idx == selected);
+                        let model: String = dev.model.chars().take(20).collect();
+                        let line = format!(
+                            "{marker} {:<19} {:<10} {:<8} {model:<20} {status_text}",
+                            dev.path, dev.size, dev.transport
+                        );
+                        f.render_widget(
+                            Paragraph::new(line).style(style),
+                            Rect::new(0, 6 + row as u16, area.width, 1),
+                        );
+                    }
+
+                    let status_style = if status.contains("Failed") || status.contains("busy") {
+                        Style::default().fg(ERR)
+                    } else {
+                        Style::default().fg(ACCENT)
+                    };
+                    f.render_widget(
+                        Paragraph::new(status.as_str()).style(status_style),
+                        Rect::new(
+                            2,
+                            area.height.saturating_sub(3),
+                            area.width.saturating_sub(4),
+                            1,
+                        ),
+                    );
+                }),
+                "draw",
+            );
 
             if let Some(key) = next_key_event() {
                 match key.code {
@@ -580,10 +581,7 @@ impl Installer {
     }
 
     #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
-    pub(crate) fn identity_screen(
-        &mut self,
-        term: &mut Terminal,
-    ) -> ScreenAction {
+    pub(crate) fn identity_screen(&mut self, term: &mut Terminal) -> ScreenAction {
         let current_locale = if self.ctx.locale.is_empty() {
             self.ctx.config.identity.locale.as_str()
         } else {
@@ -625,59 +623,62 @@ impl Installer {
                 SHELLS[shell_idx].0.to_string(),
             ];
 
-            tui_or_exit(term.draw(|f| {
-                Self::draw_frame(
-                    f,
-                    "System Identity",
-                    "Choose language, hostname and the first user account.",
-                    "Tab next, Left/Right change choices, Enter submit, Esc back",
-                );
-                let area = f.area();
-
-                for (i, label) in labels.iter().enumerate() {
-                    let y = 4 + i as u16 * 2;
-                    let selected = i == field_idx;
-                    let style = highlight_style(selected);
-
-                    let count = fields[i].chars().count();
-                    let value = if (i == 3 || i == 4) && !reveal {
-                        "*".repeat(count.min(40))
-                    } else if count > 40 {
-                        fields[i].chars().skip(count - 40).collect()
-                    } else {
-                        fields[i].clone()
-                    };
-
-                    f.render_widget(
-                        Paragraph::new(format!("{label:<16}")),
-                        Rect::new(4, y, 16, 1),
+            tui_or_exit(
+                term.draw(|f| {
+                    Self::draw_frame(
+                        f,
+                        "System Identity",
+                        "Choose language, hostname and the first user account.",
+                        "Tab next, Left/Right change choices, Enter submit, Esc back",
                     );
-                    f.render_widget(
-                        Paragraph::new(format!("[ {value:<40} ]")).style(style),
-                        Rect::new(22, y, 44, 1),
-                    );
-                }
+                    let area = f.area();
 
-                if matches!(field_idx, 1..=4) {
-                    let caret = fields[field_idx].chars().count().min(40) as u16;
-                    f.set_cursor_position((24 + caret, 4 + field_idx as u16 * 2));
-                }
+                    for (i, label) in labels.iter().enumerate() {
+                        let y = 4 + i as u16 * 2;
+                        let selected = i == field_idx;
+                        let style = highlight_style(selected);
 
-                if reveal {
-                    f.render_widget(
-                        Paragraph::new("Password reveal is on")
-                            .style(Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
-                        Rect::new(4, 17, area.width, 1),
-                    );
-                }
+                        let count = fields[i].chars().count();
+                        let value = if (i == 3 || i == 4) && !reveal {
+                            "*".repeat(count.min(40))
+                        } else if count > 40 {
+                            fields[i].chars().skip(count - 40).collect()
+                        } else {
+                            fields[i].clone()
+                        };
 
-                if !status.is_empty() {
-                    f.render_widget(
-                        Paragraph::new(status.as_str()).style(Style::default().fg(ERR)),
-                        Rect::new(4, 19, area.width, 1),
-                    );
-                }
-            }), "draw");
+                        f.render_widget(
+                            Paragraph::new(format!("{label:<16}")),
+                            Rect::new(4, y, 16, 1),
+                        );
+                        f.render_widget(
+                            Paragraph::new(format!("[ {value:<40} ]")).style(style),
+                            Rect::new(22, y, 44, 1),
+                        );
+                    }
+
+                    if matches!(field_idx, 1..=4) {
+                        let caret = fields[field_idx].chars().count().min(40) as u16;
+                        f.set_cursor_position((24 + caret, 4 + field_idx as u16 * 2));
+                    }
+
+                    if reveal {
+                        f.render_widget(
+                            Paragraph::new("Password reveal is on")
+                                .style(Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
+                            Rect::new(4, 17, area.width, 1),
+                        );
+                    }
+
+                    if !status.is_empty() {
+                        f.render_widget(
+                            Paragraph::new(status.as_str()).style(Style::default().fg(ERR)),
+                            Rect::new(4, 19, area.width, 1),
+                        );
+                    }
+                }),
+                "draw",
+            );
 
             if let Some(key) = next_key_event() {
                 match key.code {
@@ -764,10 +765,7 @@ impl Installer {
         }
     }
 
-    pub(crate) fn secureboot_screen(
-        &mut self,
-        term: &mut Terminal,
-    ) -> ScreenAction {
+    pub(crate) fn secureboot_screen(&mut self, term: &mut Terminal) -> ScreenAction {
         let status = firmware::detect_setup_mode();
         if status.setup_mode == Some(true) {
             self.secureboot_enroll_screen(term, &status)
@@ -858,26 +856,30 @@ impl Installer {
         };
 
         loop {
-            tui_or_exit(term.draw(|f| {
-                Self::draw_frame(
-                    f,
-                    "Secure Boot",
-                    title,
-                    "Left/Right select, Enter activates, Esc back",
-                );
-                let area = f.area();
-                let lines: Vec<&str> = body.lines().collect();
-                for (i, line) in lines.iter().enumerate() {
-                    f.render_widget(
-                        Paragraph::new(*line)
-                            .style(Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
-                        Rect::new(4, 5 + i as u16, area.width.saturating_sub(8), 1),
+            tui_or_exit(
+                term.draw(|f| {
+                    Self::draw_frame(
+                        f,
+                        "Secure Boot",
+                        title,
+                        "Left/Right select, Enter activates, Esc back",
                     );
-                }
-                let y = 8 + lines.len() as u16;
-                let choices: Vec<&str> = FALLBACK_CHOICES.iter().map(|(_, label)| *label).collect();
-                button_row(f, &choices, selected, y, 14);
-            }), "draw");
+                    let area = f.area();
+                    let lines: Vec<&str> = body.lines().collect();
+                    for (i, line) in lines.iter().enumerate() {
+                        f.render_widget(
+                            Paragraph::new(*line)
+                                .style(Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
+                            Rect::new(4, 5 + i as u16, area.width.saturating_sub(8), 1),
+                        );
+                    }
+                    let y = 8 + lines.len() as u16;
+                    let choices: Vec<&str> =
+                        FALLBACK_CHOICES.iter().map(|(_, label)| *label).collect();
+                    button_row(f, &choices, selected, y, 14);
+                }),
+                "draw",
+            );
 
             if let Some(key) = next_key_event() {
                 match key.code {
@@ -903,10 +905,7 @@ impl Installer {
         }
     }
 
-    pub(crate) fn review_screen(
-        &mut self,
-        term: &mut Terminal,
-    ) -> ScreenAction {
+    pub(crate) fn review_screen(&mut self, term: &mut Terminal) -> ScreenAction {
         let mut selected = 1usize;
 
         loop {
@@ -941,31 +940,34 @@ impl Installer {
                 ("Secure Boot", secure_boot),
             ];
 
-            tui_or_exit(term.draw(|f| {
-                Self::draw_frame(
-                    f,
-                    "Does this look right?",
-                    "Review the installation choices before the disk is modified.",
-                    "Left/Right select, Enter activates, Esc back",
-                );
-                let area = f.area();
-
-                for (i, (label, value)) in rows.iter().enumerate() {
-                    let y = 4 + i as u16;
-                    f.render_widget(
-                        Paragraph::new(format!("{label:<13} {value}")),
-                        Rect::new(4, y, area.width.saturating_sub(8), 1),
+            tui_or_exit(
+                term.draw(|f| {
+                    Self::draw_frame(
+                        f,
+                        "Does this look right?",
+                        "Review the installation choices before the disk is modified.",
+                        "Left/Right select, Enter activates, Esc back",
                     );
-                }
+                    let area = f.area();
 
-                f.render_widget(
-                    Paragraph::new("Installation will erase the selected target disk.")
-                        .style(Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
-                    Rect::new(4, 16, area.width.saturating_sub(8), 1),
-                );
+                    for (i, (label, value)) in rows.iter().enumerate() {
+                        let y = 4 + i as u16;
+                        f.render_widget(
+                            Paragraph::new(format!("{label:<13} {value}")),
+                            Rect::new(4, y, area.width.saturating_sub(8), 1),
+                        );
+                    }
 
-                button_row(f, &["Back", "Start install"], selected, 19, 18);
-            }), "draw");
+                    f.render_widget(
+                        Paragraph::new("Installation will erase the selected target disk.")
+                            .style(Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
+                        Rect::new(4, 16, area.width.saturating_sub(8), 1),
+                    );
+
+                    button_row(f, &["Back", "Start install"], selected, 19, 18);
+                }),
+                "draw",
+            );
 
             if let Some(key) = next_key_event() {
                 if !toggle_choice(&mut selected, &key) {
@@ -980,10 +982,7 @@ impl Installer {
     }
 
     #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
-    pub(crate) fn install_screen(
-        &mut self,
-        term: &mut Terminal,
-    ) -> ScreenAction {
+    pub(crate) fn install_screen(&mut self, term: &mut Terminal) -> ScreenAction {
         let steps = pipeline::STEPS;
         let mut states = vec![InstallStepState::Pending; steps.len()];
 
@@ -1068,131 +1067,134 @@ impl Installer {
 
             let frame = (started.elapsed().as_millis() / 80) as usize;
 
-            tui_or_exit(term.draw(|f| {
-                Self::draw_frame(
-                    f,
-                    &install_title,
-                    &format!("Target: {}", self.ctx.drive_label),
-                    if complete {
-                        "Enter continue"
-                    } else if failed {
-                        "Enter back to menu"
-                    } else if committed {
-                        "PgUp/PgDn scroll"
-                    } else {
-                        "Esc cancel, PgUp/PgDn scroll"
-                    },
-                );
-                let area = f.area();
-                let width = area.width;
-                let content_w = width.saturating_sub(2);
-                let bold = Style::default().add_modifier(Modifier::BOLD);
-                let sep = " - ";
-
-                // Current step (row 2): spinner + counter + title, or the final
-                // status message once the run has stopped.
-                let st_style = if failed {
-                    Style::default().fg(ERR)
-                } else if complete {
-                    Style::default().fg(OK).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                let current_line = if running {
-                    format!(
-                        "{} Step {}/{}{sep}{state}",
-                        spinner(frame),
-                        current_step + 1,
-                        steps.len()
-                    )
-                } else {
-                    state.clone()
-                };
-                f.render_widget(
-                    Paragraph::new(clip_chars(&current_line, content_w)).style(st_style),
-                    Rect::new(2, INSTALL_CURRENT_Y, content_w, 1),
-                );
-
-                // Progress bars: an 8-wide label column, then a wide bar.
-                let bar_x = 10u16;
-                f.render_widget(
-                    Paragraph::new("Step").style(bold),
-                    Rect::new(2, INSTALL_STEP_BAR_Y, 8, 1),
-                );
-                let step_bar_w = width.saturating_sub(bar_x + 2).max(20);
-                f.render_widget(
-                    Paragraph::new(progress_bar(step_fraction, step_bar_w as usize)),
-                    Rect::new(bar_x, INSTALL_STEP_BAR_Y, step_bar_w, 1),
-                );
-
-                // Overall bar (row 4) with elapsed time pinned to the right.
-                let runnable_weight = |range: std::ops::Range<usize>| -> u32 {
-                    range
-                        .filter(|&i| !matches!(states[i], InstallStepState::Skipped))
-                        .map(|i| steps[i].weight)
-                        .sum()
-                };
-                let total = runnable_weight(0..steps.len()).max(1);
-                let done = runnable_weight(0..current_step);
-                let active = f64::from(steps[current_step].weight) * step_fraction.min(1.0);
-                let overall = (f64::from(done) + active) / f64::from(total);
-
-                let elapsed = finished
-                    .unwrap_or_else(Instant::now)
-                    .duration_since(started);
-                let elapsed_str = format!("Elapsed {}", format_elapsed(elapsed));
-                let elapsed_w = elapsed_str.chars().count() as u16;
-
-                f.render_widget(
-                    Paragraph::new("Overall").style(bold),
-                    Rect::new(2, INSTALL_OVERALL_Y, 8, 1),
-                );
-                let overall_bar_w = width.saturating_sub(bar_x + elapsed_w + 2).max(20);
-                f.render_widget(
-                    Paragraph::new(progress_bar(overall, overall_bar_w as usize)),
-                    Rect::new(bar_x, INSTALL_OVERALL_Y, overall_bar_w, 1),
-                );
-                f.render_widget(
-                    Paragraph::new(elapsed_str).style(Style::default().fg(ACCENT)),
-                    Rect::new(
-                        width.saturating_sub(elapsed_w + 1),
-                        INSTALL_OVERALL_Y,
-                        elapsed_w,
-                        1,
-                    ),
-                );
-
-                // Log header (row 5): a full-width rule with an inline label.
-                rule(f, 0, INSTALL_LOG_HDR_Y, width);
-                let (log_label, log_style) = if log_scroll > 0 {
-                    (
-                        format!(" Log  ^{log_scroll}  PgDn to follow "),
-                        Style::default().fg(WARN).add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    (" Log ".to_string(), bold)
-                };
-                f.render_widget(
-                    Paragraph::new(clip_chars(&log_label, content_w)).style(log_style),
-                    Rect::new(2, INSTALL_LOG_HDR_Y, content_w, 1),
-                );
-
-                // Log pane (rows INSTALL_LOG_Y..): full terminal width.
-                let log_h = area.height.saturating_sub(INSTALL_LOG_Y + 1).max(1) as usize;
-                f.render_widget(
-                    Block::default().style(Style::default().fg(FG).bg(BG)),
-                    Rect::new(0, INSTALL_LOG_Y, width, log_h as u16),
-                );
-                let log_w = width.saturating_sub(1);
-                let end = logs.len().saturating_sub(log_scroll);
-                let start = end.saturating_sub(log_h);
-                for (row, line) in logs[start..end].iter().enumerate() {
-                    f.render_widget(
-                        Paragraph::new(clip_chars(line, log_w)),
-                        Rect::new(1, INSTALL_LOG_Y + row as u16, log_w, 1),
+            tui_or_exit(
+                term.draw(|f| {
+                    Self::draw_frame(
+                        f,
+                        &install_title,
+                        &format!("Target: {}", self.ctx.drive_label),
+                        if complete {
+                            "Enter continue"
+                        } else if failed {
+                            "Enter back to menu"
+                        } else if committed {
+                            "PgUp/PgDn scroll"
+                        } else {
+                            "Esc cancel, PgUp/PgDn scroll"
+                        },
                     );
-                }
-            }), "draw");
+                    let area = f.area();
+                    let width = area.width;
+                    let content_w = width.saturating_sub(2);
+                    let bold = Style::default().add_modifier(Modifier::BOLD);
+                    let sep = " - ";
+
+                    // Current step (row 2): spinner + counter + title, or the final
+                    // status message once the run has stopped.
+                    let st_style = if failed {
+                        Style::default().fg(ERR)
+                    } else if complete {
+                        Style::default().fg(OK).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    let current_line = if running {
+                        format!(
+                            "{} Step {}/{}{sep}{state}",
+                            spinner(frame),
+                            current_step + 1,
+                            steps.len()
+                        )
+                    } else {
+                        state.clone()
+                    };
+                    f.render_widget(
+                        Paragraph::new(clip_chars(&current_line, content_w)).style(st_style),
+                        Rect::new(2, INSTALL_CURRENT_Y, content_w, 1),
+                    );
+
+                    // Progress bars: an 8-wide label column, then a wide bar.
+                    let bar_x = 10u16;
+                    f.render_widget(
+                        Paragraph::new("Step").style(bold),
+                        Rect::new(2, INSTALL_STEP_BAR_Y, 8, 1),
+                    );
+                    let step_bar_w = width.saturating_sub(bar_x + 2).max(20);
+                    f.render_widget(
+                        Paragraph::new(progress_bar(step_fraction, step_bar_w as usize)),
+                        Rect::new(bar_x, INSTALL_STEP_BAR_Y, step_bar_w, 1),
+                    );
+
+                    // Overall bar (row 4) with elapsed time pinned to the right.
+                    let runnable_weight = |range: std::ops::Range<usize>| -> u32 {
+                        range
+                            .filter(|&i| !matches!(states[i], InstallStepState::Skipped))
+                            .map(|i| steps[i].weight)
+                            .sum()
+                    };
+                    let total = runnable_weight(0..steps.len()).max(1);
+                    let done = runnable_weight(0..current_step);
+                    let active = f64::from(steps[current_step].weight) * step_fraction.min(1.0);
+                    let overall = (f64::from(done) + active) / f64::from(total);
+
+                    let elapsed = finished
+                        .unwrap_or_else(Instant::now)
+                        .duration_since(started);
+                    let elapsed_str = format!("Elapsed {}", format_elapsed(elapsed));
+                    let elapsed_w = elapsed_str.chars().count() as u16;
+
+                    f.render_widget(
+                        Paragraph::new("Overall").style(bold),
+                        Rect::new(2, INSTALL_OVERALL_Y, 8, 1),
+                    );
+                    let overall_bar_w = width.saturating_sub(bar_x + elapsed_w + 2).max(20);
+                    f.render_widget(
+                        Paragraph::new(progress_bar(overall, overall_bar_w as usize)),
+                        Rect::new(bar_x, INSTALL_OVERALL_Y, overall_bar_w, 1),
+                    );
+                    f.render_widget(
+                        Paragraph::new(elapsed_str).style(Style::default().fg(ACCENT)),
+                        Rect::new(
+                            width.saturating_sub(elapsed_w + 1),
+                            INSTALL_OVERALL_Y,
+                            elapsed_w,
+                            1,
+                        ),
+                    );
+
+                    // Log header (row 5): a full-width rule with an inline label.
+                    rule(f, 0, INSTALL_LOG_HDR_Y, width);
+                    let (log_label, log_style) = if log_scroll > 0 {
+                        (
+                            format!(" Log  ^{log_scroll}  PgDn to follow "),
+                            Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        (" Log ".to_string(), bold)
+                    };
+                    f.render_widget(
+                        Paragraph::new(clip_chars(&log_label, content_w)).style(log_style),
+                        Rect::new(2, INSTALL_LOG_HDR_Y, content_w, 1),
+                    );
+
+                    // Log pane (rows INSTALL_LOG_Y..): full terminal width.
+                    let log_h = area.height.saturating_sub(INSTALL_LOG_Y + 1).max(1) as usize;
+                    f.render_widget(
+                        Block::default().style(Style::default().fg(FG).bg(BG)),
+                        Rect::new(0, INSTALL_LOG_Y, width, log_h as u16),
+                    );
+                    let log_w = width.saturating_sub(1);
+                    let end = logs.len().saturating_sub(log_scroll);
+                    let start = end.saturating_sub(log_h);
+                    for (row, line) in logs[start..end].iter().enumerate() {
+                        f.render_widget(
+                            Paragraph::new(clip_chars(line, log_w)),
+                            Rect::new(1, INSTALL_LOG_Y + row as u16, log_w, 1),
+                        );
+                    }
+                }),
+                "draw",
+            );
 
             if let Some(key) = poll_key_event(Duration::from_millis(100)) {
                 match key.code {
@@ -1243,10 +1245,7 @@ impl Installer {
         }
     }
 
-    pub(crate) fn reboot_screen(
-        &mut self,
-        term: &mut Terminal,
-    ) -> Trap {
+    pub(crate) fn reboot_screen(&mut self, term: &mut Terminal) -> Trap {
         let mut selected = 1usize;
         #[allow(clippy::cast_possible_wrap)]
         let mut remaining = REBOOT_DELAY as i64;
@@ -1265,34 +1264,37 @@ impl Installer {
                 }
             }
 
-            tui_or_exit(term.draw(|f| {
-                Self::draw_frame(
-                    f,
-                    "Install Complete",
-                    &format!("{} is ready to boot.", self.ctx.config.branding.name),
-                    "Left/Right select, Enter activates",
-                );
-                let area = f.area();
-                f.render_widget(
-                    Paragraph::new(format!("Target: {}", self.ctx.drive_label)),
-                    Rect::new(4, 5, area.width.saturating_sub(8), 1),
-                );
-                f.render_widget(
-                    Paragraph::new("Remove the installation media before rebooting.")
-                        .style(Style::default().fg(ACCENT)),
-                    Rect::new(4, 7, area.width.saturating_sub(8), 1),
-                );
-                let countdown_line = if countdown {
-                    format!("Auto-reboot in {remaining}s")
-                } else {
-                    "Auto-reboot cancelled; select an option.".to_string()
-                };
-                f.render_widget(
-                    Paragraph::new(countdown_line),
-                    Rect::new(4, 9, area.width.saturating_sub(8), 1),
-                );
-                button_row(f, &["Shell", "Reboot"], selected, 12, 14);
-            }), "draw");
+            tui_or_exit(
+                term.draw(|f| {
+                    Self::draw_frame(
+                        f,
+                        "Install Complete",
+                        &format!("{} is ready to boot.", self.ctx.config.branding.name),
+                        "Left/Right select, Enter activates",
+                    );
+                    let area = f.area();
+                    f.render_widget(
+                        Paragraph::new(format!("Target: {}", self.ctx.drive_label)),
+                        Rect::new(4, 5, area.width.saturating_sub(8), 1),
+                    );
+                    f.render_widget(
+                        Paragraph::new("Remove the installation media before rebooting.")
+                            .style(Style::default().fg(ACCENT)),
+                        Rect::new(4, 7, area.width.saturating_sub(8), 1),
+                    );
+                    let countdown_line = if countdown {
+                        format!("Auto-reboot in {remaining}s")
+                    } else {
+                        "Auto-reboot cancelled; select an option.".to_string()
+                    };
+                    f.render_widget(
+                        Paragraph::new(countdown_line),
+                        Rect::new(4, 9, area.width.saturating_sub(8), 1),
+                    );
+                    button_row(f, &["Shell", "Reboot"], selected, 12, 14);
+                }),
+                "draw",
+            );
 
             if let Some(key) = poll_key_event(Duration::from_millis(200)) {
                 countdown = false;
@@ -1311,7 +1313,7 @@ impl Installer {
 
 #[cfg(test)]
 mod tests {
-    use super::{toggle_choice, validate_account, valid_username};
+    use super::{toggle_choice, valid_username, validate_account};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     #[test]
@@ -1323,7 +1325,10 @@ mod tests {
 
     #[test]
     fn validate_account_catches_mismatch() {
-        assert_eq!(validate_account("user", "pw1", "pw2"), "Passwords do not match.");
+        assert_eq!(
+            validate_account("user", "pw1", "pw2"),
+            "Passwords do not match."
+        );
     }
 
     #[test]

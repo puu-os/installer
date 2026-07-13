@@ -17,7 +17,6 @@ const LAND_COAST: Color = Color::Indexed(10);
 const GUIDE: Color = Color::Indexed(7);
 const GUIDE_STRONG: Color = Color::Indexed(14);
 
-
 /// Latitude band shown by the map. The poles are cropped (mostly empty ocean
 /// and the featureless Antarctic ice) so the inhabited band — where every
 /// timezone actually lives — gets more rows and is easier to read.
@@ -456,10 +455,7 @@ fn draw_timezone(f: &mut Frame, pick: &TzPick, view: &MapView, subtitle: &str) {
 
 impl Installer {
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn timezone_screen(
-        &mut self,
-        term: &mut Terminal,
-    ) -> ScreenAction {
+    pub(crate) fn timezone_screen(&mut self, term: &mut Terminal) -> ScreenAction {
         let current = self.ctx.config.identity.timezone.clone();
         let mut pick = TzPick::new(load_zones(), &current);
         let mut view = MapView::new(pick.selected());
@@ -471,7 +467,10 @@ impl Installer {
 
             let subtitle = pick.selected().map_or(String::new(), |z| z.name.clone());
 
-            tui_or_exit(term.draw(|f| draw_timezone(f, &pick, &view, &subtitle)), "draw");
+            tui_or_exit(
+                term.draw(|f| draw_timezone(f, &pick, &view, &subtitle)),
+                "draw",
+            );
 
             if let Some(key) = next_key_event() {
                 match key.code {
@@ -555,6 +554,9 @@ mod tests {
         pick.push_filter('u');
         pick.sync_view(&mut view);
         assert_eq!(pick.filtered.len(), 1);
-        assert_eq!(pick.selected().map(|zone| zone.name.as_str()), Some("Europe/Helsinki"));
+        assert_eq!(
+            pick.selected().map(|zone| zone.name.as_str()),
+            Some("Europe/Helsinki")
+        );
     }
 }
