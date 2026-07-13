@@ -314,9 +314,9 @@ fn near_lat(lat: f64, target: f64, step: f64) -> bool {
     (lat - target).abs() <= step * 0.5
 }
 
-/// Draw the filled world map into `rect`. Each terminal cell holds two raster
-/// sub-rows, so a cell is one of `▀` `▄` `█` ` ` with the foreground painted
-/// land-coloured over a sea-coloured background. The visible viewport spans
+/// Draw the filled ASCII world map into `rect`. Each terminal cell samples two
+/// raster sub-rows and renders one of `#` `:` `.` or a guide marker, with the
+/// foreground painted over a sea-coloured background. The visible viewport spans
 /// half the globe, which doubles the horizontal sampling density and can be
 /// panned left/right.
 fn draw_map(f: &mut Frame, pick: &TzPick, view: &MapView, rect: Rect) {
