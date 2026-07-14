@@ -25,6 +25,7 @@ pub type LogFn = Box<dyn FnMut(String) + Send>;
 type ProgressTracker<'a> = (Box<dyn ProgressSource>, Box<dyn FnMut(f64) + 'a>);
 
 const OUTPUT_TAIL_LINES: usize = 12;
+const OUTPUT_QUEUE_CAPACITY: usize = 64;
 const PROGRESS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
 fn format_argv(argv: &[String]) -> String {
@@ -166,7 +167,7 @@ impl<'a> Command<'a> {
         let reader = build_expression(&self.argv, self.env, self.chroot_dir)
             .reader()
             .with_context(|| format!("failed to spawn {}", self.argv[0]))?;
-        let (tx, rx) = mpsc::channel::<String>();
+        let (tx, rx) = mpsc::sync_channel::<String>(OUTPUT_QUEUE_CAPACITY);
 
         let reader_thread = std::thread::spawn(move || -> i32 {
             for line in BufReader::new(&reader)

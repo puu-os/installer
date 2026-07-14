@@ -59,6 +59,7 @@ const INSTALL_STEP_BAR_Y: u16 = 3;
 const INSTALL_OVERALL_Y: u16 = 4;
 const INSTALL_LOG_HDR_Y: u16 = 5;
 const INSTALL_LOG_Y: u16 = 6;
+const EVENTS_PER_FRAME: usize = 64;
 
 // 16-color ANSI palette. Indexed colors render identically on the Linux VT
 // console and on graphical terminals, so the installer looks the same in a
@@ -1010,7 +1011,10 @@ impl Installer {
         };
 
         loop {
-            while let Ok(evt) = worker.events_rx.try_recv() {
+            for _ in 0..EVENTS_PER_FRAME {
+                let Ok(evt) = worker.events_rx.try_recv() else {
+                    break;
+                };
                 match evt {
                     crate::tui::app::TaskEvent::Log(line) => {
                         logs.push(line);

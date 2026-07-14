@@ -10,6 +10,7 @@ use crate::engine::command::LogFn;
 use crate::engine::pipeline::{self, Context, ProgressCb, Runner, SkipCb};
 
 const INSTALL_LOG_PATH: &str = "/run/puu-installer/install.log";
+const EVENT_QUEUE_CAPACITY: usize = 256;
 
 pub enum Trap {
     Quit,
@@ -46,7 +47,7 @@ fn open_install_log() -> Option<std::fs::File> {
 }
 
 fn send_log(
-    tx: &mpsc::Sender<TaskEvent>,
+    tx: &mpsc::SyncSender<TaskEvent>,
     log_file: &Arc<Mutex<Option<std::fs::File>>>,
     line: &str,
 ) {
@@ -58,21 +59,21 @@ fn send_log(
     let _ = tx.send(TaskEvent::Log(line.to_string()));
 }
 
-fn make_log(tx: mpsc::Sender<TaskEvent>, log_file: Arc<Mutex<Option<std::fs::File>>>) -> LogFn {
+fn make_log(tx: mpsc::SyncSender<TaskEvent>, log_file: Arc<Mutex<Option<std::fs::File>>>) -> LogFn {
     Box::new(move |line: String| send_log(&tx, &log_file, &line))
 }
 
 pub struct InstallTask {
     pub events_rx: mpsc::Receiver<TaskEvent>,
-    cancel_tx: mpsc::Sender<()>,
+    cancel_tx: mpsc::SyncSender<()>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl InstallTask {
     #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
     pub fn start(ctx: &Context) -> Self {
-        let (events_tx, events_rx) = mpsc::channel();
-        let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
+        let (events_tx, events_rx) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
+        let (cancel_tx, cancel_rx) = mpsc::sync_channel::<()>(1);
 
         let mut pipeline_ctx = ctx.clone();
         pipeline_ctx.parts = crate::engine::partition::DerivedPartitions::default();
@@ -136,7 +137,7 @@ impl InstallTask {
     }
 
     pub fn cancel(&self) {
-        let _ = self.cancel_tx.send(());
+        let _ = self.cancel_tx.try_send(());
     }
 
     pub fn join(&mut self) {
