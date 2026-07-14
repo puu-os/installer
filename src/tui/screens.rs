@@ -269,13 +269,16 @@ impl Installer {
         f.render_widget(Block::default().style(Style::default().fg(FG).bg(BG)), area);
 
         // Full-width title bar.
+        let title_style = Style::default()
+            .fg(FG)
+            .bg(TITLE_BG)
+            .add_modifier(Modifier::BOLD);
         f.render_widget(
-            Paragraph::new(format!(" {title}")).style(
-                Style::default()
-                    .fg(FG)
-                    .bg(TITLE_BG)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Block::default().style(title_style),
+            Rect::new(0, 0, area.width, 1),
+        );
+        f.render_widget(
+            Paragraph::new(format!(" {title}")).style(title_style),
             Rect::new(0, 0, area.width, 1),
         );
 
@@ -289,8 +292,10 @@ impl Installer {
 
         if !footer.is_empty() {
             let foot_area = Rect::new(0, area.height.saturating_sub(1), area.width, 1);
+            let footer_style = Style::default().fg(ACCENT).bg(PANEL);
+            f.render_widget(Block::default().style(footer_style), foot_area);
             f.render_widget(
-                Paragraph::new(format!(" {footer}")).style(Style::default().fg(ACCENT).bg(PANEL)),
+                Paragraph::new(format!(" {footer}")).style(footer_style),
                 foot_area,
             );
         }
