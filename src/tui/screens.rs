@@ -307,9 +307,40 @@ impl Installer {
         clippy::cast_possible_wrap,
         clippy::cast_sign_loss
     )]
-    pub(crate) fn screen_too_small(&self) -> bool {
+    fn screen_too_small(&self) -> bool {
         let size = tui_or_exit(screen_size(), "term.size");
         size.height < MIN_SCREEN_ROWS || size.width < MIN_SCREEN_COLS
+    }
+
+    pub(crate) fn wait_for_screen_size(
+        &self,
+        term: &mut Terminal,
+        escape_action: Option<ScreenAction>,
+    ) -> Option<ScreenAction> {
+        while self.screen_too_small() {
+            tui_or_exit(
+                term.draw(|f| {
+                    Self::draw_frame(f, &self.title(), "", "Resize terminal to continue");
+                    let area = f.area();
+                    let msg = Paragraph::new(format!(
+                        "Current size {}x{}; minimum {}x{}",
+                        area.width, area.height, MIN_SCREEN_COLS, MIN_SCREEN_ROWS
+                    ))
+                    .style(Style::default().fg(WARN));
+                    f.render_widget(msg, Rect::new(2, 3, area.width.saturating_sub(4), 3));
+                }),
+                "draw",
+            );
+            if let Some(key) = next_key_event()
+                && (matches!(key.code, KeyCode::Esc)
+                    || (matches!(key.code, KeyCode::Char('c'))
+                        && key.modifiers.contains(KeyModifiers::CONTROL)))
+                && let Some(action) = escape_action
+            {
+                return Some(action);
+            }
+        }
+        None
     }
 
     pub(crate) fn welcome_screen(&mut self, term: &mut Terminal) -> ScreenAction {
@@ -317,34 +348,8 @@ impl Installer {
         let mut selected: usize = 0;
 
         loop {
-            if self.screen_too_small() {
-                tui_or_exit(
-                    term.draw(|f| {
-                        Self::draw_frame(
-                            f,
-                            &self.title(),
-                            "",
-                            "Esc/Ctrl-C to quit, resize terminal to continue",
-                        );
-                        let area = f.area();
-                        let msg = Paragraph::new(format!(
-                            "Current size {}x{}; minimum {}x{}",
-                            area.width, area.height, MIN_SCREEN_COLS, MIN_SCREEN_ROWS
-                        ))
-                        .style(Style::default().fg(WARN));
-                        f.render_widget(msg, Rect::new(2, 3, area.width.saturating_sub(4), 3));
-                    }),
-                    "draw",
-                );
-                if let Some(key) = next_key_event() {
-                    if matches!(key.code, KeyCode::Esc)
-                        || (matches!(key.code, KeyCode::Char('c'))
-                            && key.modifiers.contains(KeyModifiers::CONTROL))
-                    {
-                        return ScreenAction::Quit;
-                    }
-                }
-                continue;
+            if let Some(action) = self.wait_for_screen_size(term, Some(ScreenAction::Quit)) {
+                return action;
             }
 
             tui_or_exit(
@@ -406,6 +411,12 @@ impl Installer {
         let mut selected = 0usize;
 
         loop {
+            if self
+                .wait_for_screen_size(term, Some(ScreenAction::Back))
+                .is_some()
+            {
+                return false;
+            }
             tui_or_exit(
                 term.draw(|f| {
                     Self::draw_frame(
@@ -484,6 +495,9 @@ impl Installer {
         refresh(&mut devices, &mut selected, &mut status, &self.ctx.drive);
 
         loop {
+            if let Some(action) = self.wait_for_screen_size(term, Some(ScreenAction::Back)) {
+                return action;
+            }
             let size = tui_or_exit(screen_size(), "term.size");
             let visible = (size.height.saturating_sub(9)).max(1) as usize;
             top = top.min(selected);
@@ -618,6 +632,9 @@ impl Installer {
         ];
 
         loop {
+            if let Some(action) = self.wait_for_screen_size(term, Some(ScreenAction::Back)) {
+                return action;
+            }
             let (_, locale) = LANGUAGES[language_idx];
             let keymap = keymap_for_locale(locale);
             let fields = [
@@ -793,6 +810,9 @@ impl Installer {
         };
 
         loop {
+            if let Some(action) = self.wait_for_screen_size(term, Some(ScreenAction::Back)) {
+                return action;
+            }
             tui_or_exit(term.draw(|f| {
                 Self::draw_frame(
                     f,
@@ -862,6 +882,9 @@ impl Installer {
         };
 
         loop {
+            if let Some(action) = self.wait_for_screen_size(term, Some(ScreenAction::Back)) {
+                return action;
+            }
             tui_or_exit(
                 term.draw(|f| {
                     Self::draw_frame(
@@ -915,6 +938,9 @@ impl Installer {
         let mut selected = 1usize;
 
         loop {
+            if let Some(action) = self.wait_for_screen_size(term, Some(ScreenAction::Back)) {
+                return action;
+            }
             let secure_boot = if self.ctx.secure_boot {
                 "Enroll keys"
             } else {
@@ -1016,6 +1042,7 @@ impl Installer {
         };
 
         loop {
+            let _ = self.wait_for_screen_size(term, None);
             for _ in 0..EVENTS_PER_FRAME {
                 let Ok(evt) = worker.events_rx.try_recv() else {
                     break;
@@ -1262,6 +1289,7 @@ impl Installer {
         let mut countdown = true;
 
         loop {
+            let _ = self.wait_for_screen_size(term, None);
             if countdown {
                 let now = Instant::now();
                 if now.duration_since(last_tick) >= Duration::from_secs(1) {

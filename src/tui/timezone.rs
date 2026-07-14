@@ -637,6 +637,9 @@ impl Installer {
         let mut last_frame = Instant::now();
 
         loop {
+            if let Some(action) = self.wait_for_screen_size(term, Some(ScreenAction::Back)) {
+                return action;
+            }
             let now = Instant::now();
             dirty |= view.tick(now.saturating_duration_since(last_frame));
             last_frame = now;
