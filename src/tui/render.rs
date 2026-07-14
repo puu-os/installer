@@ -553,15 +553,7 @@ impl<W: Write> Terminal<W> {
         if !self.active {
             return Ok(());
         }
-        let result = execute!(
-            self.out,
-            ResetColor,
-            SetAttribute(Attribute::Reset),
-            Show,
-            EnableLineWrap,
-            LeaveAlternateScreen
-        )
-        .and_then(|()| self.out.flush());
+        let result = restore_terminal(&mut self.out).and_then(|()| self.out.flush());
         self.active = false;
         self.reset_wire_state();
         let _ = terminal::disable_raw_mode();
@@ -682,6 +674,17 @@ impl<W: Write> Terminal<W> {
             (Err(err), _) | (_, Err(err)) => Err(err),
         }
     }
+}
+
+fn restore_terminal<W: Write>(out: &mut W) -> io::Result<()> {
+    execute!(
+        out,
+        ResetColor,
+        SetAttribute(Attribute::Reset),
+        Show,
+        EnableLineWrap,
+        LeaveAlternateScreen
+    )
 }
 
 impl<W: Write> Drop for Terminal<W> {
@@ -841,13 +844,7 @@ pub(crate) fn screen_size() -> io::Result<Size> {
 pub(crate) fn fatal_io(err: &io::Error, ctx: &str) -> ! {
     let _ = terminal::disable_raw_mode();
     let mut stdout = io::stdout();
-    let _ = execute!(
-        stdout,
-        ResetColor,
-        SetAttribute(Attribute::Reset),
-        Show,
-        LeaveAlternateScreen
-    );
+    let _ = restore_terminal(&mut stdout);
     let _ = stdout.flush();
     eprintln!("Terminal error ({ctx}): {err}");
     std::process::exit(1);
@@ -901,5 +898,19 @@ pub(crate) fn poll_key_event(timeout: Duration) -> Option<KeyEvent> {
     match poll_input(timeout) {
         Some(Input::Key(key)) => Some(key),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restore_terminal;
+
+    #[test]
+    fn restore_terminal_enables_line_wrap() {
+        let mut output = Vec::new();
+
+        restore_terminal(&mut output).unwrap();
+
+        assert!(output.windows(5).any(|bytes| bytes == b"\x1b[?7h"));
     }
 }
