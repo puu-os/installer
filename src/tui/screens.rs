@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
+use std::collections::VecDeque;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -60,6 +61,7 @@ const INSTALL_OVERALL_Y: u16 = 4;
 const INSTALL_LOG_HDR_Y: u16 = 5;
 const INSTALL_LOG_Y: u16 = 6;
 const EVENTS_PER_FRAME: usize = 64;
+const MAX_LOG_LINES: usize = 2000;
 
 // 16-color ANSI palette. Indexed colors render identically on the Linux VT
 // console and on graphical terminals, so the installer looks the same in a
@@ -257,6 +259,17 @@ fn format_elapsed(d: Duration) -> String {
 fn spinner(frame: usize) -> &'static str {
     const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
     FRAMES[frame % FRAMES.len()]
+}
+
+fn append_log(logs: &mut VecDeque<String>, log_scroll: &mut usize, line: String) {
+    logs.push_back(line);
+    if *log_scroll > 0 {
+        *log_scroll = log_scroll.saturating_add(1);
+    }
+    if logs.len() > MAX_LOG_LINES {
+        logs.pop_front();
+    }
+    *log_scroll = (*log_scroll).min(logs.len().saturating_sub(1));
 }
 
 impl Installer {
@@ -1027,7 +1040,7 @@ impl Installer {
 
         let mut worker = crate::tui::app::InstallTask::start(&self.ctx);
 
-        let mut logs: Vec<String> = Vec::new();
+        let mut logs = VecDeque::new();
         let mut state = "Starting install".to_string();
         let mut step_fraction = 0.0f64;
         let mut current_step = 0;
@@ -1056,14 +1069,7 @@ impl Installer {
                 };
                 match evt {
                     crate::tui::app::TaskEvent::Log(line) => {
-                        logs.push(line);
-                        if log_scroll > 0 {
-                            log_scroll += 1;
-                        }
-                        if logs.len() > 2000 {
-                            logs.drain(0..logs.len() - 2000);
-                        }
-                        log_scroll = log_scroll.min(logs.len().saturating_sub(1));
+                        append_log(&mut logs, &mut log_scroll, line);
                     }
                     crate::tui::app::TaskEvent::Progress {
                         step_index,
@@ -1229,7 +1235,7 @@ impl Installer {
                     let log_w = width.saturating_sub(1);
                     let end = logs.len().saturating_sub(log_scroll);
                     let start = end.saturating_sub(log_h);
-                    for (row, line) in logs[start..end].iter().enumerate() {
+                    for (row, line) in logs.iter().skip(start).take(end - start).enumerate() {
                         f.render_widget(
                             Paragraph::new(clip_chars(line, log_w)),
                             Rect::new(1, INSTALL_LOG_Y + row as u16, log_w, 1),
@@ -1357,7 +1363,9 @@ impl Installer {
 
 #[cfg(test)]
 mod tests {
-    use super::progress_bar;
+    use std::collections::VecDeque;
+
+    use super::{MAX_LOG_LINES, append_log, progress_bar};
 
     #[test]
     fn progress_bar_fits_its_rectangle() {
@@ -1366,5 +1374,18 @@ mod tests {
 
             assert!(line.width() <= width);
         }
+    }
+
+    #[test]
+    fn retained_logs_evict_without_reordering() {
+        let mut logs = VecDeque::new();
+        let mut log_scroll = 0;
+
+        for i in 0..=MAX_LOG_LINES {
+            append_log(&mut logs, &mut log_scroll, i.to_string());
+        }
+
+        assert_eq!(logs.len(), MAX_LOG_LINES);
+        assert_eq!(logs.front().map(String::as_str), Some("1"));
     }
 }
