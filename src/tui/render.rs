@@ -186,6 +186,14 @@ impl Line {
             spans: vec![Span::raw(content)],
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn width(&self) -> usize {
+        self.spans
+            .iter()
+            .map(|span| span.content.chars().count())
+            .sum()
+    }
 }
 
 impl From<Vec<Span>> for Line {

@@ -227,9 +227,16 @@ fn toggle_choice(selected: &mut usize, key: &KeyEvent) -> bool {
     clippy::cast_precision_loss
 )]
 fn progress_bar(fraction: f64, width: usize) -> Line {
-    let bar_w = (width.saturating_sub(8)).clamp(10, 40);
     let fraction = fraction.clamp(0.0, 1.0);
     let percent = (fraction * 100.0) as usize;
+    if width < 7 {
+        return Line::from(vec![Span::raw(clip_chars(
+            &format!("{percent}%"),
+            width as u16,
+        ))]);
+    }
+
+    let bar_w = width.saturating_sub(7).min(40);
 
     let filled = (bar_w as f64 * fraction) as usize;
     let (filled, track) = ("#".repeat(filled), "-".repeat(bar_w.saturating_sub(filled)));
@@ -1155,7 +1162,7 @@ impl Installer {
                         Paragraph::new("Step").style(bold),
                         Rect::new(2, INSTALL_STEP_BAR_Y, 8, 1),
                     );
-                    let step_bar_w = width.saturating_sub(bar_x + 2).max(20);
+                    let step_bar_w = width.saturating_sub(bar_x + 2);
                     f.render_widget(
                         Paragraph::new(progress_bar(step_fraction, step_bar_w as usize)),
                         Rect::new(bar_x, INSTALL_STEP_BAR_Y, step_bar_w, 1),
@@ -1183,7 +1190,7 @@ impl Installer {
                         Paragraph::new("Overall").style(bold),
                         Rect::new(2, INSTALL_OVERALL_Y, 8, 1),
                     );
-                    let overall_bar_w = width.saturating_sub(bar_x + elapsed_w + 2).max(20);
+                    let overall_bar_w = width.saturating_sub(bar_x + elapsed_w + 2);
                     f.render_widget(
                         Paragraph::new(progress_bar(overall, overall_bar_w as usize)),
                         Rect::new(bar_x, INSTALL_OVERALL_Y, overall_bar_w, 1),
@@ -1344,6 +1351,20 @@ impl Installer {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::progress_bar;
+
+    #[test]
+    fn progress_bar_fits_its_rectangle() {
+        for width in 0..20 {
+            let line = progress_bar(1.0, width);
+
+            assert!(line.width() <= width);
         }
     }
 }
