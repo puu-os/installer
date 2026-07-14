@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex, mpsc};
 
 use crate::tui::render::{Terminal, fatal_io};
@@ -37,13 +37,12 @@ pub enum TaskEvent {
     Failed { at: usize, error: anyhow::Error },
 }
 
-fn open_install_log() -> Option<std::fs::File> {
-    std::fs::create_dir_all("/run/puu-installer").ok()?;
+fn open_install_log() -> io::Result<std::fs::File> {
+    std::fs::create_dir_all("/run/puu-installer")?;
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(INSTALL_LOG_PATH)
-        .ok()
 }
 
 fn send_log(
@@ -51,9 +50,14 @@ fn send_log(
     log_file: &Arc<Mutex<Option<std::fs::File>>>,
     line: &str,
 ) {
-    if let Ok(mut file) = log_file.lock() {
-        if let Some(file) = file.as_mut() {
-            let _ = writeln!(file, "{line}");
+    if let Ok(mut log_file) = log_file.lock() {
+        if let Some(file) = log_file.as_mut() {
+            if let Err(error) = writeln!(file, "{line}") {
+                *log_file = None;
+                let _ = tx.send(TaskEvent::Log(format!(
+                    "warning: cannot write {INSTALL_LOG_PATH}: {error}"
+                )));
+            }
         }
     }
     let _ = tx.send(TaskEvent::Log(line.to_string()));
@@ -79,7 +83,16 @@ impl InstallTask {
         pipeline_ctx.parts = crate::engine::partition::DerivedPartitions::default();
 
         let thread = std::thread::spawn(move || {
-            let log_file = Arc::new(Mutex::new(open_install_log()));
+            let log_file = match open_install_log() {
+                Ok(file) => Some(file),
+                Err(error) => {
+                    let _ = events_tx.send(TaskEvent::Log(format!(
+                        "warning: cannot open {INSTALL_LOG_PATH}: {error}"
+                    )));
+                    None
+                }
+            };
+            let log_file = Arc::new(Mutex::new(log_file));
             let log = make_log(events_tx.clone(), log_file.clone());
 
             let progress: ProgressCb = {
