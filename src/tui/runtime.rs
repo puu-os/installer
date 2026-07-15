@@ -685,8 +685,33 @@ fn clip_chars(s: &str, width: u16) -> String {
 
 fn rule(f: &mut Frame, x: u16, y: u16, width: u16) {
     f.render_widget(
-        Paragraph::new("-".repeat(width as usize)).style(Style::default().fg(FG)),
+        Paragraph::new("-".repeat(width as usize))
+            .style(Style::default().fg(PANEL).add_modifier(Modifier::DIM)),
         Rect::new(x, y, width, 1),
+    );
+}
+
+fn section_header(f: &mut Frame, y: u16, label: &str) {
+    let width = f.area().width.saturating_sub(4);
+    if width == 0 {
+        return;
+    }
+
+    let label = format!("[ {label} ] ");
+    let label_width = label.chars().count().min(width as usize);
+    let fill_width = width as usize - label_width;
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                clip_chars(&label, width),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "-".repeat(fill_width),
+                Style::default().fg(PANEL).add_modifier(Modifier::DIM),
+            ),
+        ])),
+        Rect::new(2, y, width, 1),
     );
 }
 
@@ -892,19 +917,22 @@ fn render_install(installer: &Installer, now: Instant, frame: &mut Frame) {
 
     // Log header (row 5) + pane (row 6+).
     rule(frame, 0, INSTALL_LOG_HDR_Y, width);
+    section_header(frame, INSTALL_LOG_HDR_Y, "Log");
     let log_scroll = state.scroll.install_log;
-    let (log_label, log_style) = if log_scroll > 0 {
-        (
-            format!(" Log  ^{log_scroll}  PgDn to follow "),
-            Style::default().fg(WARN).add_modifier(Modifier::BOLD),
-        )
-    } else {
-        (" Log ".to_string(), bold)
-    };
-    frame.render_widget(
-        Paragraph::new(clip_chars(&log_label, content_w)).style(log_style),
-        Rect::new(2, INSTALL_LOG_HDR_Y, content_w, 1),
-    );
+    if log_scroll > 0 {
+        let scroll_label = format!("^{log_scroll} PgDn to follow");
+        let scroll_width = scroll_label.chars().count().min(content_w as usize) as u16;
+        frame.render_widget(
+            Paragraph::new(clip_chars(&scroll_label, scroll_width))
+                .style(Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
+            Rect::new(
+                width.saturating_sub(scroll_width + 2),
+                INSTALL_LOG_HDR_Y,
+                scroll_width,
+                1,
+            ),
+        );
+    }
     // Log pane fills the rows below the header down to (but not overwriting)
     // the bottom footer row. At small terminals there may be no room at all;
     // skip the pane rather than drawing into the footer or past the frame.
@@ -946,6 +974,7 @@ fn render_secureboot(installer: &Installer, frame: &mut Frame) {
     let brand = &installer.ctx.config.branding.name;
     let bold_warn = Style::default().fg(WARN).add_modifier(Modifier::BOLD);
 
+    section_header(frame, 3, "Secure Boot configuration");
     match status.and_then(|s| s.setup_mode) {
         Some(true) => {
             let sb = if status.and_then(|s| s.secure_boot) == Some(true) {
@@ -1074,6 +1103,7 @@ fn render_view(installer: &Installer, now: Instant, frame: &mut Frame) {
 
     match state.route {
         Route::Welcome => {
+            section_header(frame, 4, "Actions");
             render_lines(
                 frame,
                 ["Install", "Shell", "Reboot"]
@@ -1096,6 +1126,7 @@ fn render_view(installer: &Installer, now: Instant, frame: &mut Frame) {
             );
         }
         Route::Target => {
+            section_header(frame, 3, "Target disks");
             if state.drives.is_empty() {
                 render_lines(
                     frame,
@@ -1131,6 +1162,7 @@ fn render_view(installer: &Installer, now: Instant, frame: &mut Frame) {
             }
         }
         Route::Identity => {
+            section_header(frame, 3, "User account");
             if let Some(draft) = state.identity.as_ref() {
                 let password = if draft.reveal_password {
                     draft.password.clone()
@@ -1200,65 +1232,71 @@ fn render_view(installer: &Installer, now: Instant, frame: &mut Frame) {
         }
         Route::Timezone => timezone::render(installer, frame),
         Route::SecureBoot => render_secureboot(installer, frame),
-        Route::Review => render_lines(
-            frame,
-            [
-                (
-                    4,
-                    format!("Target disk  {}", installer.ctx.drive_label),
-                    Style::default(),
-                ),
-                (
-                    5,
-                    format!("Hostname     {}", installer.ctx.config.identity.hostname),
-                    Style::default(),
-                ),
-                (
-                    6,
-                    format!("Timezone     {}", installer.ctx.config.identity.timezone),
-                    Style::default(),
-                ),
-                (
-                    9,
-                    "[ Back ]".to_string(),
-                    selected_style(state.selection.review == 0),
-                ),
-                (
-                    10,
-                    "[ Start install ]".to_string(),
-                    selected_style(state.selection.review == 1),
-                ),
-            ],
-        ),
-        Route::Install => render_install(installer, now, frame),
-        Route::Reboot => render_lines(
-            frame,
-            [
-                (
-                    4,
-                    format!("Target: {}", installer.ctx.drive_label),
-                    Style::default(),
-                ),
-                (
-                    6,
-                    format!(
-                        "Auto-reboot in {}s",
-                        state.reboot.remaining_seconds.unwrap_or(0)
+        Route::Review => {
+            section_header(frame, 3, "Installation summary");
+            render_lines(
+                frame,
+                [
+                    (
+                        4,
+                        format!("Target disk  {}", installer.ctx.drive_label),
+                        Style::default(),
                     ),
-                    Style::default(),
-                ),
-                (
-                    9,
-                    "[ Shell ]".to_string(),
-                    selected_style(state.selection.reboot == 0),
-                ),
-                (
-                    10,
-                    "[ Reboot ]".to_string(),
-                    selected_style(state.selection.reboot == 1),
-                ),
-            ],
-        ),
+                    (
+                        5,
+                        format!("Hostname     {}", installer.ctx.config.identity.hostname),
+                        Style::default(),
+                    ),
+                    (
+                        6,
+                        format!("Timezone     {}", installer.ctx.config.identity.timezone),
+                        Style::default(),
+                    ),
+                    (
+                        9,
+                        "[ Back ]".to_string(),
+                        selected_style(state.selection.review == 0),
+                    ),
+                    (
+                        10,
+                        "[ Start install ]".to_string(),
+                        selected_style(state.selection.review == 1),
+                    ),
+                ],
+            );
+        }
+        Route::Install => render_install(installer, now, frame),
+        Route::Reboot => {
+            section_header(frame, 3, "Installation complete");
+            render_lines(
+                frame,
+                [
+                    (
+                        4,
+                        format!("Target: {}", installer.ctx.drive_label),
+                        Style::default(),
+                    ),
+                    (
+                        6,
+                        format!(
+                            "Auto-reboot in {}s",
+                            state.reboot.remaining_seconds.unwrap_or(0)
+                        ),
+                        Style::default(),
+                    ),
+                    (
+                        9,
+                        "[ Shell ]".to_string(),
+                        selected_style(state.selection.reboot == 0),
+                    ),
+                    (
+                        10,
+                        "[ Reboot ]".to_string(),
+                        selected_style(state.selection.reboot == 1),
+                    ),
+                ],
+            );
+        }
     }
 
     if let Some(modal) = state.active_modal() {
@@ -1301,13 +1339,44 @@ fn render_view(installer: &Installer, now: Instant, frame: &mut Frame) {
         let modal_h = 6u16.min(area.height.saturating_sub(2).max(1));
         let x = area.width.saturating_sub(modal_w) / 2;
         let y = area.height.saturating_sub(modal_h) / 2;
+        let modal_style = Style::default().fg(FG).bg(PANEL);
         frame.render_widget(
-            Paragraph::new(format!("{title}\n\n{body}\n\n{buttons}")).style(
-                Style::default()
-                    .fg(Color::Indexed(15))
-                    .bg(Color::Indexed(8)),
-            ),
+            Block::default().style(modal_style),
             Rect::new(x, y, modal_w, modal_h),
+        );
+        if modal_w >= 2 && modal_h >= 2 {
+            let inner_w = modal_w.saturating_sub(2);
+            let horizontal = "-".repeat(inner_w as usize);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "+{horizontal}+\n|{}|",
+                    " ".repeat(inner_w as usize)
+                ))
+                .style(modal_style),
+                Rect::new(x, y, modal_w, 2),
+            );
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "|{}|\n+{horizontal}+",
+                    " ".repeat(inner_w as usize)
+                ))
+                .style(modal_style),
+                Rect::new(x, y + modal_h.saturating_sub(2), modal_w, 2),
+            );
+        }
+        let content_w = modal_w.saturating_sub(4);
+        frame.render_widget(
+            Paragraph::new(clip_chars(title, content_w))
+                .style(modal_style.add_modifier(Modifier::BOLD)),
+            Rect::new(x.saturating_add(2), y.saturating_add(1), content_w, 1),
+        );
+        frame.render_widget(
+            Paragraph::new(clip_chars(body, content_w)).style(modal_style),
+            Rect::new(x.saturating_add(2), y.saturating_add(3), content_w, 1),
+        );
+        frame.render_widget(
+            Paragraph::new(clip_chars(&buttons, content_w)).style(modal_style),
+            Rect::new(x.saturating_add(2), y.saturating_add(4), content_w, 1),
         );
     }
 }
