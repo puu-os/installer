@@ -418,6 +418,10 @@ impl Widget for Block {
 
 impl Widget for Paragraph {
     fn render(self, frame: &mut Frame, rect: Rect) {
+        if self.style.bg.is_some() {
+            Block { style: self.style }.render(frame, rect);
+        }
+
         for (row, line) in self.lines.into_iter().enumerate() {
             if row >= usize::from(rect.height) {
                 break;
@@ -911,14 +915,33 @@ pub(crate) fn poll_key_event(timeout: Duration) -> Option<KeyEvent> {
 
 #[cfg(test)]
 mod tests {
-    use super::restore_terminal;
+    use super::{Color, Frame, Paragraph, Rect, Size, Style, restore_terminal};
+
+    #[test]
+    fn paragraph_background_fills_its_rectangle() {
+        let mut frame = Frame::new(Size {
+            width: 5,
+            height: 2,
+        });
+        let style = Style::default().bg(Color::Indexed(4));
+
+        frame.render_widget(Paragraph::new("ok").style(style), Rect::new(1, 0, 3, 2));
+
+        for y in 0..2 {
+            for x in 1..4 {
+                assert_eq!(frame.cell_at(x, y).style, style);
+            }
+        }
+        assert_eq!(frame.cell_at(1, 0).ch, 'o');
+        assert_eq!(frame.cell_at(2, 0).ch, 'k');
+        assert_eq!(frame.cell_at(3, 0).ch, ' ');
+    }
 
     #[test]
     fn restore_terminal_enables_line_wrap() {
         let mut output = Vec::new();
 
         restore_terminal(&mut output).unwrap();
-
         assert!(output.windows(5).any(|bytes| bytes == b"\x1b[?7h"));
     }
 }
