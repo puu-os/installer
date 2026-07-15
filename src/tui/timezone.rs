@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::app::Installer;
 use crate::tui::message::Effect;
-use crate::tui::render::{Color, Frame, Modifier, Paragraph, Rect, Style};
+use crate::tui::render::{Color, CursorStyle, Frame, Modifier, Paragraph, Rect, Style};
 use crate::tui::runtime::{ACCENT, ERR, LAND, ON_SELECT, SELECT};
 use crate::tui::state::{AppState, Route};
 
@@ -591,9 +591,14 @@ fn draw_timezone(f: &mut Frame, pick: &TzPick, view: &MapView) {
     }
 
     f.render_widget(
-        Paragraph::new(format!(" Filter: {}_", pick.filter)).style(Style::default().fg(ACCENT)),
+        Paragraph::new(format!(" Filter: {}", pick.filter)).style(Style::default().fg(ACCENT)),
         Rect::new(0, layout.filter_y, area.width, 1),
     );
+    // Position the real terminal cursor right after the filter text instead
+    // of the underscore that used to fake it, and use a blinking underline so
+    // the cursor is visible against the dark background.
+    f.set_cursor_style(CursorStyle::BlinkingUnderline);
+    f.set_cursor_position((9 + pick.filter.len() as u16, layout.filter_y));
 
     if pick.filtered.is_empty() {
         f.render_widget(

@@ -15,8 +15,8 @@ use crate::tui::engine::{
 };
 use crate::tui::message::{DriveInfo, Effect, FieldId, FormId, Message, ToggleId};
 use crate::tui::render::{
-    Block, Color, Frame, Input, Line, Modifier, Paragraph, Rect, Span, Style, Terminal,
-    screen_size, tui_or_exit,
+    Block, Color, CursorStyle, Frame, Input, Line, Modifier, Paragraph, Rect, Span, Style,
+    Terminal, screen_size, tui_or_exit,
 };
 use crate::tui::state::{AppState, IdentityDraft, InstallStepState, Modal, Route};
 use crate::tui::timezone;
@@ -673,6 +673,12 @@ const INSTALL_OVERALL_Y: u16 = 4;
 const INSTALL_LOG_HDR_Y: u16 = 5;
 const INSTALL_LOG_Y: u16 = 6;
 
+// Identity-screen layout: render_lines indents values 2 columns past a
+// 15-character label, so the editable value begins at column 17. The
+// paragraph clips at the field edge (frame width minus the 2-col margin),
+// which the cursor must respect so it does not desync on long values.
+const IDENTITY_VALUE_X: u16 = 17;
+
 fn clip_chars(s: &str, width: u16) -> String {
     s.chars().take(width as usize).collect()
 }
@@ -899,25 +905,33 @@ fn render_install(installer: &Installer, now: Instant, frame: &mut Frame) {
         Paragraph::new(clip_chars(&log_label, content_w)).style(log_style),
         Rect::new(2, INSTALL_LOG_HDR_Y, content_w, 1),
     );
-    let log_h = area.height.saturating_sub(INSTALL_LOG_Y + 1).max(1) as usize;
-    frame.render_widget(
-        Block::default().style(Style::default().fg(FG).bg(BG)),
-        Rect::new(0, INSTALL_LOG_Y, width, log_h as u16),
-    );
-    let log_w = width.saturating_sub(1);
-    let end = install.logs.len().saturating_sub(log_scroll);
-    let start = end.saturating_sub(log_h);
-    for (row, line) in install
-        .logs
-        .iter()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .enumerate()
-    {
+    // Log pane fills the rows below the header down to (but not overwriting)
+    // the bottom footer row. At small terminals there may be no room at all;
+    // skip the pane rather than drawing into the footer or past the frame.
+    let log_h = area.height.saturating_sub(INSTALL_LOG_Y + 1) as usize;
+    if log_h > 0 {
         frame.render_widget(
-            Paragraph::new(clip_chars(line, log_w)),
-            Rect::new(1, INSTALL_LOG_Y + row as u16, log_w, 1),
+            Block::default().style(Style::default().fg(FG).bg(BG)),
+            Rect::new(0, INSTALL_LOG_Y, width, log_h as u16),
         );
+        let log_w = width.saturating_sub(1);
+        let end = install.logs.len().saturating_sub(log_scroll);
+        let start = end.saturating_sub(log_h);
+        for (row, line) in install
+            .logs
+            .iter()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .enumerate()
+        {
+            // row < log_h and log_h = area.height - INSTALL_LOG_Y - 1, so
+            // INSTALL_LOG_Y + row stays inside the frame and clear of the
+            // footer on the last row.
+            frame.render_widget(
+                Paragraph::new(clip_chars(line, log_w)),
+                Rect::new(1, INSTALL_LOG_Y + row as u16, log_w, 1),
+            );
+        }
     }
 }
 
@@ -1150,16 +1164,21 @@ fn render_view(installer: &Installer, now: Instant, frame: &mut Frame) {
                     }),
                 );
                 if matches!(draft.field_index, 1..=4) {
+                    // Count display characters, not bytes: a multi-byte value
+                    // would otherwise push the cursor too far right.
                     let value_len = match draft.field_index {
-                        1 => draft.hostname.len(),
-                        2 => draft.username.len(),
-                        3 => draft.password.len(),
-                        _ => draft.repeated_password.len(),
+                        1 => draft.hostname.chars().count(),
+                        2 => draft.username.chars().count(),
+                        3 => draft.password.chars().count(),
+                        _ => draft.repeated_password.chars().count(),
                     };
-                    frame.set_cursor_position((
-                        17 + value_len.min(40) as u16,
-                        4 + draft.field_index as u16 * 2,
-                    ));
+                    frame.set_cursor_style(CursorStyle::BlinkingUnderline);
+                    // Clamp to the field's visible edge instead of a hardcoded
+                    // 40-column cap so the cursor stays in sync with long
+                    // values that the paragraph clips.
+                    let col = (IDENTITY_VALUE_X + value_len as u16)
+                        .min(frame.area().width.saturating_sub(2));
+                    frame.set_cursor_position((col, 4 + draft.field_index as u16 * 2));
                 }
             }
             if state.identity.as_ref().is_some_and(|d| d.reveal_password) {
@@ -1260,19 +1279,35 @@ fn render_view(installer: &Installer, now: Instant, frame: &mut Frame) {
             Modal::None => ("", ""),
         };
         let area = frame.area();
-        let y = area.height.saturating_sub(8) / 2;
+        let no_sel = state.selection.modal == 0;
+        let yes_sel = state.selection.modal == 1;
+        let buttons = format!(
+            "{} [ No ]    {} [ Yes ]",
+            if no_sel { '>' } else { ' ' },
+            if yes_sel { '>' } else { ' ' },
+        );
+        // Size the dialog to its widest line so short confirmations are
+        // compact instead of spanning the whole screen, then center it on
+        // both axes. Keep at least one column/row clear of every edge and
+        // never let the size fall below 1 so the arithmetic cannot underflow.
+        let content_w = [title, body, buttons.as_str()]
+            .into_iter()
+            .map(|s| s.chars().count())
+            .max()
+            .unwrap_or(0) as u16;
+        let modal_w = content_w
+            .saturating_add(4)
+            .min(area.width.saturating_sub(2).max(1));
+        let modal_h = 6u16.min(area.height.saturating_sub(2).max(1));
+        let x = area.width.saturating_sub(modal_w) / 2;
+        let y = area.height.saturating_sub(modal_h) / 2;
         frame.render_widget(
-            Paragraph::new(format!(
-                "{title}\n\n{body}\n\n{} [ No ]    {} [ Yes ]",
-                if state.selection.modal == 0 { '>' } else { ' ' },
-                if state.selection.modal == 1 { '>' } else { ' ' }
-            ))
-            .style(
+            Paragraph::new(format!("{title}\n\n{body}\n\n{buttons}")).style(
                 Style::default()
                     .fg(Color::Indexed(15))
                     .bg(Color::Indexed(8)),
             ),
-            Rect::new(4, y, area.width.saturating_sub(8), 6),
+            Rect::new(x, y, modal_w, modal_h),
         );
     }
 }
@@ -1303,6 +1338,10 @@ fn prepare_state(installer: &mut Installer) {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "main event/render loop; helpers extract as it grows"
+)]
 pub(crate) fn run(installer: &mut Installer, terminal: &mut Terminal) -> Trap {
     prepare_state(installer);
     let mut scheduler = FrameScheduler::new(Instant::now(), 60);
@@ -1352,8 +1391,18 @@ pub(crate) fn run(installer: &mut Installer, terminal: &mut Terminal) -> Trap {
             continue;
         }
 
-        let animating =
+        let tz_animating =
             installer.state.route == Route::Timezone && timezone::is_animating(&installer.state);
+        // The install screen's spinner and elapsed timer are derived from
+        // `now` in render_install, so they only move while we keep
+        // rendering. Run in live (60fps) mode while an install is in
+        // progress; otherwise the scheduler idles between 100ms ticks and
+        // the spinner jerks at ~10fps even though the frame interval is 16ms.
+        let install_animating = installer.state.route == Route::Install
+            && installer.state.install.started.is_some()
+            && !installer.state.install.complete
+            && !installer.state.install.failed;
+        let animating = tz_animating || install_animating;
         if animating && !live {
             scheduler.acquire_live();
             live = true;

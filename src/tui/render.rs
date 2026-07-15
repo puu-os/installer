@@ -68,6 +68,38 @@ const SGR_NO_REVERSE: &[u8] = b"\x1b[27m";
 const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
 const CURSOR_SHOW: &[u8] = b"\x1b[?25h";
 const CURSOR_HIDE: &[u8] = b"\x1b[?25l";
+const CURSOR_BLINKING_BLOCK: &[u8] = b"\x1b[1 q";
+const CURSOR_STEADY_BLOCK: &[u8] = b"\x1b[2 q";
+const CURSOR_BLINKING_UNDERLINE: &[u8] = b"\x1b[3 q";
+const CURSOR_STEADY_UNDERLINE: &[u8] = b"\x1b[4 q";
+const CURSOR_BLINKING_BAR: &[u8] = b"\x1b[5 q";
+const CURSOR_STEADY_BAR: &[u8] = b"\x1b[6 q";
+const CURSOR_DEFAULT: &[u8] = b"\x1b[0 q";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code, reason = "complete set of DECSCUSR cursor shapes")]
+pub(crate) enum CursorStyle {
+    #[default]
+    SteadyBlock,
+    BlinkingBlock,
+    SteadyUnderline,
+    BlinkingUnderline,
+    SteadyBar,
+    BlinkingBar,
+}
+
+impl CursorStyle {
+    const fn seq(self) -> &'static [u8] {
+        match self {
+            CursorStyle::BlinkingBlock => CURSOR_BLINKING_BLOCK,
+            CursorStyle::SteadyBlock => CURSOR_STEADY_BLOCK,
+            CursorStyle::BlinkingUnderline => CURSOR_BLINKING_UNDERLINE,
+            CursorStyle::SteadyUnderline => CURSOR_STEADY_UNDERLINE,
+            CursorStyle::BlinkingBar => CURSOR_BLINKING_BAR,
+            CursorStyle::SteadyBar => CURSOR_STEADY_BAR,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Color {
@@ -317,6 +349,7 @@ pub(crate) struct Frame {
     area: Rect,
     cells: Vec<Cell>,
     cursor: Option<(u16, u16)>,
+    cursor_style: CursorStyle,
 }
 
 impl Frame {
@@ -327,6 +360,7 @@ impl Frame {
             area,
             cells: vec![Cell::default(); len],
             cursor: None,
+            cursor_style: CursorStyle::default(),
         }
     }
 
@@ -347,6 +381,7 @@ impl Frame {
     fn blank(&mut self) {
         self.cells.fill(Cell::default());
         self.cursor = None;
+        self.cursor_style = CursorStyle::default();
     }
 
     fn resize(&mut self, size: Size) {
@@ -355,6 +390,7 @@ impl Frame {
         self.cells.clear();
         self.cells.resize(len, Cell::default());
         self.cursor = None;
+        self.cursor_style = CursorStyle::default();
     }
 
     pub(crate) fn render_widget<W: Widget>(&mut self, widget: W, rect: Rect) {
@@ -374,6 +410,10 @@ impl Frame {
         if x < self.area.width && y < self.area.height {
             self.cursor = Some((x, y));
         }
+    }
+
+    pub(crate) fn set_cursor_style(&mut self, style: CursorStyle) {
+        self.cursor_style = style;
     }
 
     fn cell_mut(&mut self, x: u16, y: u16) -> Option<&mut Cell> {
@@ -484,6 +524,7 @@ pub(crate) struct Terminal<W: Write = Stdout> {
     run: String,
     wire_style: Style,
     wire_cursor: Option<(u16, u16)>,
+    wire_cursor_style: CursorStyle,
     cursor_shown: bool,
     full_repaint: bool,
 }
@@ -511,6 +552,7 @@ impl<W: Write> Terminal<W> {
             run: String::new(),
             wire_style: Style::default(),
             wire_cursor: None,
+            wire_cursor_style: CursorStyle::default(),
             cursor_shown: false,
             full_repaint: true,
         }
@@ -530,6 +572,7 @@ impl<W: Write> Terminal<W> {
     fn reset_wire_state(&mut self) {
         self.wire_style = Style::default();
         self.wire_cursor = None;
+        self.wire_cursor_style = CursorStyle::default();
         self.cursor_shown = false;
         self.full_repaint = true;
         self.front.blank();
@@ -601,6 +644,7 @@ impl<W: Write> Terminal<W> {
             run,
             wire_style,
             wire_cursor,
+            wire_cursor_style,
             cursor_shown,
             full_repaint,
             ..
@@ -659,6 +703,10 @@ impl<W: Write> Terminal<W> {
                     bytes.extend_from_slice(CURSOR_SHOW);
                     *cursor_shown = true;
                 }
+                if back.cursor_style != *wire_cursor_style {
+                    bytes.extend_from_slice(back.cursor_style.seq());
+                    *wire_cursor_style = back.cursor_style;
+                }
             }
             None => {
                 if *cursor_shown {
@@ -671,6 +719,9 @@ impl<W: Write> Terminal<W> {
 }
 
 fn restore_terminal<W: Write>(out: &mut W) -> io::Result<()> {
+    // Reset the cursor shape to the terminal's default before leaving, so a
+    // steady underline set for a text field does not outlive the installer.
+    out.write_all(CURSOR_DEFAULT)?;
     execute!(
         out,
         ResetColor,

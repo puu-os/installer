@@ -197,7 +197,10 @@ impl ViewNode {
         self
     }
 
-    #[expect(dead_code, reason = "reserved for the centralized input router migration")]
+    #[expect(
+        dead_code,
+        reason = "reserved for the centralized input router migration"
+    )]
     pub(crate) fn focusable(mut self, focusable: bool) -> Self {
         self.focusable = focusable;
         self
@@ -417,12 +420,18 @@ impl RenderTree {
         paint_commands(&self.commands, frame, area);
     }
 
-    #[expect(dead_code, reason = "reserved for the centralized input router migration")]
+    #[expect(
+        dead_code,
+        reason = "reserved for the centralized input router migration"
+    )]
     pub(crate) fn focus_next(&mut self) {
         self.move_focus(1);
     }
 
-    #[expect(dead_code, reason = "reserved for the centralized input router migration")]
+    #[expect(
+        dead_code,
+        reason = "reserved for the centralized input router migration"
+    )]
     pub(crate) fn focus_previous(&mut self) {
         self.move_focus(-1);
     }
@@ -449,7 +458,10 @@ impl RenderTree {
         self.focused = Some(ids[next].clone());
     }
 
-    #[expect(dead_code, reason = "reserved for the centralized input router migration")]
+    #[expect(
+        dead_code,
+        reason = "reserved for the centralized input router migration"
+    )]
     pub(crate) fn focused(&self) -> Option<&NodeId> {
         self.focused.as_ref()
     }
