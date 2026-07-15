@@ -98,7 +98,6 @@ pub struct Context {
     pub locale: String,
     pub secure_boot: bool,
     pub k3s_token: String,
-    pub last_error: String,
     pub parts: DerivedPartitions,
 }
 
@@ -118,7 +117,6 @@ impl Default for Context {
             locale: String::new(),
             secure_boot: true,
             k3s_token: String::new(),
-            last_error: String::new(),
             parts: DerivedPartitions::default(),
         }
     }

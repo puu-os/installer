@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
+use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::tui::app::{Installer, ScreenAction};
-use crate::tui::render::{
-    Color, Frame, Input, Modifier, Paragraph, Rect, Style, Terminal, poll_input, read_input,
-    screen_size, tui_or_exit,
-};
-use crate::tui::screens::{ACCENT, ERR, LAND, ON_SELECT, SELECT};
+use crate::tui::app::Installer;
+use crate::tui::message::Effect;
+use crate::tui::render::{Color, Frame, Modifier, Paragraph, Rect, Style};
+use crate::tui::runtime::{ACCENT, ERR, LAND, ON_SELECT, SELECT};
+use crate::tui::state::{AppState, Route};
 
 const VIEW_LON_SPAN: f64 = 180.0;
 const PAN_PAGE_FRACTION: f64 = 0.5;
@@ -26,11 +26,6 @@ const GUIDE_STRONG: Color = Color::Indexed(14);
 const LAT_MIN: f64 = -60.0;
 const LAT_MAX: f64 = 78.0;
 
-/// The map animates at 60 Hz while it is panning, and blocks on input when it
-/// is not.
-const FRAME: Duration = Duration::from_micros(16_667);
-
-/// Exponential time constant of the pan: each second the centre closes
 /// `1 - exp(-1/PAN_TAU)` of the distance to its target.
 const PAN_TAU: f64 = 0.12;
 /// Speed floor, so the tail of an ease does not crawl, and ceiling, so a fly-to
@@ -286,7 +281,7 @@ impl MapView {
 
 /// The scrollable, type-to-filter picker state. `sel`/`top` index into `filtered`.
 struct TzPick {
-    all: Vec<Zone>,
+    all: &'static [Zone],
     filter: String,
     filtered: Vec<usize>,
     sel: usize,
@@ -294,7 +289,7 @@ struct TzPick {
 }
 
 impl TzPick {
-    fn new(all: Vec<Zone>, current: &str) -> Self {
+    fn new(all: &'static [Zone], current: &str) -> Self {
         let filtered: Vec<usize> = (0..all.len()).collect();
         let sel = filtered
             .iter()
@@ -580,14 +575,9 @@ fn timezone_list_style(selected: bool) -> Style {
     }
 }
 
-/// Render the whole timezone screen (map band, filter line, scroll list).
-fn draw_timezone(f: &mut Frame, pick: &TzPick, view: &MapView, subtitle: &str) {
-    Installer::draw_frame(
-        f,
-        "Select Time Zone",
-        subtitle,
-        "Type filter, Up/Down select, Left/Right pan, Home/. recenter, Enter confirm, Esc back",
-    );
+/// Render the world map band, the filter line, and the scroll list for the
+/// timezone screen. The runtime draws the titled frame first.
+fn draw_timezone(f: &mut Frame, pick: &TzPick, view: &MapView) {
     let area = f.area();
     let layout = layout(area.height);
 
@@ -627,92 +617,123 @@ fn draw_timezone(f: &mut Frame, pick: &TzPick, view: &MapView, subtitle: &str) {
     }
 }
 
-impl Installer {
-    pub(crate) fn timezone_screen(&mut self, term: &mut Terminal) -> ScreenAction {
-        let current = self.ctx.config.identity.timezone.clone();
-        let mut pick = TzPick::new(load_zones(), &current);
-        let mut view = MapView::new(pick.selected());
+static ZONES: OnceLock<Vec<Zone>> = OnceLock::new();
 
-        let mut dirty = true;
-        let mut last_frame = Instant::now();
+fn zones() -> &'static [Zone] {
+    ZONES.get_or_init(load_zones)
+}
 
-        loop {
-            if let Some(action) = self.wait_for_screen_size(term, Some(ScreenAction::Back)) {
-                return action;
-            }
-            let now = Instant::now();
-            dirty |= view.tick(now.saturating_duration_since(last_frame));
-            last_frame = now;
+fn milli_to_deg(milli: i32) -> f64 {
+    f64::from(milli) / 1000.0
+}
 
-            if dirty {
-                let height = tui_or_exit(screen_size(), "term.size").height;
-                pick.reframe(layout(height).list_h as usize);
-                let subtitle = pick.selected().map_or(String::new(), |z| z.name.clone());
-                tui_or_exit(
-                    term.draw(|f| draw_timezone(f, &pick, &view, &subtitle)),
-                    "draw",
-                );
-                dirty = false;
-            }
+fn deg_to_milli(deg: f64) -> i32 {
+    (deg * 1000.0).round() as i32
+}
 
-            // Hold a 60 Hz cadence while the map is moving; otherwise block, so
-            // an idle screen costs nothing at all.
-            let input = if view.is_animating() {
-                poll_input(FRAME.saturating_sub(now.elapsed()))
-            } else {
-                read_input()
-            };
+fn reconstruct_pick(state: &AppState) -> TzPick {
+    TzPick {
+        all: zones(),
+        filter: state.timezone.filter.clone(),
+        filtered: state.timezone.filtered.clone(),
+        sel: state.timezone.selected,
+        top: state.timezone.top,
+    }
+}
 
-            let key = match input {
-                None => continue,
-                Some(Input::Resize) => {
-                    dirty = true;
-                    continue;
-                }
-                Some(Input::Key(key)) => key,
-            };
+fn reconstruct_view(state: &AppState) -> MapView {
+    MapView {
+        center_lon: wrap_lon(milli_to_deg(state.timezone.map_center_lon_milli)),
+        target_lon: wrap_lon(milli_to_deg(state.timezone.map_target_lon_milli)),
+    }
+}
 
-            dirty = true;
-            match key.code {
-                KeyCode::Esc => return ScreenAction::Back,
-                KeyCode::Enter => {
-                    if let Some(z) = pick.selected() {
-                        self.ctx.config.identity.timezone.clone_from(&z.name);
-                        return ScreenAction::Continue;
-                    }
-                }
-                KeyCode::Up => {
-                    pick.move_up();
-                    pick.sync_view(&mut view);
-                }
-                KeyCode::Down => {
-                    pick.move_down();
-                    pick.sync_view(&mut view);
-                }
-                KeyCode::Left => view.nudge(-1.0),
-                KeyCode::Right => view.nudge(1.0),
-                KeyCode::PageUp => view.page_pan(-1.0),
-                KeyCode::PageDown => view.page_pan(1.0),
-                KeyCode::Home | KeyCode::Char('.') => pick.sync_view(&mut view),
-                KeyCode::Backspace => {
-                    pick.backspace();
-                    pick.sync_view(&mut view);
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    pick.filter.clear();
-                    pick.refilter();
-                    pick.sync_view(&mut view);
-                }
-                KeyCode::Char(c)
-                    if c.is_ascii()
-                        && c >= ' '
-                        && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
-                    pick.push_filter(c);
-                    pick.sync_view(&mut view);
-                }
-                _ => {}
+fn store(state: &mut AppState, pick: &TzPick, view: &MapView) {
+    state.timezone.filter.clone_from(&pick.filter);
+    state.timezone.filtered.clone_from(&pick.filtered);
+    state.timezone.selected = pick.sel;
+    state.timezone.top = pick.top;
+    state.timezone.map_center_lon_milli = deg_to_milli(view.center_lon);
+    state.timezone.map_target_lon_milli = deg_to_milli(view.target_lon);
+}
+
+/// Seed the picker once from the configured timezone so the selection and the
+/// initial map centre reflect it. Re-entering the screen keeps the user's filter
+/// and map position.
+pub(crate) fn prepare(state: &mut AppState, current: &str) {
+    let pick = TzPick::new(zones(), current);
+    let view = MapView::new(pick.selected());
+    store(state, &pick, &view);
+}
+
+pub(crate) fn update_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
+    let mut pick = reconstruct_pick(state);
+    let mut view = reconstruct_view(state);
+
+    match key.code {
+        KeyCode::Esc => {
+            state.route = Route::Identity;
+            return Vec::new();
+        }
+        KeyCode::Enter => {
+            if let Some(zone) = pick.selected() {
+                let name = zone.name.clone();
+                state.route = Route::SecureBoot;
+                store(state, &pick, &view);
+                return vec![Effect::SelectTimezone { name }, Effect::DetectFirmware];
             }
         }
+        KeyCode::Up => {
+            pick.move_up();
+            pick.sync_view(&mut view);
+        }
+        KeyCode::Down => {
+            pick.move_down();
+            pick.sync_view(&mut view);
+        }
+        KeyCode::Left => view.nudge(-1.0),
+        KeyCode::Right => view.nudge(1.0),
+        KeyCode::PageUp => view.page_pan(-1.0),
+        KeyCode::PageDown => view.page_pan(1.0),
+        KeyCode::Home | KeyCode::Char('.') => pick.sync_view(&mut view),
+        KeyCode::Backspace => {
+            pick.backspace();
+            pick.sync_view(&mut view);
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            pick.filter.clear();
+            pick.refilter();
+            pick.sync_view(&mut view);
+        }
+        KeyCode::Char(ch)
+            if ch.is_ascii() && ch >= ' ' && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            pick.push_filter(ch);
+            pick.sync_view(&mut view);
+        }
+        _ => {}
     }
+
+    store(state, &pick, &view);
+    Vec::new()
+}
+
+/// Advance the pan animation by `elapsed`. Called from the runtime loop while
+/// the map is live so the glide tracks the render frame rate.
+pub(crate) fn tick(state: &mut AppState, elapsed: Duration) {
+    let mut view = reconstruct_view(state);
+    if view.tick(elapsed) {
+        state.timezone.map_center_lon_milli = deg_to_milli(view.center_lon);
+    }
+}
+
+pub(crate) fn is_animating(state: &AppState) -> bool {
+    reconstruct_view(state).is_animating()
+}
+
+pub(crate) fn render(installer: &Installer, frame: &mut Frame) {
+    let mut pick = reconstruct_pick(&installer.state);
+    let view = reconstruct_view(&installer.state);
+    pick.reframe(layout(frame.area().height).list_h as usize);
+    draw_timezone(frame, &pick, &view);
 }

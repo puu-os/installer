@@ -2,7 +2,6 @@
 // Copyright (C) Opinsys Oy 2026
 
 use std::io::{self, Stdout, Write};
-use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
 use crossterm::{
@@ -186,14 +185,6 @@ impl Line {
             spans: vec![Span::raw(content)],
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn width(&self) -> usize {
-        self.spans
-            .iter()
-            .map(|span| span.content.chars().count())
-            .sum()
-    }
 }
 
 impl From<Vec<Span>> for Line {
@@ -329,7 +320,7 @@ pub(crate) struct Frame {
 }
 
 impl Frame {
-    fn new(size: Size) -> Self {
+    pub(crate) fn new(size: Size) -> Self {
         let area = Rect::new(0, 0, size.width, size.height);
         let len = usize::from(size.width) * usize::from(size.height);
         Self {
@@ -495,9 +486,6 @@ pub(crate) struct Terminal<W: Write = Stdout> {
     wire_cursor: Option<(u16, u16)>,
     cursor_shown: bool,
     full_repaint: bool,
-    /// Size to render at instead of asking the tty. Only set by headless test
-    /// terminals; `None` in production.
-    size_override: Option<Size>,
 }
 
 impl<W: Write> Terminal<W> {
@@ -525,13 +513,20 @@ impl<W: Write> Terminal<W> {
             wire_cursor: None,
             cursor_shown: false,
             full_repaint: true,
-            size_override: None,
         }
+    }
+
+    #[allow(
+        clippy::unused_self,
+        reason = "reads stdin via the free fn; self is vestigial after TestBackend removal"
+    )]
+    pub(crate) fn poll_input(&mut self, timeout: Duration) -> Option<Input> {
+        poll_input(timeout)
     }
 
     /// Forget everything we believe about the terminal's escape state. Called
     /// whenever something else may have written to the terminal behind our back
-    /// (`activate` after `suspend_command`), so the next frame re-establishes it.
+    /// on `activate`), so the next frame re-establishes it.
     fn reset_wire_state(&mut self) {
         self.wire_style = Style::default();
         self.wire_cursor = None;
@@ -576,10 +571,7 @@ impl<W: Write> Terminal<W> {
     where
         F: FnOnce(&mut Frame),
     {
-        let size = match self.size_override {
-            Some(size) => size,
-            None => screen_size()?,
-        };
+        let size = screen_size()?;
         if size != self.back.size() {
             self.back.resize(size);
             self.front.resize(size);
@@ -674,16 +666,6 @@ impl<W: Write> Terminal<W> {
                     *cursor_shown = false;
                 }
             }
-        }
-    }
-
-    pub(crate) fn suspend_command(&mut self, command: &mut Command) -> io::Result<ExitStatus> {
-        self.deactivate()?;
-        let status = command.status();
-        let reactivate = self.activate();
-        match (status, reactivate) {
-            (Ok(status), Ok(())) => Ok(status),
-            (Err(err), _) | (_, Err(err)) => Err(err),
         }
     }
 }
@@ -897,51 +879,4 @@ pub(crate) fn poll_input(timeout: Duration) -> Option<Input> {
         return None;
     }
     read_input()
-}
-
-pub(crate) fn next_key_event() -> Option<KeyEvent> {
-    match read_input() {
-        Some(Input::Key(key)) => Some(key),
-        _ => None,
-    }
-}
-
-pub(crate) fn poll_key_event(timeout: Duration) -> Option<KeyEvent> {
-    match poll_input(timeout) {
-        Some(Input::Key(key)) => Some(key),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Color, Frame, Paragraph, Rect, Size, Style, restore_terminal};
-
-    #[test]
-    fn paragraph_background_fills_its_rectangle() {
-        let mut frame = Frame::new(Size {
-            width: 5,
-            height: 2,
-        });
-        let style = Style::default().bg(Color::Indexed(4));
-
-        frame.render_widget(Paragraph::new("ok").style(style), Rect::new(1, 0, 3, 2));
-
-        for y in 0..2 {
-            for x in 1..4 {
-                assert_eq!(frame.cell_at(x, y).style, style);
-            }
-        }
-        assert_eq!(frame.cell_at(1, 0).ch, 'o');
-        assert_eq!(frame.cell_at(2, 0).ch, 'k');
-        assert_eq!(frame.cell_at(3, 0).ch, ' ');
-    }
-
-    #[test]
-    fn restore_terminal_enables_line_wrap() {
-        let mut output = Vec::new();
-
-        restore_terminal(&mut output).unwrap();
-        assert!(output.windows(5).any(|bytes| bytes == b"\x1b[?7h"));
-    }
 }

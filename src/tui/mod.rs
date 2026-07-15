@@ -2,6 +2,9 @@
 // Copyright (C) Opinsys Oy 2026
 
 pub(crate) mod app;
+pub(crate) mod engine;
+pub(crate) mod message;
 pub(crate) mod render;
-pub(crate) mod screens;
+pub(crate) mod runtime;
+pub(crate) mod state;
 pub(crate) mod timezone;

@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
+use std::cell::RefCell;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, mpsc};
 
-use crate::tui::render::{Terminal, fatal_io};
-
 use crate::engine::command::LogFn;
 use crate::engine::pipeline::{self, Context, ProgressCb, Runner, SkipCb};
+use crate::tui::engine::RenderTree;
+use crate::tui::message::{Message, bounded_text};
+use crate::tui::render::{Terminal, fatal_io};
+use crate::tui::state::AppState;
 
 const INSTALL_LOG_PATH: &str = "/run/puu-installer/install.log";
 const EVENT_QUEUE_CAPACITY: usize = 256;
@@ -16,25 +19,6 @@ pub enum Trap {
     Quit,
     Reboot,
     Shell,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
-pub(crate) enum ScreenAction {
-    Install,
-    Shell,
-    Reboot,
-    Continue,
-    Back,
-    Menu,
-    Quit,
-}
-
-pub enum TaskEvent {
-    Log(String),
-    Progress { step_index: usize, fraction: f64 },
-    Skipped { step_index: usize },
-    Done,
-    Failed { at: usize, error: anyhow::Error },
 }
 
 fn open_install_log() -> io::Result<std::fs::File> {
@@ -46,7 +30,7 @@ fn open_install_log() -> io::Result<std::fs::File> {
 }
 
 fn send_log(
-    tx: &mpsc::SyncSender<TaskEvent>,
+    tx: &mpsc::SyncSender<Message>,
     log_file: &Arc<Mutex<Option<std::fs::File>>>,
     line: &str,
 ) {
@@ -54,21 +38,21 @@ fn send_log(
         if let Some(file) = log_file.as_mut() {
             if let Err(error) = writeln!(file, "{line}") {
                 *log_file = None;
-                let _ = tx.send(TaskEvent::Log(format!(
+                let _ = tx.send(Message::Log(bounded_text(&format!(
                     "warning: cannot write {INSTALL_LOG_PATH}: {error}"
-                )));
+                ))));
             }
         }
     }
-    let _ = tx.send(TaskEvent::Log(line.to_string()));
+    let _ = tx.send(Message::Log(bounded_text(line)));
 }
 
-fn make_log(tx: mpsc::SyncSender<TaskEvent>, log_file: Arc<Mutex<Option<std::fs::File>>>) -> LogFn {
+fn make_log(tx: mpsc::SyncSender<Message>, log_file: Arc<Mutex<Option<std::fs::File>>>) -> LogFn {
     Box::new(move |line: String| send_log(&tx, &log_file, &line))
 }
 
 pub struct InstallTask {
-    pub events_rx: mpsc::Receiver<TaskEvent>,
+    pub events_rx: mpsc::Receiver<Message>,
     cancel_tx: mpsc::SyncSender<()>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -86,9 +70,9 @@ impl InstallTask {
             let log_file = match open_install_log() {
                 Ok(file) => Some(file),
                 Err(error) => {
-                    let _ = events_tx.send(TaskEvent::Log(format!(
+                    let _ = events_tx.send(Message::Log(bounded_text(&format!(
                         "warning: cannot open {INSTALL_LOG_PATH}: {error}"
-                    )));
+                    ))));
                     None
                 }
             };
@@ -98,9 +82,10 @@ impl InstallTask {
             let progress: ProgressCb = {
                 let tx = events_tx.clone();
                 Box::new(move |step_index: usize, fraction: f64| {
-                    let _ = tx.send(TaskEvent::Progress {
+                    let fraction_pct = (fraction.clamp(0.0, 1.0) * 100.0).round() as u16;
+                    let _ = tx.send(Message::InstallProgress {
                         step_index,
-                        fraction,
+                        fraction_pct,
                     });
                 })
             };
@@ -108,7 +93,7 @@ impl InstallTask {
             let skipped: SkipCb = {
                 let tx = events_tx.clone();
                 Box::new(move |step_index: usize| {
-                    let _ = tx.send(TaskEvent::Skipped { step_index });
+                    let _ = tx.send(Message::InstallSkipped { step_index });
                 })
             };
 
@@ -125,12 +110,20 @@ impl InstallTask {
             let fail = |at: usize, error: anyhow::Error| {
                 let mut log = make_log(events_tx.clone(), log_file.clone());
                 pipeline::rollback(&mut log);
-                let _ = events_tx.send(TaskEvent::Failed { at, error });
+                let _ = events_tx.send(Message::InstallFinished {
+                    at: Some(at),
+                    elapsed: None,
+                    error: Some(bounded_text(&format!("{error:#}"))),
+                });
             };
 
             match runner.execute(steps, || cancel_rx.try_recv().is_ok()) {
                 Ok(true) => {
-                    let _ = events_tx.send(TaskEvent::Done);
+                    let _ = events_tx.send(Message::InstallFinished {
+                        at: None,
+                        elapsed: None,
+                        error: None,
+                    });
                 }
                 Ok(false) => {
                     fail(runner.step_index, anyhow::anyhow!("installation cancelled"));
@@ -185,22 +178,17 @@ impl Drop for ConsoleLogLevelGuard {
 
 pub struct Installer {
     pub ctx: Context,
-}
-
-#[derive(Clone, Copy)]
-enum InstallFlowStep {
-    Target,
-    WipeConfirm,
-    Identity,
-    Timezone,
-    SecureBoot,
-    Review,
-    Install,
+    pub(crate) render_tree: RefCell<RenderTree>,
+    pub(crate) state: AppState,
 }
 
 impl Installer {
     pub fn new(ctx: Context) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            render_tree: RefCell::new(RenderTree::new()),
+            state: AppState::default(),
+        }
     }
 
     pub fn into_context(self) -> Context {
@@ -213,85 +201,6 @@ impl Installer {
         if let Err(e) = terminal.activate() {
             fatal_io(&e, "activate terminal");
         }
-        self.run_screens(&mut terminal)
-    }
-
-    fn run_screens(&mut self, term: &mut Terminal) -> Trap {
-        loop {
-            match self.welcome_screen(term) {
-                ScreenAction::Install => {
-                    if let Some(Trap::Reboot) = self.install_flow(term) {
-                        return Trap::Reboot;
-                    }
-                }
-                ScreenAction::Shell => return Trap::Shell,
-                ScreenAction::Reboot => {
-                    if self.confirm(
-                        term,
-                        "Reboot now?",
-                        "The machine will reboot immediately.",
-                        false,
-                    ) {
-                        return Trap::Reboot;
-                    }
-                }
-                _ => return Trap::Quit,
-            }
-        }
-    }
-
-    fn install_flow(&mut self, term: &mut Terminal) -> Option<Trap> {
-        let mut step = InstallFlowStep::Target;
-
-        loop {
-            step = match step {
-                InstallFlowStep::Target => match self.target_screen(term) {
-                    ScreenAction::Continue => InstallFlowStep::WipeConfirm,
-                    _ => return None,
-                },
-                InstallFlowStep::WipeConfirm => {
-                    if self.confirm(
-                        term,
-                        "Wipe target disk?",
-                        &format!(
-                            "{}\nAll data on this disk will be destroyed.",
-                            self.ctx.drive_label
-                        ),
-                        true,
-                    ) {
-                        InstallFlowStep::Identity
-                    } else {
-                        InstallFlowStep::Target
-                    }
-                }
-                InstallFlowStep::Identity => match self.identity_screen(term) {
-                    ScreenAction::Continue => InstallFlowStep::Timezone,
-                    ScreenAction::Back => InstallFlowStep::WipeConfirm,
-                    _ => return None,
-                },
-                InstallFlowStep::Timezone => match self.timezone_screen(term) {
-                    ScreenAction::Continue => InstallFlowStep::SecureBoot,
-                    ScreenAction::Back => InstallFlowStep::Identity,
-                    _ => return None,
-                },
-                InstallFlowStep::SecureBoot => match self.secureboot_screen(term) {
-                    ScreenAction::Install => InstallFlowStep::Review,
-                    ScreenAction::Back => InstallFlowStep::Timezone,
-                    ScreenAction::Reboot => return Some(Trap::Reboot),
-                    _ => return None,
-                },
-                InstallFlowStep::Review => match self.review_screen(term) {
-                    ScreenAction::Install => InstallFlowStep::Install,
-                    ScreenAction::Back => InstallFlowStep::SecureBoot,
-                    _ => return None,
-                },
-                InstallFlowStep::Install => {
-                    return match self.install_screen(term) {
-                        ScreenAction::Reboot => Some(self.reboot_screen(term)),
-                        _ => None,
-                    };
-                }
-            };
-        }
+        crate::tui::runtime::run(self, &mut terminal)
     }
 }
