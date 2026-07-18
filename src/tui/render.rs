@@ -578,6 +578,12 @@ impl<W: Write> Terminal<W> {
         self.front.blank();
     }
 
+    /// Discard the retained terminal state after an external terminal event.
+    /// The next draw clears and repaints the complete screen.
+    pub(crate) fn force_repaint(&mut self) {
+        self.reset_wire_state();
+    }
+
     pub(crate) fn activate(&mut self) -> io::Result<()> {
         if self.active {
             return Ok(());

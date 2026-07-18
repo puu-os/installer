@@ -25,6 +25,12 @@ const MAX_EVENTS_PER_TURN: usize = 64;
 const MAX_LOG_LINES: usize = 2000;
 const REBOOT_DELAY_SECONDS: u16 = 30;
 const TICK_INTERVAL: Duration = Duration::from_millis(100);
+const MIN_SCREEN_COLS: u16 = 80;
+const MIN_SCREEN_ROWS: u16 = 23;
+
+const fn screen_too_small(width: u16, height: u16) -> bool {
+    width < MIN_SCREEN_COLS || height < MIN_SCREEN_ROWS
+}
 
 fn cycle(index: &mut usize, count: usize, backwards: bool) {
     if count == 0 {
@@ -572,8 +578,8 @@ fn render_lines(frame: &mut Frame, lines: impl IntoIterator<Item = (u16, String,
     }
 }
 
-// 16-color ANSI palette shared by the install screen. Indexed colors render
-// identically on the Linux VT console and on graphical terminals.
+// 16-color ANSI indexes shared by the install screen. The terminal supplies
+// their RGB values, so Linux VTs and graphical terminal themes can differ.
 pub(crate) const ERR: Color = Color::Indexed(9); // bright red
 const FG: Color = Color::Indexed(15); // white default text
 const BG: Color = Color::Indexed(0); // black screen / log background
@@ -1061,11 +1067,29 @@ fn render_secureboot(installer: &Installer, frame: &mut Frame) {
     }
 }
 
+fn render_size_warning(installer: &Installer, frame: &mut Frame) {
+    let area = frame.area();
+    installer.draw_frame(frame, &installer.title(), "", "Resize terminal to continue");
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Current size {}x{}; minimum {}x{}",
+            area.width, area.height, MIN_SCREEN_COLS, MIN_SCREEN_ROWS
+        ))
+        .style(Style::default().fg(WARN)),
+        Rect::new(2, 3, area.width.saturating_sub(4), 1),
+    );
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "per-route render dispatch; arms extract once the migration settles"
 )]
 fn render_view(installer: &Installer, now: Instant, frame: &mut Frame) {
+    let area = frame.area();
+    if screen_too_small(area.width, area.height) {
+        render_size_warning(installer, frame);
+        return;
+    }
     let state = &installer.state;
     let title = match state.route {
         Route::Welcome => installer.title(),
@@ -1407,6 +1431,35 @@ fn prepare_state(installer: &mut Installer) {
     }
 }
 
+fn message_from_input(
+    state: &AppState,
+    terminal: &mut Terminal,
+    input: &Input,
+    terminal_too_small: &mut bool,
+) -> Option<Message> {
+    match input {
+        Input::Key(key) if *terminal_too_small => {
+            let escape = key.code == KeyCode::Esc
+                || (key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            if !escape || matches!(state.route, Route::Install | Route::Reboot) {
+                return None;
+            }
+            Some(Message::code(KeyCode::Esc))
+        }
+        Input::Key(key) => Some(Message::Key(*key)),
+        Input::Resize => {
+            terminal.force_repaint();
+            let size = tui_or_exit(screen_size(), "term.size");
+            *terminal_too_small = screen_too_small(size.width, size.height);
+            Some(Message::Resized {
+                width: size.width,
+                height: size.height,
+            })
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "main event/render loop; helpers extract as it grows"
@@ -1420,6 +1473,7 @@ pub(crate) fn run(installer: &mut Installer, terminal: &mut Terminal) -> Trap {
     let mut last_countdown = last_tick;
     let mut last_frame = Instant::now();
     let mut live = false;
+    let mut terminal_too_small = false;
 
     loop {
         for _ in 0..MAX_EVENTS_PER_TURN {
@@ -1487,38 +1541,36 @@ pub(crate) fn run(installer: &mut Installer, terminal: &mut Terminal) -> Trap {
         match scheduler.schedule(now) {
             Schedule::RenderNow => {
                 tui_or_exit(
-                    terminal.draw(|frame| render_view(installer, now, frame)),
+                    terminal.draw(|frame| {
+                        let area = frame.area();
+                        terminal_too_small = screen_too_small(area.width, area.height);
+                        render_view(installer, now, frame);
+                    }),
                     "draw",
                 );
                 scheduler.rendered(Instant::now());
             }
             Schedule::RenderAt(deadline) => {
-                if let Some(input) = terminal.poll_input(deadline.saturating_duration_since(now)) {
-                    let message = match input {
-                        Input::Key(key) => Message::Key(key),
-                        Input::Resize => {
-                            let size = tui_or_exit(screen_size(), "term.size");
-                            Message::Resized {
-                                width: size.width,
-                                height: size.height,
-                            }
-                        }
-                    };
+                if let Some(input) = terminal.poll_input(deadline.saturating_duration_since(now))
+                    && let Some(message) = message_from_input(
+                        &installer.state,
+                        terminal,
+                        &input,
+                        &mut terminal_too_small,
+                    )
+                {
                     pending.push_back(message);
                 }
             }
             Schedule::Idle => {
-                if let Some(input) = terminal.poll_input(TICK_INTERVAL) {
-                    let message = match input {
-                        Input::Key(key) => Message::Key(key),
-                        Input::Resize => {
-                            let size = tui_or_exit(screen_size(), "term.size");
-                            Message::Resized {
-                                width: size.width,
-                                height: size.height,
-                            }
-                        }
-                    };
+                if let Some(input) = terminal.poll_input(TICK_INTERVAL)
+                    && let Some(message) = message_from_input(
+                        &installer.state,
+                        terminal,
+                        &input,
+                        &mut terminal_too_small,
+                    )
+                {
                     pending.push_back(message);
                 }
             }
