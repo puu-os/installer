@@ -4,7 +4,9 @@
 //! GPT partition-table creation and inspection, plus the derived partition
 //! geometry the install pipeline operates on.
 
-use anyhow::Result;
+use std::os::unix::fs::OpenOptionsExt;
+
+use anyhow::{Context, Result, bail};
 
 use crate::engine::util::random_bytes;
 
@@ -16,7 +18,7 @@ const PART_SIZE_UNITS: &[(&str, u64)] = &[
     ("P", 1024 * 1024 * 1024 * 1024 * 1024),
 ];
 
-fn part_size_bytes(size: &str) -> Result<u64> {
+pub(crate) fn part_size_bytes(size: &str) -> Result<u64> {
     let s = size.strip_prefix('+').unwrap_or(size);
     let (num_str, unit) = s
         .split_at_checked(s.len().saturating_sub(1))
@@ -60,14 +62,20 @@ pub fn partition_drive(
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(drive)?;
-    let sector_size = gptman::linux::get_sector_size(&mut file).unwrap_or(512);
+        .custom_flags(libc::O_EXCL)
+        .open(drive)
+        .with_context(|| format!("failed to open {drive} for exclusive access"))?;
+    let sector_size = gptman::linux::get_sector_size(&mut file)
+        .with_context(|| format!("failed to determine sector size of {drive}"))?;
 
     let disk_guid = random_bytes::<16>()?;
     let mut gpt = gptman::GPT::new_from(&mut file, sector_size, disk_guid)?;
 
     let efi_sectors = efi_bytes.div_ceil(sector_size);
     let home_sectors = home_bytes.div_ceil(sector_size);
+    if efi_sectors == 0 || home_sectors == 0 {
+        bail!("partition sizes must be at least one sector");
+    }
 
     let start = gpt
         .find_first_place(efi_sectors)

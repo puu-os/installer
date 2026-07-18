@@ -4,6 +4,7 @@
 //! Single-loop TUI runtime and pure state transitions.
 
 use std::collections::VecDeque;
+use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -22,6 +23,7 @@ use crate::tui::state::{AppState, IdentityDraft, InstallStepState, Modal, Route}
 use crate::tui::timezone;
 
 const MAX_EVENTS_PER_TURN: usize = 64;
+const MAX_PENDING_MESSAGES: usize = 512;
 const MAX_LOG_LINES: usize = 2000;
 const REBOOT_DELAY_SECONDS: u16 = 30;
 const TICK_INTERVAL: Duration = Duration::from_millis(100);
@@ -30,6 +32,41 @@ const MIN_SCREEN_ROWS: u16 = 23;
 
 const fn screen_too_small(width: u16, height: u16) -> bool {
     width < MIN_SCREEN_COLS || height < MIN_SCREEN_ROWS
+}
+
+const fn disposable_message(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::Log(_) | Message::InstallProgress { .. } | Message::Tick | Message::CountdownTick
+    )
+}
+
+fn enqueue_bounded(queue: &mut VecDeque<Message>, message: Message) {
+    if let Message::InstallProgress { step_index, .. } = &message
+        && let Some(existing) = queue.iter_mut().rev().find(|queued| {
+            matches!(
+                queued,
+                Message::InstallProgress {
+                    step_index: queued_step,
+                    ..
+                } if queued_step == step_index
+            )
+        })
+    {
+        *existing = message;
+        return;
+    }
+
+    if queue.len() >= MAX_PENDING_MESSAGES {
+        if let Some(index) = queue.iter().position(disposable_message) {
+            queue.remove(index);
+        } else if disposable_message(&message) {
+            return;
+        } else {
+            queue.pop_front();
+        }
+    }
+    queue.push_back(message);
 }
 
 fn cycle(index: &mut usize, count: usize, backwards: bool) {
@@ -544,7 +581,15 @@ fn execute_effect(
         Effect::ValidateForm { form } => (Some(Message::FormValidated { form, error: None }), None),
         Effect::StartInstall => {
             installer.state.install.started = Some(Instant::now());
-            *task = Some(InstallTask::start(&installer.ctx));
+            let install_task = InstallTask::start(&installer.ctx);
+            crate::engine::util::clear_secret(&mut installer.ctx.user_password);
+            crate::engine::util::clear_secret(&mut installer.ctx.k3s_token);
+            if let Some(draft) = installer.state.identity.as_mut() {
+                crate::engine::util::clear_secret(&mut draft.password);
+                crate::engine::util::clear_secret(&mut draft.repeated_password);
+                draft.reveal_password = false;
+            }
+            *task = Some(install_task);
             (None, None)
         }
         Effect::CancelPipeline => {
@@ -836,9 +881,9 @@ fn render_install(installer: &Installer, now: Instant, frame: &mut Frame) {
     };
     let current_line = if running {
         let title = steps.get(step_idx).map_or("Starting install", |s| s.title);
-        let frame_n = install
-            .started
-            .map_or(0, |s| (now.duration_since(s).as_millis() / 80) as usize);
+        let frame_n = install.started.map_or(0, |s| {
+            (now.saturating_duration_since(s).as_millis() / 80) as usize
+        });
         format!(
             "{} Step {}/{} - {}",
             spinner(frame_n),
@@ -895,7 +940,7 @@ fn render_install(installer: &Installer, now: Instant, frame: &mut Frame) {
         let overall = (f64::from(done) + active) / f64::from(total);
 
         let elapsed = match (install.started, install.elapsed_seconds) {
-            (Some(s), None) if running => now.duration_since(s),
+            (Some(s), None) if running => now.saturating_duration_since(s),
             _ => Duration::from_secs(install.elapsed_seconds.unwrap_or(0)),
         };
         let elapsed_str = format!("Elapsed {}", format_elapsed(elapsed));
@@ -1476,42 +1521,70 @@ pub(crate) fn run(installer: &mut Installer, terminal: &mut Terminal) -> Trap {
     let mut terminal_too_small = false;
 
     loop {
+        let mut worker_disconnected = false;
         for _ in 0..MAX_EVENTS_PER_TURN {
-            let event = task
-                .as_ref()
-                .and_then(|task| task.events_rx.try_recv().ok());
-            let Some(event) = event else {
+            let Some(active_task) = task.as_ref() else {
                 break;
             };
-            pending.push_back(event);
+            match active_task.events_rx.try_recv() {
+                Ok(event) => enqueue_bounded(&mut pending, event),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    worker_disconnected = true;
+                    break;
+                }
+            }
+        }
+        if worker_disconnected
+            && let Some(mut finished_task) = task.take()
+            && let Err(panic) = finished_task.join()
+            && !pending
+                .iter()
+                .any(|message| matches!(message, Message::InstallFinished { .. }))
+        {
+            let elapsed = installer
+                .state
+                .install
+                .started
+                .map(|started| started.elapsed());
+            enqueue_bounded(
+                &mut pending,
+                Message::InstallFinished {
+                    at: installer.state.install.current_step,
+                    elapsed,
+                    error: Some(format!("installer worker panicked: {panic}")),
+                },
+            );
         }
 
         let now = Instant::now();
-        if now.duration_since(last_tick) >= TICK_INTERVAL {
-            pending.push_back(Message::Tick);
+        if now.saturating_duration_since(last_tick) >= TICK_INTERVAL {
+            enqueue_bounded(&mut pending, Message::Tick);
             last_tick = now;
         }
-        if now.duration_since(last_countdown) >= Duration::from_secs(1) {
-            pending.push_back(Message::CountdownTick);
+        if now.saturating_duration_since(last_countdown) >= Duration::from_secs(1) {
+            enqueue_bounded(&mut pending, Message::CountdownTick);
             last_countdown = now;
         }
 
-        if let Some(message) = pending.pop_front() {
+        for _ in 0..MAX_EVENTS_PER_TURN {
+            let Some(message) = pending.pop_front() else {
+                break;
+            };
             let effects = update(&mut installer.state, message);
             scheduler.request_render();
             for effect in effects {
                 let (message, trap) = execute_effect(installer, &mut task, effect);
                 if let Some(message) = message {
-                    pending.push_back(message);
+                    enqueue_bounded(&mut pending, message);
                 }
                 if let Some(trap) = trap {
                     if let Some(task) = task.as_mut() {
-                        task.join();
+                        let _ = task.join();
                     }
                     return trap;
                 }
             }
-            continue;
         }
 
         let tz_animating =
@@ -1534,7 +1607,10 @@ pub(crate) fn run(installer: &mut Installer, terminal: &mut Terminal) -> Trap {
             live = false;
         }
         if live {
-            timezone::tick(&mut installer.state, now.duration_since(last_frame));
+            timezone::tick(
+                &mut installer.state,
+                now.saturating_duration_since(last_frame),
+            );
         }
         last_frame = now;
 
@@ -1559,7 +1635,7 @@ pub(crate) fn run(installer: &mut Installer, terminal: &mut Terminal) -> Trap {
                         &mut terminal_too_small,
                     )
                 {
-                    pending.push_back(message);
+                    enqueue_bounded(&mut pending, message);
                 }
             }
             Schedule::Idle => {
@@ -1571,7 +1647,7 @@ pub(crate) fn run(installer: &mut Installer, terminal: &mut Terminal) -> Trap {
                         &mut terminal_too_small,
                     )
                 {
-                    pending.push_back(message);
+                    enqueue_bounded(&mut pending, message);
                 }
             }
         }

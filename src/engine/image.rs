@@ -44,10 +44,6 @@ pub fn load_image_version(source_image: Option<&Path>) -> String {
     manifest_field(source_image, "version").unwrap_or_default()
 }
 
-pub fn image_manifest_metadata(source_image: &Path) -> serde_json::Value {
-    read_manifest(source_image).unwrap_or(serde_json::Value::Null)
-}
-
 /// Estimated bytes the bootc deployment writes to the target filesystem, used
 /// to follow its otherwise-opaque progress. Prefers an explicit `installSize`
 /// from the sidecar manifest, then falls back to scaling the OCI layer sizes.

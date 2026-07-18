@@ -22,6 +22,7 @@ use openssl::sha::{Sha256, sha256};
 use openssl::sign::Signer;
 use openssl::stack::Stack;
 use openssl::x509::X509;
+use openssl::x509::store::X509StoreBuilder;
 
 use crate::engine::command::LogFn;
 use crate::engine::der::{
@@ -257,6 +258,60 @@ fn security_dir_offset(data: &[u8]) -> Result<usize> {
     Ok(dir_start + 4 * 8) // certificate table = directory entry 4
 }
 
+/// Return a validated terminal attribute-certificate table range.
+fn certificate_table_range(image: &[u8]) -> Result<Option<std::ops::Range<usize>>> {
+    let sec_dir = security_dir_offset(image)?;
+    let table_off = read_u32_le(image, sec_dir)? as usize;
+    let table_size = read_u32_le(image, sec_dir + 4)? as usize;
+    if table_off == 0 && table_size == 0 {
+        return Ok(None);
+    }
+    if table_off == 0 || table_size == 0 {
+        bail!("incomplete PE certificate table directory");
+    }
+    if table_off % 8 != 0 {
+        bail!("PE certificate table is not 8-byte aligned");
+    }
+    let table_end = table_off
+        .checked_add(table_size)
+        .ok_or_else(|| anyhow!("PE certificate table range overflows"))?;
+    if table_end != image.len() {
+        bail!("PE certificate table must be the final image region");
+    }
+
+    let opt = optional_header_offset(image)?;
+    let size_of_headers = read_u32_le(image, opt + 60)? as usize;
+    let e_lfanew = read_u32_le(image, 0x3c)? as usize;
+    let num_sections = read_u16_le(image, e_lfanew + 6)? as usize;
+    let size_of_optional_header = read_u16_le(image, e_lfanew + 20)? as usize;
+    let section_table = opt
+        .checked_add(size_of_optional_header)
+        .ok_or_else(|| anyhow!("PE section table offset overflows"))?;
+    let mut image_data_end = size_of_headers;
+    for index in 0..num_sections {
+        let header = section_table
+            .checked_add(
+                index
+                    .checked_mul(40)
+                    .ok_or_else(|| anyhow!("PE section index overflows"))?,
+            )
+            .ok_or_else(|| anyhow!("PE section header offset overflows"))?;
+        let start = read_u32_le(image, header + 20)? as usize;
+        let size = read_u32_le(image, header + 16)? as usize;
+        let end = start
+            .checked_add(size)
+            .ok_or_else(|| anyhow!("PE section range overflows"))?;
+        if end > image.len() {
+            bail!("PE section exceeds image");
+        }
+        image_data_end = image_data_end.max(end);
+    }
+    if table_off < image_data_end {
+        bail!("PE certificate table overlaps headers or section data");
+    }
+    Ok(Some(table_off..table_end))
+}
+
 /// Compute the Authenticode SHA-256 digest of a PE image, hashing everything
 /// except the optional-header checksum, the certificate-table data directory
 /// entry, and the attribute certificate table itself.
@@ -313,29 +368,43 @@ fn authenticode_sha256(image: &[u8]) -> Result<[u8; 32]> {
 
 /// Iterate the PKCS#7 entries of the PE attribute certificate table.
 fn attribute_certificates(image: &[u8]) -> Result<Vec<&[u8]>> {
-    let sec_dir = security_dir_offset(image)?;
-    let table_off = read_u32_le(image, sec_dir)? as usize;
-    let table_size = read_u32_le(image, sec_dir + 4)? as usize;
-    if table_size == 0 {
+    let Some(table) = certificate_table_range(image)? else {
         return Ok(Vec::new());
-    }
-    let table_end = table_off + table_size;
+    };
     let mut out = Vec::new();
-    let mut pos = table_off;
-    while pos + 8 <= table_end {
+    let mut pos = table.start;
+    while pos < table.end {
+        let header_end = pos
+            .checked_add(8)
+            .ok_or_else(|| anyhow!("certificate entry header overflows"))?;
+        if header_end > table.end {
+            bail!("truncated certificate entry header");
+        }
         let cert_size = read_u32_le(image, pos)? as usize;
         let revision = read_u16_le(image, pos + 4)?;
         let cert_type = read_u16_le(image, pos + 6)?;
         if cert_size < 8 {
-            break;
+            bail!("invalid certificate entry size {cert_size}");
         }
-        let data = image
-            .get(pos + 8..pos + cert_size)
-            .ok_or_else(|| anyhow!("certificate entry exceeds table"))?;
+        let cert_end = pos
+            .checked_add(cert_size)
+            .ok_or_else(|| anyhow!("certificate entry range overflows"))?;
+        if cert_end > table.end {
+            bail!("certificate entry exceeds table");
+        }
         if revision == WIN_CERT_REVISION_2_0 && cert_type == WIN_CERT_TYPE_PKCS_SIGNED_DATA {
-            out.push(data);
+            out.push(&image[header_end..cert_end]);
         }
-        pos += (cert_size + 7) & !7; // 8-byte aligned entries
+        let padded_size = cert_size
+            .checked_add(7)
+            .ok_or_else(|| anyhow!("certificate entry alignment overflows"))?
+            & !7;
+        pos = pos
+            .checked_add(padded_size)
+            .ok_or_else(|| anyhow!("certificate entry offset overflows"))?;
+        if pos > table.end {
+            bail!("certificate entry padding exceeds table");
+        }
     }
     Ok(out)
 }
@@ -343,55 +412,77 @@ fn attribute_certificates(image: &[u8]) -> Result<Vec<&[u8]>> {
 /// Authenticode-sign the PE image bytes, returning the signed image.
 pub fn sign_pe(image: &[u8], key_pem: &str, cert_pem: &str) -> Result<Vec<u8>> {
     let (key, cert) = load_key_and_cert(key_pem, cert_pem)?;
+    if !cert.public_key()?.public_eq(&key) {
+        bail!("Secure Boot private key does not match its certificate");
+    }
 
-    let digest = authenticode_sha256(image)?;
+    let dir = security_dir_offset(image)?;
+    let mut out = image.to_vec();
+    if let Some(table) = certificate_table_range(image)? {
+        out.truncate(table.start);
+    }
+    out[dir..dir + 8].fill(0);
+    while out.len() % 8 != 0 {
+        out.push(0);
+    }
+
+    let digest = authenticode_sha256(&out)?;
     let pkcs7 = build_pkcs7(&digest, &key, &cert)?;
 
     // WIN_CERTIFICATE: dwLength (incl. 8-byte header) | wRevision | wType | data,
     // padded so the whole entry is 8-byte aligned.
-    let cert_len = 8 + pkcs7.len();
-    let mut entry = Vec::with_capacity((cert_len + 7) & !7);
-    entry.extend_from_slice(&(cert_len as u32).to_le_bytes());
+    let cert_len = 8usize
+        .checked_add(pkcs7.len())
+        .ok_or_else(|| anyhow!("certificate entry size overflows"))?;
+    let cert_len_u32 = u32::try_from(cert_len)
+        .map_err(|_| anyhow!("certificate entry is too large for a PE image"))?;
+    let padded_len = cert_len
+        .checked_add(7)
+        .ok_or_else(|| anyhow!("certificate entry alignment overflows"))?
+        & !7;
+    let mut entry = Vec::with_capacity(padded_len);
+    entry.extend_from_slice(&cert_len_u32.to_le_bytes());
     entry.extend_from_slice(&WIN_CERT_REVISION_2_0.to_le_bytes());
     entry.extend_from_slice(&WIN_CERT_TYPE_PKCS_SIGNED_DATA.to_le_bytes());
     entry.extend_from_slice(&pkcs7);
-    while entry.len() % 8 != 0 {
-        entry.push(0);
-    }
+    entry.resize(padded_len, 0);
 
-    // The certificate table is appended at the (8-aligned) end of the image.
-    let mut out = image.to_vec();
-    while out.len() % 8 != 0 {
-        out.push(0);
-    }
     let cert_offset = out.len();
+    let cert_offset_u32 = u32::try_from(cert_offset)
+        .map_err(|_| anyhow!("PE image is too large for a certificate table"))?;
+    let table_size_u32 =
+        u32::try_from(entry.len()).map_err(|_| anyhow!("PE certificate table is too large"))?;
     out.extend_from_slice(&entry);
-
-    // Point the security data directory at the appended certificate table.
-    let dir = security_dir_offset(image)?;
-    out[dir..dir + 4].copy_from_slice(&(cert_offset as u32).to_le_bytes());
-    out[dir + 4..dir + 8].copy_from_slice(&(entry.len() as u32).to_le_bytes());
+    out[dir..dir + 4].copy_from_slice(&cert_offset_u32.to_le_bytes());
+    out[dir + 4..dir + 8].copy_from_slice(&table_size_u32.to_le_bytes());
 
     Ok(out)
 }
 
-/// Verify that the PE image carries an Authenticode signature whose digest
-/// matches the image and whose signer matches `cert_pem`.
+/// Verify that the PE image carries a cryptographically valid Authenticode
+/// signature whose digest matches the image and whose signer is `cert_pem`.
 pub fn verify_pe(image: &[u8], cert_pem: &str) -> Result<bool> {
     let Ok(cert) = X509::from_pem(cert_pem.as_bytes()) else {
         return Ok(false);
     };
     let cert_der = cert.to_der()?;
     let expected = authenticode_sha256(image)?;
+    let mut certs = Stack::new()?;
+    certs.push(cert)?;
+    let store = X509StoreBuilder::new()?.build();
+    let flags = Pkcs7Flags::BINARY | Pkcs7Flags::NOINTERN | Pkcs7Flags::NOVERIFY;
 
-    for pkcs7 in attribute_certificates(image)? {
-        let Some((digest, certs)) = parse_authenticode(pkcs7) else {
+    for pkcs7_der in attribute_certificates(image)? {
+        let Some((digest, embedded_certs)) = parse_authenticode(pkcs7_der) else {
             continue;
         };
-        if digest != expected {
+        if digest != expected || !embedded_certs.iter().any(|item| item == &cert_der) {
             continue;
         }
-        if certs.iter().any(|c| c == &cert_der) {
+        let Ok(pkcs7) = Pkcs7::from_der(pkcs7_der) else {
+            continue;
+        };
+        if pkcs7.verify(&certs, &store, None, None, flags).is_ok() {
             return Ok(true);
         }
     }
@@ -516,6 +607,8 @@ fn write_auth_variable(name: &str, vendor_guid: &[u8; 16], payload: &[u8]) -> Re
         .map_err(|e| anyhow!("failed to open {path}: {e}"))?;
     file.write_all(&buf)
         .map_err(|e| anyhow!("failed to write {path}: {e}"))?;
+    file.sync_all()
+        .map_err(|e| anyhow!("failed to sync {path}: {e}"))?;
     Ok(())
 }
 

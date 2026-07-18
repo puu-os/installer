@@ -23,6 +23,9 @@ use crate::tui::app::Installer;
 /// Puu system installer.
 #[derive(FromArgs)]
 struct Args {
+    /// read installer configuration from this YAML file
+    #[argh(option)]
+    config: Option<PathBuf>,
     /// override install source with a bootc image dir layout or oci-archive path
     #[argh(option)]
     source_image: Option<PathBuf>,
@@ -50,10 +53,14 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let config_path = std::env::var_os("PUU_INSTALLER_CONFIG").map_or_else(
-        || PathBuf::from("/usr/share/puu/machine.yaml"),
-        PathBuf::from,
-    );
+    engine::pipeline::enter_private_mount_namespace()?;
+
+    let config_path = args.config.unwrap_or_else(|| {
+        std::env::var_os("PUU_INSTALLER_CONFIG").map_or_else(
+            || PathBuf::from("/usr/share/puu/machine.yaml"),
+            PathBuf::from,
+        )
+    });
     let mut cfg = Config::load(&config_path)?;
 
     if let Some(role) = args.k3s_role {
@@ -91,14 +98,12 @@ fn main() -> Result<()> {
     let target_imgref = engine::image::load_target_imgref(source_image.as_deref(), &cfg);
     let image_version = engine::image::load_image_version(source_image.as_deref());
 
-    let ctx = Context {
-        config: cfg,
-        source_image,
-        target_imgref,
-        image_version,
-        k3s_token,
-        ..Default::default()
-    };
+    let mut ctx = Context::default();
+    ctx.config = cfg;
+    ctx.source_image = source_image;
+    ctx.target_imgref = target_imgref;
+    ctx.image_version = image_version;
+    ctx.k3s_token = k3s_token;
 
     let mut app = Installer::new(ctx);
     loop {

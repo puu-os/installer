@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write as _;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -77,23 +77,18 @@ fn step_cleanup(r: &mut Runner) -> Result<()> {
     pipeline::cleanup_mounts(r)
 }
 
-fn step_validate_drive(r: &mut Runner) -> Result<()> {
-    let drive = &r.ctx.drive;
-    if !Path::new(drive).exists() {
+fn validate_target_drive(drive: &str, config: &crate::engine::config::Config) -> Result<u64> {
+    let metadata = std::fs::metadata(drive)
+        .with_context(|| format!("failed to inspect target drive {drive}"))?;
+    if !metadata.file_type().is_block_device() {
         bail!("'{drive}' is not a block device");
     }
-    if let Some(ref src) = r.ctx.source_image {
-        if !src.is_file() && !src.is_dir() {
-            bail!("source bootc image not found at {}", src.display());
-        }
-    }
-
     if let Some(reason) = crate::engine::block::disk_busy(drive) {
         bail!("'{drive}' is busy: {reason}");
     }
 
     let size_b = crate::engine::block::drive_size_bytes(drive)?;
-    let min = partition::min_target_size_bytes(&r.ctx.config)?;
+    let min = partition::min_target_size_bytes(config)?;
     if size_b < min {
         bail!(
             "'{drive}' is too small: {} detected, need at least {} for EFI, \
@@ -101,6 +96,17 @@ fn step_validate_drive(r: &mut Runner) -> Result<()> {
             crate::engine::util::human_size(size_b),
             crate::engine::util::human_size(min)
         );
+    }
+    Ok(size_b)
+}
+
+fn step_validate_drive(r: &mut Runner) -> Result<()> {
+    let drive = &r.ctx.drive;
+    let size_b = validate_target_drive(drive, &r.ctx.config)?;
+    if let Some(ref src) = r.ctx.source_image {
+        if !src.is_file() && !src.is_dir() {
+            bail!("source bootc image not found at {}", src.display());
+        }
     }
 
     r.ctx.parts = partition::derive_partitions(drive);
@@ -115,22 +121,16 @@ fn step_validate_drive(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
-const BLKRRPART: libc::c_ulong = 0x125f;
-
 fn step_partition(r: &mut Runner) -> Result<()> {
     let drive = r.ctx.drive.clone();
+    // Revalidate immediately before taking exclusive access and writing the GPT.
+    validate_target_drive(&drive, &r.ctx.config)?;
     r.ctx.parts.layout = Some(partition::partition_drive(
         &mut *r.log,
         &drive,
         &r.ctx.config.partitions.efi,
         &r.ctx.config.partitions.home,
     )?);
-    let file = std::fs::File::open(&drive)
-        .map_err(|e| anyhow::anyhow!("failed to open {drive} to re-read partition table: {e}"))?;
-    if unsafe { libc::ioctl(file.as_raw_fd(), BLKRRPART) } != 0 {
-        let err = std::io::Error::last_os_error();
-        bail!("BLKRRPART ioctl failed on {drive}: {err}");
-    }
     // Wait for the udev event queue to drain (replaces `udevadm settle`).
     let udev = udev::Udev::new()?;
     let queue = unsafe { udev::ffi::udev_queue_new(udev.as_raw()) };
@@ -378,26 +378,15 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
         r.log("using running bootc image as install source");
         return Ok(());
     };
-    let manifest = image::image_manifest_metadata(&src);
-    if manifest.is_null() {
-        r.log("no image manifest found, skipping digest verification");
-        return Ok(());
-    }
-    let expected = manifest
-        .get("digest")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let expected = r.ctx.config.image.expected_digest.clone();
     if expected.is_empty() {
-        r.log("manifest has no digest entry, skipping");
-        return Ok(());
+        bail!("image.expectedDigest is required when installing from a local image source");
     }
+
     r.log(&format!("expected image digest: {expected}"));
-
     let raw = image::raw_manifest(&src)?;
-
     let actual = format!("sha256:{}", hex::encode(openssl::sha::sha256(&raw)));
-    if actual != expected {
+    if !actual.eq_ignore_ascii_case(&expected) {
         bail!("image digest mismatch: expected {expected}, got {actual}");
     }
     r.log(&format!("image digest verified: {actual}"));
@@ -494,16 +483,32 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
         argv.push("--server-url".into());
         argv.push(r.ctx.config.k3s.server_url.clone());
     }
+
+    let mut cleanups = pipeline::CleanupStack::new();
     if !r.ctx.k3s_token.is_empty() {
         let token_path = Path::new(TARGET_MOUNT).join("etc/rancher/k3s/puu-token");
-        {
-            let parent = token_path
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("token path has no parent"))?;
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&token_path, format!("{}\n", r.ctx.k3s_token))?;
-        std::fs::set_permissions(&token_path, PermissionsExt::from_mode(0o600))?;
+        let parent = token_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("token path has no parent"))?;
+        std::fs::create_dir_all(parent)?;
+        let mut token_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&token_path)
+            .with_context(|| {
+                format!("failed to create temporary token {}", token_path.display())
+            })?;
+        token_file.set_permissions(PermissionsExt::from_mode(0o600))?;
+        let cleanup_path = token_path.clone();
+        cleanups.push(move || {
+            let _ = std::fs::remove_file(cleanup_path);
+        });
+        token_file.write_all(r.ctx.k3s_token.as_bytes())?;
+        token_file.write_all(b"\n")?;
+        token_file.sync_all()?;
         argv.push("--token-file".into());
         argv.push("/etc/rancher/k3s/puu-token".into());
     }
@@ -512,11 +517,9 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
         argv.push(r.ctx.config.k3s.node_name.clone());
     }
     r.cmd(&argv).chroot(TARGET_MOUNT).run()?;
+    drop(cleanups);
+    crate::engine::util::clear_secret(&mut r.ctx.k3s_token);
 
-    if !r.ctx.k3s_token.is_empty() {
-        let token_path = Path::new(TARGET_MOUNT).join("etc/rancher/k3s/puu-token");
-        let _ = std::fs::remove_file(&token_path);
-    }
     r.log(&format!(
         "k3s cluster: staged {} configuration",
         r.ctx.config.k3s.role
@@ -565,8 +568,20 @@ fn step_stage_homed_identity(r: &mut Runner) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("identity target path has no parent"))?;
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&target, serde_json::to_string_pretty(&identity)?)?;
-    std::fs::set_permissions(&target, PermissionsExt::from_mode(0o600))?;
+    let mut identity_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&target)
+        .with_context(|| format!("failed to create identity file {}", target.display()))?;
+    identity_file.set_permissions(PermissionsExt::from_mode(0o600))?;
+    serde_json::to_writer_pretty(&mut identity_file, &identity)?;
+    identity_file.write_all(b"\n")?;
+    identity_file.sync_all()?;
+    drop(identity);
+    crate::engine::util::clear_secret(&mut r.ctx.user_password);
     r.log(&format!(
         "staged homed identity for {name} at /var/lib/puu/identity.json"
     ));
@@ -612,7 +627,7 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
-fn step_nvram(r: &mut Runner) -> Result<()> {
+fn step_install_bootloader(r: &mut Runner) -> Result<()> {
     mount_efi(r)?;
     let source = systemd_boot_source()?;
     let arch = efi_arch_suffix()?;
@@ -620,12 +635,15 @@ fn step_nvram(r: &mut Runner) -> Result<()> {
     let fallback_dir = Path::new(TARGET_EFI_MOUNT).join("EFI/BOOT");
     std::fs::create_dir_all(&systemd_dir)?;
     std::fs::create_dir_all(&fallback_dir)?;
+    std::fs::copy(&source, systemd_dir.join(format!("systemd-boot{arch}.efi")))?;
+    std::fs::copy(&source, fallback_dir.join(format!("BOOT{arch}.EFI")))?;
+    r.log("installed systemd-boot on the ESP");
+    Ok(())
+}
 
-    let systemd_target = systemd_dir.join(format!("systemd-boot{arch}.efi"));
-    let fallback_target = fallback_dir.join(format!("BOOT{arch}.EFI"));
-    std::fs::copy(&source, &systemd_target)?;
-    std::fs::copy(&source, &fallback_target)?;
-
+fn step_nvram(r: &mut Runner) -> Result<()> {
+    mount_efi(r)?;
+    let arch = efi_arch_suffix()?;
     if r.ctx.parts.layout.is_none() {
         r.ctx.parts.layout = Some(partition::load_partition_layout(&r.ctx.drive)?);
     }
@@ -657,17 +675,43 @@ fn step_nvram(r: &mut Runner) -> Result<()> {
     };
 
     let mut vars = efivar::system();
-    let old_order = vars.get_boot_order().unwrap_or_default();
+    let boot_order_var = efivar::efi::Variable::new("BootOrder");
+    let had_boot_order = vars
+        .exists(&boot_order_var)
+        .map_err(|e| anyhow::anyhow!("failed to inspect BootOrder: {e}"))?;
+    let old_order = if had_boot_order {
+        vars.get_boot_order()
+            .map_err(|e| anyhow::anyhow!("failed to read BootOrder: {e}"))?
+    } else {
+        Vec::new()
+    };
     let boot_id = first_free_boot_id(&old_order, vars.as_ref())?;
     vars.add_boot_entry(boot_id, entry)
         .map_err(|e| anyhow::anyhow!("failed to write Boot{boot_id:04X}: {e}"))?;
 
     let mut new_order = vec![boot_id];
-    new_order.extend(old_order.into_iter().filter(|id| *id != boot_id));
-    vars.set_boot_order(new_order)
-        .map_err(|e| anyhow::anyhow!("failed to update BootOrder: {e}"))?;
+    new_order.extend(old_order.iter().copied().filter(|id| *id != boot_id));
+    if let Err(error) = vars.set_boot_order(new_order) {
+        let boot_var = efivar::efi::Variable::new(&format!("Boot{boot_id:04X}"));
+        let delete_entry = vars.delete(&boot_var);
+        let restore_order = if had_boot_order {
+            vars.set_boot_order(old_order)
+        } else {
+            match vars.exists(&boot_order_var) {
+                Ok(true) => vars.delete(&boot_order_var),
+                Ok(false) => Ok(()),
+                Err(error) => Err(error),
+            }
+        };
+        bail!(
+            "failed to update BootOrder: {error}; rollback Boot{boot_id:04X}: {}; \
+             rollback BootOrder: {}",
+            result_status(&delete_entry),
+            result_status(&restore_order)
+        );
+    }
     r.log(&format!(
-        "installed systemd-boot and registered Boot{boot_id:04X}"
+        "registered Boot{boot_id:04X} and placed it first in BootOrder"
     ));
     Ok(())
 }
@@ -717,11 +761,20 @@ fn first_free_boot_id(order: &[u16], vars: &dyn efivar::VarManager) -> Result<u1
             continue;
         }
         let name = efivar::efi::Variable::new(&format!("Boot{id:04X}"));
-        if vars.read(&name).is_err() {
+        if !vars
+            .exists(&name)
+            .map_err(|e| anyhow::anyhow!("failed to inspect Boot{id:04X}: {e}"))?
+        {
             return Ok(id);
         }
     }
     bail!("no free Boot#### variable ID found")
+}
+
+fn result_status<T, E: std::fmt::Display>(result: &std::result::Result<T, E>) -> String {
+    result
+        .as_ref()
+        .map_or_else(|error| format!("failed ({error})"), |_| "ok".to_string())
 }
 
 fn step_stage_esp_boot(r: &mut Runner) -> Result<()> {
@@ -948,8 +1001,8 @@ pub static STEPS: &[Step] = &[
         weight: 15,
     },
     Step {
-        title: "Manage NVRAM boot entry",
-        fn_: step_nvram,
+        title: "Install systemd-boot",
+        fn_: step_install_bootloader,
         point_of_no_return: false,
         requires_secure_boot: false,
         weight: 1,
@@ -973,6 +1026,13 @@ pub static STEPS: &[Step] = &[
         fn_: step_secureboot,
         point_of_no_return: false,
         requires_secure_boot: true,
+        weight: 1,
+    },
+    Step {
+        title: "Manage NVRAM boot entry",
+        fn_: step_nvram,
+        point_of_no_return: false,
+        requires_secure_boot: false,
         weight: 1,
     },
     Step {

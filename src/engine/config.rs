@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use anyhow::{Context, Result};
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
+use anyhow::{Context, Result};
+use serde::Deserialize;
+
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
     pub branding: Branding,
     pub partitions: Partitions,
@@ -22,7 +23,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Branding {
     pub name: String,
 }
@@ -34,7 +35,7 @@ impl Default for Branding {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Partitions {
     pub efi: String,
     pub root_min: String,
@@ -52,7 +53,7 @@ impl Default for Partitions {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Labels {
     pub root: String,
     pub home: String,
@@ -68,9 +69,10 @@ impl Default for Labels {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Image {
     pub target_img_ref: String,
+    pub expected_digest: String,
     pub source_label: String,
     pub source_mount: String,
 }
@@ -79,6 +81,7 @@ impl Default for Image {
     fn default() -> Self {
         Self {
             target_img_ref: "quay.io/puu/puu:latest".into(),
+            expected_digest: String::new(),
             source_label: "PAYLOAD".into(),
             source_mount: "/run/puu-installer/payload".into(),
         }
@@ -86,7 +89,7 @@ impl Default for Image {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Identity {
     pub keymap: String,
     pub locale: String,
@@ -106,7 +109,7 @@ impl Default for Identity {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Flatpak {
     pub manifest_path: String,
     pub sync_helper: String,
@@ -122,7 +125,7 @@ impl Default for Flatpak {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct K3s {
     pub helper: String,
     pub role: String,
@@ -142,7 +145,7 @@ impl Default for K3s {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Homed {
     pub groups: Vec<String>,
 }
@@ -171,7 +174,7 @@ impl Default for Homed {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Kernel {
     pub extra_arm64_args: Vec<String>,
 }
@@ -211,6 +214,15 @@ impl Config {
                 "branding.name {name:?} must contain only Basic Multilingual Plane characters"
             );
         }
+        validate_partition_size("partitions.efi", &self.partitions.efi)?;
+        validate_partition_size("partitions.rootMin", &self.partitions.root_min)?;
+        validate_partition_size("partitions.home", &self.partitions.home)?;
+        validate_digest(&self.image.expected_digest)?;
+        if !matches!(self.k3s.role.as_str(), "server" | "agent") {
+            anyhow::bail!("k3s.role must be \"server\" or \"agent\"");
+        }
+        validate_single_line("identity.keymap", &self.identity.keymap)?;
+        validate_single_line("identity.locale", &self.identity.locale)?;
         validate_label("labels.root", &self.labels.root, XFS_LABEL_MAX)?;
         validate_label("labels.home", &self.labels.home, EXT4_LABEL_MAX)?;
         Ok(())
@@ -226,6 +238,35 @@ fn validate_label(field: &str, value: &str, max: usize) -> Result<()> {
             "{field} {value:?} is {} bytes, exceeding the {max}-byte filesystem label limit",
             value.len()
         );
+    }
+    Ok(())
+}
+
+fn validate_partition_size(field: &str, value: &str) -> Result<()> {
+    let bytes = crate::engine::partition::part_size_bytes(value)
+        .with_context(|| format!("invalid {field}"))?;
+    if bytes == 0 {
+        anyhow::bail!("{field} must be greater than zero");
+    }
+    Ok(())
+}
+
+fn validate_digest(value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        anyhow::bail!("image.expectedDigest must use the sha256:<hex> format");
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("image.expectedDigest must contain exactly 64 hexadecimal digits");
+    }
+    Ok(())
+}
+
+fn validate_single_line(field: &str, value: &str) -> Result<()> {
+    if value.contains(['\n', '\r']) {
+        anyhow::bail!("{field} must not contain newline characters");
     }
     Ok(())
 }

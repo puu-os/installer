@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Result, bail};
@@ -19,6 +19,7 @@ pub struct Device {
 pub enum BusyReason {
     Mounted { ident: String, mountpoint: String },
     Mapping { kind: String, ident: String },
+    Swap { ident: String },
 }
 
 impl std::fmt::Display for BusyReason {
@@ -28,6 +29,7 @@ impl std::fmt::Display for BusyReason {
                 write!(f, "mounted: {ident} -> {mountpoint}")
             }
             Self::Mapping { kind, ident } => write!(f, "{kind}: {ident}"),
+            Self::Swap { ident } => write!(f, "active swap: {ident}"),
         }
     }
 }
@@ -39,18 +41,34 @@ fn mounted_sources() -> HashMap<String, String> {
         return map;
     };
     for line in content.lines() {
-        // mountinfo: "... <mountpoint(field 5)> ... - <fstype> <source> <opts>"
-        let Some((pre, post)) = line.split_once(" - ") else {
+        let Some((mountpoint, source, _fstype)) = crate::engine::util::parse_mountinfo_line(line)
+        else {
             continue;
         };
-        let mountpoint_raw = pre.split_whitespace().nth(4).unwrap_or("");
-        let mountpoint = crate::engine::util::decode_mountinfo_path(mountpoint_raw);
-        let source = post.split_whitespace().nth(1).unwrap_or("");
         if source.starts_with("/dev/") {
-            map.entry(source.to_string()).or_insert_with(|| mountpoint);
+            map.entry(source).or_insert(mountpoint);
         }
     }
     map
+}
+
+/// Active swap device nodes, normalized through symlinks when possible.
+fn swap_devices() -> HashSet<String> {
+    let Ok(content) = std::fs::read_to_string("/proc/swaps") else {
+        return HashSet::new();
+    };
+    content
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|source| source.starts_with("/dev/"))
+        .map(|source| {
+            std::fs::canonicalize(source).map_or_else(
+                |_| source.to_string(),
+                |path| path.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
 }
 
 /// Partition sysfs names (e.g. `sda1`, `nvme0n1p2`) belonging to a disk.
@@ -99,9 +117,17 @@ fn holder_mapping(sysname: &str) -> Option<(String, String)> {
 pub fn disk_busy(disk_path: &str) -> Option<BusyReason> {
     let disk = Path::new(disk_path).file_name()?.to_str()?.to_string();
     let mounts = mounted_sources();
+    let swaps = swap_devices();
 
     for node in std::iter::once(disk.clone()).chain(partition_sysnames(&disk)) {
         let devnode = format!("/dev/{node}");
+        let canonical_devnode = std::fs::canonicalize(&devnode).map_or_else(
+            |_| devnode.clone(),
+            |path| path.to_string_lossy().into_owned(),
+        );
+        if swaps.contains(&canonical_devnode) {
+            return Some(BusyReason::Swap { ident: devnode });
+        }
         if let Some(mountpoint) = mounts.get(&devnode) {
             if !mountpoint.is_empty() {
                 return Some(BusyReason::Mounted {

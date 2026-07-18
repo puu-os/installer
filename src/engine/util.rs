@@ -15,6 +15,16 @@ pub(crate) fn sync_all() {
     unsafe { libc::sync() };
 }
 
+/// Overwrite a secret string's full allocation before releasing its contents.
+pub(crate) fn clear_secret(secret: &mut String) {
+    // NUL is valid UTF-8, so wiping initialized bytes preserves String's invariant.
+    let bytes = unsafe { secret.as_mut_vec() };
+    for offset in 0..bytes.capacity() {
+        unsafe { std::ptr::write_volatile(bytes.as_mut_ptr().add(offset), 0) };
+    }
+    bytes.clear();
+}
+
 /// Whether the current process has superuser privileges.
 pub(crate) fn running_as_root() -> bool {
     unsafe { libc::geteuid() == 0 }
@@ -112,6 +122,30 @@ pub(crate) fn decode_mountinfo_path(path: &str) -> String {
     }
 
     out
+}
+
+/// Parse one `/proc/self/mountinfo` record into decoded mount point, source,
+/// and filesystem type fields.
+pub(crate) fn parse_mountinfo_line(line: &str) -> Option<(String, String, String)> {
+    let mut fields = line.split_whitespace();
+    fields.next()?; // mount ID
+    fields.next()?; // parent ID
+    fields.next()?; // major:minor
+    fields.next()?; // root
+    let mountpoint = fields.next()?;
+    fields.next()?; // mount options
+    loop {
+        if fields.next()? == "-" {
+            break;
+        }
+    }
+    let fstype = fields.next()?;
+    let source = fields.next()?;
+    Some((
+        decode_mountinfo_path(mountpoint),
+        decode_mountinfo_path(source),
+        fstype.to_string(),
+    ))
 }
 
 /// Check whether a command exists in `$PATH`, by searching `$PATH` directly

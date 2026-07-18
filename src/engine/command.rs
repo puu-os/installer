@@ -228,7 +228,9 @@ impl<'a> Command<'a> {
             }
         }
 
-        let rc = reader_thread.join().unwrap_or(-1);
+        let rc = reader_thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("command output reader thread panicked"))?;
         if rc != 0 {
             if let Some(last_line) = output_tail.back() {
                 bail!("command failed (exit {rc}): {last_line}\ncommand: {display}");

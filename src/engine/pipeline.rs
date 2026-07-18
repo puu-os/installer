@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use nix::mount::MsFlags;
+use nix::sched::{CloneFlags, unshare};
 
 use crate::engine::command::{self, LogFn};
 use crate::engine::partition::DerivedPartitions;
@@ -35,6 +36,20 @@ pub const BOOTC_VAR_TMP: &str = "/var/tmp";
 pub const CONTAINERS_RUNROOT: &str = "/run/containers/storage";
 pub const BOOTC_RUNROOT: &str = "/run/puu-installer/bootc-runroot";
 
+/// Enter a private mount namespace before creating installer mounts.
+pub fn enter_private_mount_namespace() -> Result<()> {
+    unshare(CloneFlags::CLONE_NEWNS)
+        .map_err(|e| anyhow::anyhow!("failed to create private mount namespace: {e}"))?;
+    nix::mount::mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        MsFlags::MS_PRIVATE | MsFlags::MS_REC,
+        None::<&str>,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to make mount namespace private: {e}"))
+}
+
 /// Mount `source` at `target` via `mount(2)`, creating the mountpoint and
 /// skipping if it is already mounted. Replaces shelling out to `mount(8)`.
 pub fn mount_target(
@@ -54,18 +69,18 @@ pub fn mount_target(
     Ok(())
 }
 
-/// Whether `path` is a mount point, by comparing its device id against its
-/// parent directory's.
+/// Whether `path` is an exact mount point according to `/proc/self/mountinfo`.
 pub fn path_is_mount(path: impl AsRef<Path>) -> bool {
-    use std::os::unix::fs::MetadataExt;
     let path = path.as_ref();
-    match (
-        std::fs::metadata(path),
-        std::fs::metadata(path.parent().unwrap_or(path)),
-    ) {
-        (Ok(self_meta), Ok(parent_meta)) => self_meta.dev() != parent_meta.dev(),
-        _ => false,
-    }
+    let normalized = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let normalized = normalized.to_string_lossy();
+    let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return false;
+    };
+    mountinfo.lines().any(|line| {
+        crate::engine::util::parse_mountinfo_line(line)
+            .is_some_and(|(mountpoint, _, _)| mountpoint == normalized)
+    })
 }
 
 pub fn bind_mount(source: &str, target: &str) -> Result<()> {
@@ -119,6 +134,13 @@ impl Default for Context {
             k3s_token: String::new(),
             parts: DerivedPartitions::default(),
         }
+    }
+}
+
+impl Drop for Context {
+    fn drop(&mut self) {
+        crate::engine::util::clear_secret(&mut self.user_password);
+        crate::engine::util::clear_secret(&mut self.k3s_token);
     }
 }
 
@@ -238,10 +260,9 @@ fn mounted_target_points() -> Vec<String> {
     };
 
     for line in mountinfo.lines() {
-        let Some(mount_point) = line.split_whitespace().nth(4) else {
+        let Some((mount_point, _, _)) = crate::engine::util::parse_mountinfo_line(line) else {
             continue;
         };
-        let mount_point = crate::engine::util::decode_mountinfo_path(mount_point);
         if mount_point == TARGET_MOUNT
             || mount_point.starts_with(&format!("{TARGET_MOUNT}/"))
             || mount_point == BOOTC_VAR_TMP

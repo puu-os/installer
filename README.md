@@ -37,6 +37,7 @@ labels:
   home: puu-home
 image:
   targetImgRef: quay.io/puu/puu:latest
+  expectedDigest: ""       # required for local sources: sha256 of raw OCI manifest
   sourceLabel: PAYLOAD
   sourceMount: /run/puu-installer/payload
 identity:

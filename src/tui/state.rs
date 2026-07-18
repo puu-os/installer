@@ -8,7 +8,7 @@ use std::time::Instant;
 use crate::tui::engine::NodeId;
 use crate::tui::message::{DriveInfo, FirmwareStatus};
 
-#[derive(Clone, Debug)]
+#[derive(Default)]
 pub(crate) struct IdentityDraft {
     pub(crate) language_index: usize,
     pub(crate) hostname: String,
@@ -18,6 +18,13 @@ pub(crate) struct IdentityDraft {
     pub(crate) shell_index: usize,
     pub(crate) field_index: usize,
     pub(crate) reveal_password: bool,
+}
+
+impl Drop for IdentityDraft {
+    fn drop(&mut self) {
+        crate::engine::util::clear_secret(&mut self.password);
+        crate::engine::util::clear_secret(&mut self.repeated_password);
+    }
 }
 
 /// Persistent state for the filterable timezone picker.
@@ -83,7 +90,6 @@ pub(crate) struct RebootState {
     pub(crate) shell_active: bool,
 }
 
-#[derive(Clone, Debug)]
 pub(crate) struct AppState {
     /// The route rendered by the single runtime loop.
     pub(crate) route: Route,
@@ -111,9 +117,9 @@ impl Default for AppState {
             focused: None,
             selection: SelectionState::default(),
             scroll: ScrollState::default(),
-            install: InstallProgress::default(),
             drives: Vec::new(),
             firmware: None,
+            install: InstallProgress::default(),
             reboot: RebootState::default(),
         }
     }

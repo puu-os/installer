@@ -3,7 +3,9 @@
 
 use std::cell::RefCell;
 use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::Instant;
 
 use crate::engine::command::LogFn;
 use crate::engine::pipeline::{self, Context, ProgressCb, Runner, SkipCb};
@@ -23,10 +25,16 @@ pub enum Trap {
 
 fn open_install_log() -> io::Result<std::fs::File> {
     std::fs::create_dir_all("/run/puu-installer")?;
-    std::fs::OpenOptions::new()
+    std::fs::set_permissions("/run/puu-installer", PermissionsExt::from_mode(0o700))?;
+    let file = std::fs::OpenOptions::new()
         .create(true)
-        .append(true)
-        .open(INSTALL_LOG_PATH)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(INSTALL_LOG_PATH)?;
+    file.set_permissions(PermissionsExt::from_mode(0o600))?;
+    Ok(file)
 }
 
 fn send_log(
@@ -67,6 +75,7 @@ impl InstallTask {
         pipeline_ctx.parts = crate::engine::partition::DerivedPartitions::default();
 
         let thread = std::thread::spawn(move || {
+            let started = Instant::now();
             let log_file = match open_install_log() {
                 Ok(file) => Some(file),
                 Err(error) => {
@@ -112,7 +121,7 @@ impl InstallTask {
                 pipeline::rollback(&mut log);
                 let _ = events_tx.send(Message::InstallFinished {
                     at: Some(at),
-                    elapsed: None,
+                    elapsed: Some(started.elapsed()),
                     error: Some(bounded_text(&format!("{error:#}"))),
                 });
             };
@@ -121,7 +130,7 @@ impl InstallTask {
                 Ok(true) => {
                     let _ = events_tx.send(Message::InstallFinished {
                         at: None,
-                        elapsed: None,
+                        elapsed: Some(started.elapsed()),
                         error: None,
                     });
                 }
@@ -146,10 +155,20 @@ impl InstallTask {
         let _ = self.cancel_tx.try_send(());
     }
 
-    pub fn join(&mut self) {
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+    pub fn join(&mut self) -> Result<(), String> {
+        let Some(thread) = self.thread.take() else {
+            return Ok(());
+        };
+        thread.join().map_err(|payload| {
+            payload.downcast_ref::<&str>().map_or_else(
+                || {
+                    payload
+                        .downcast_ref::<String>()
+                        .map_or_else(|| "unknown panic".to_string(), Clone::clone)
+                },
+                |message| (*message).to_string(),
+            )
+        })
     }
 }
 
