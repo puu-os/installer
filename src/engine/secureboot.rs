@@ -596,11 +596,9 @@ pub fn sbctl_owner_guid() -> [u8; 16] {
 pub fn target_efi_binaries() -> Vec<PathBuf> {
     let esp = Path::new(TARGET_EFI_MOUNT);
     let mut paths: Vec<PathBuf> = Vec::new();
-    for pattern in &["*.efi", "*.EFI"] {
-        for entry in walkdir_like(esp, pattern) {
-            if entry.is_file() {
-                paths.push(entry);
-            }
+    for entry in walkdir_like(esp, "*.efi") {
+        if entry.is_file() {
+            paths.push(entry);
         }
     }
     paths.sort();
@@ -609,7 +607,7 @@ pub fn target_efi_binaries() -> Vec<PathBuf> {
 
 fn walkdir_like(root: &Path, glob: &str) -> Vec<PathBuf> {
     let mut results = Vec::new();
-    let ext_lower = glob.trim_start_matches('*').to_lowercase();
+    let ext_lower = glob.trim_start_matches("*.").to_lowercase();
     #[allow(clippy::items_after_statements)]
     fn recurse(dir: &Path, ext: &str, results: &mut Vec<PathBuf>) {
         if let Ok(entries) = std::fs::read_dir(dir) {
