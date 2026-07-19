@@ -408,9 +408,8 @@ pub fn mount_bootc_vartmp() -> Result<bool> {
     std::fs::create_dir_all(BOOTC_VAR_TMP)?;
     std::fs::set_permissions(BOOTC_VAR_TMP, PermissionsExt::from_mode(0o1777))?;
 
-    if path_is_mount(BOOTC_VAR_TMP) {
-        return Ok(false);
-    }
+    // bootc always unpacks OCI archives under /var/tmp.  It may already be a
+    // live-media mount, so stack the target-backed bind mount over it.
     bind_mount(&bootc_tmp.to_string_lossy(), BOOTC_VAR_TMP)?;
     Ok(true)
 }
