@@ -353,7 +353,11 @@ pub(crate) fn update(state: &mut AppState, message: Message) -> Vec<Effect> {
             state.selection.target = (!state.drives.is_empty()).then_some(0);
         }
         Message::DriveSelected { index } => {
-            if state.drives.iter().any(|drive| drive.index == index) {
+            if state
+                .drives
+                .iter()
+                .any(|drive| drive.index == index && drive.busy_reasons.is_empty())
+            {
                 state.push_modal(Modal::WipeConfirmation);
             }
         }
@@ -394,9 +398,9 @@ pub(crate) fn update(state: &mut AppState, message: Message) -> Vec<Effect> {
         Message::Back => return update_key(state, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         Message::CancelInstall => state.push_modal(Modal::Cancellation),
         Message::Log(line) => {
-            state.install.logs.push(line);
+            state.install.logs.push_back(line);
             if state.install.logs.len() > MAX_LOG_LINES {
-                state.install.logs.remove(0);
+                state.install.logs.pop_front();
             }
             if state.scroll.install_log > 0 {
                 state.scroll.install_log += 1;
@@ -535,7 +539,7 @@ fn execute_effect(
                 .state
                 .drives
                 .iter()
-                .find(|drive| drive.index == index)
+                .find(|drive| drive.index == index && drive.busy_reasons.is_empty())
             {
                 installer.ctx.drive.clone_from(&drive.path);
                 installer.ctx.drive_label.clone_from(&drive.label);
@@ -1518,7 +1522,8 @@ pub(crate) fn run(installer: &mut Installer, terminal: &mut Terminal) -> Trap {
     let mut last_countdown = last_tick;
     let mut last_frame = Instant::now();
     let mut live = false;
-    let mut terminal_too_small = false;
+    let size = tui_or_exit(screen_size(), "term.size");
+    let mut terminal_too_small = screen_too_small(size.width, size.height);
 
     loop {
         let mut worker_disconnected = false;
@@ -1580,6 +1585,7 @@ pub(crate) fn run(installer: &mut Installer, terminal: &mut Terminal) -> Trap {
                 }
                 if let Some(trap) = trap {
                     if let Some(task) = task.as_mut() {
+                        task.cancel();
                         let _ = task.join();
                     }
                     return trap;

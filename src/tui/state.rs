@@ -75,7 +75,7 @@ pub(crate) struct InstallProgress {
     pub(crate) step_states: Vec<InstallStepState>,
     pub(crate) committed: bool,
     pub(crate) follow_logs: bool,
-    pub(crate) logs: Vec<String>,
+    pub(crate) logs: std::collections::VecDeque<String>,
     pub(crate) elapsed_seconds: Option<u64>,
     pub(crate) started: Option<Instant>,
     pub(crate) failed: bool,

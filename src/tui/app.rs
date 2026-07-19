@@ -46,13 +46,13 @@ fn send_log(
         if let Some(file) = log_file.as_mut() {
             if let Err(error) = writeln!(file, "{line}") {
                 *log_file = None;
-                let _ = tx.send(Message::Log(bounded_text(&format!(
+                let _ = tx.try_send(Message::Log(bounded_text(&format!(
                     "warning: cannot write {INSTALL_LOG_PATH}: {error}"
                 ))));
             }
         }
     }
-    let _ = tx.send(Message::Log(bounded_text(line)));
+    let _ = tx.try_send(Message::Log(bounded_text(line)));
 }
 
 fn make_log(tx: mpsc::SyncSender<Message>, log_file: Arc<Mutex<Option<std::fs::File>>>) -> LogFn {
@@ -79,7 +79,7 @@ impl InstallTask {
             let log_file = match open_install_log() {
                 Ok(file) => Some(file),
                 Err(error) => {
-                    let _ = events_tx.send(Message::Log(bounded_text(&format!(
+                    let _ = events_tx.try_send(Message::Log(bounded_text(&format!(
                         "warning: cannot open {INSTALL_LOG_PATH}: {error}"
                     ))));
                     None
@@ -92,7 +92,7 @@ impl InstallTask {
                 let tx = events_tx.clone();
                 Box::new(move |step_index: usize, fraction: f64| {
                     let fraction_pct = (fraction.clamp(0.0, 1.0) * 100.0).round() as u16;
-                    let _ = tx.send(Message::InstallProgress {
+                    let _ = tx.try_send(Message::InstallProgress {
                         step_index,
                         fraction_pct,
                     });
@@ -102,7 +102,7 @@ impl InstallTask {
             let skipped: SkipCb = {
                 let tx = events_tx.clone();
                 Box::new(move |step_index: usize| {
-                    let _ = tx.send(Message::InstallSkipped { step_index });
+                    let _ = tx.try_send(Message::InstallSkipped { step_index });
                 })
             };
 

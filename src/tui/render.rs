@@ -630,13 +630,23 @@ impl<W: Write> Terminal<W> {
         self.back.blank();
         draw(&mut self.back);
         self.emit();
-        std::mem::swap(&mut self.front, &mut self.back);
 
         if self.bytes.is_empty() {
+            std::mem::swap(&mut self.front, &mut self.back);
             return Ok(());
         }
-        self.out.write_all(&self.bytes)?;
-        self.out.flush()
+
+        if let Err(error) = self
+            .out
+            .write_all(&self.bytes)
+            .and_then(|()| self.out.flush())
+        {
+            self.reset_wire_state();
+            return Err(error);
+        }
+
+        std::mem::swap(&mut self.front, &mut self.back);
+        Ok(())
     }
 
     /// Diff `back` against `front` into `bytes`. Writing to a `Vec` cannot fail,
