@@ -53,6 +53,9 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
+    tui::app::init_tracing()?;
+    tracing::trace!(target: "puu_installer::installation", "installer started");
+
     engine::pipeline::enter_private_mount_namespace()?;
 
     let config_path = args.config.unwrap_or_else(|| {

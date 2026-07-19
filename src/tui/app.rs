@@ -1,20 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use std::cell::RefCell;
-use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::mpsc;
 use std::time::Instant;
 
 use crate::engine::command::LogFn;
 use crate::engine::pipeline::{self, Context, ProgressCb, Runner, SkipCb};
-use crate::tui::engine::RenderTree;
 use crate::tui::message::{Message, bounded_text};
-use crate::tui::render::{Terminal, fatal_io, install_panic_hook};
 use crate::tui::state::AppState;
 
-const INSTALL_LOG_PATH: &str = "/run/puu-installer/install.log";
 const EVENT_QUEUE_CAPACITY: usize = 256;
 
 pub enum Trap {
@@ -23,40 +18,34 @@ pub enum Trap {
     Shell,
 }
 
-fn open_install_log() -> io::Result<std::fs::File> {
-    std::fs::create_dir_all("/run/puu-installer")?;
-    std::fs::set_permissions("/run/puu-installer", PermissionsExt::from_mode(0o700))?;
+pub fn init_tracing() -> anyhow::Result<()> {
+    let directory = "/run/puu-installer";
+    std::fs::create_dir_all(directory)?;
+    std::fs::set_permissions(directory, PermissionsExt::from_mode(0o700))?;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(INSTALL_LOG_PATH)?;
+        .open("/run/puu-installer/install.log")?;
     file.set_permissions(PermissionsExt::from_mode(0o600))?;
-    Ok(file)
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(file)
+        .try_init()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(())
 }
 
-fn send_log(
-    tx: &mpsc::SyncSender<Message>,
-    log_file: &Arc<Mutex<Option<std::fs::File>>>,
-    line: &str,
-) {
-    if let Ok(mut log_file) = log_file.lock() {
-        if let Some(file) = log_file.as_mut() {
-            if let Err(error) = writeln!(file, "{line}") {
-                *log_file = None;
-                let _ = tx.try_send(Message::Log(bounded_text(&format!(
-                    "warning: cannot write {INSTALL_LOG_PATH}: {error}"
-                ))));
-            }
-        }
-    }
+fn send_log(tx: &mpsc::SyncSender<Message>, line: &str) {
+    tracing::trace!(target: "puu_installer::installation", "{line}");
     let _ = tx.try_send(Message::Log(bounded_text(line)));
 }
 
-fn make_log(tx: mpsc::SyncSender<Message>, log_file: Arc<Mutex<Option<std::fs::File>>>) -> LogFn {
-    Box::new(move |line: String| send_log(&tx, &log_file, &line))
+fn make_log(tx: mpsc::SyncSender<Message>) -> LogFn {
+    Box::new(move |line: String| send_log(&tx, &line))
 }
 
 pub struct InstallTask {
@@ -72,24 +61,13 @@ impl InstallTask {
         let (events_tx, events_rx) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
         let (cancel_tx, cancel_rx) = mpsc::sync_channel::<()>(1);
         let (commit_tx, commit_rx) = mpsc::sync_channel::<usize>(0);
-
         let mut pipeline_ctx = ctx.clone();
         pipeline_ctx.parts = crate::engine::partition::DerivedPartitions::default();
 
         let thread = std::thread::spawn(move || {
             let started = Instant::now();
-            let log_file = match open_install_log() {
-                Ok(file) => Some(file),
-                Err(error) => {
-                    let _ = events_tx.try_send(Message::Log(bounded_text(&format!(
-                        "warning: cannot open {INSTALL_LOG_PATH}: {error}"
-                    ))));
-                    None
-                }
-            };
-            let log_file = Arc::new(Mutex::new(log_file));
-            let log = make_log(events_tx.clone(), log_file.clone());
-
+            tracing::trace!(target: "puu_installer::installation", "installation worker started");
+            let log = make_log(events_tx.clone());
             let progress: ProgressCb = {
                 let tx = events_tx.clone();
                 Box::new(move |step_index: usize, fraction: f64| {
@@ -108,14 +86,12 @@ impl InstallTask {
                     });
                 })
             };
-
             let skipped: SkipCb = {
                 let tx = events_tx.clone();
                 Box::new(move |step_index: usize| {
                     let _ = tx.try_send(Message::InstallSkipped { step_index });
                 })
             };
-
             let mut runner = Runner {
                 ctx: pipeline_ctx,
                 log,
@@ -123,11 +99,8 @@ impl InstallTask {
                 skipped,
                 step_index: 0,
             };
-
-            let steps = pipeline::STEPS;
-
             let fail = |at: usize, error: anyhow::Error| {
-                let mut log = make_log(events_tx.clone(), log_file.clone());
+                let mut log = make_log(events_tx.clone());
                 pipeline::rollback(&mut log);
                 let _ = events_tx.send(Message::InstallFinished {
                     at: Some(at),
@@ -135,25 +108,22 @@ impl InstallTask {
                     error: Some(bounded_text(&format!("{error:#}"))),
                 });
             };
-
-            match runner.execute(steps, || cancel_rx.try_recv().is_ok()) {
+            match runner.execute(pipeline::STEPS, || cancel_rx.try_recv().is_ok()) {
                 Ok(true) => {
+                    tracing::trace!(target: "puu_installer::installation", "installation completed");
                     let _ = events_tx.send(Message::InstallFinished {
                         at: None,
                         elapsed: Some(started.elapsed()),
                         error: None,
                     });
                 }
-                Ok(false) => {
-                    fail(runner.step_index, anyhow::anyhow!("installation cancelled"));
-                }
-                Err(e) => {
-                    send_log(&events_tx, &log_file, &format!("error: {e:#}"));
-                    fail(runner.step_index, e);
+                Ok(false) => fail(runner.step_index, anyhow::anyhow!("installation cancelled")),
+                Err(error) => {
+                    send_log(&events_tx, &format!("error: {error:#}"));
+                    fail(runner.step_index, error);
                 }
             }
         });
-
         Self {
             events_rx,
             commit_rx,
@@ -176,18 +146,7 @@ impl InstallTask {
         let _ = cancel_tx.try_send(());
         drop(events_rx);
         drop(commit_rx);
-
-        let Some(thread) = thread else {
-            return Ok(());
-        };
-        join_worker(thread)
-    }
-
-    pub fn join(&mut self) -> Result<(), String> {
-        let Some(thread) = self.thread.take() else {
-            return Ok(());
-        };
-        join_worker(thread)
+        thread.map_or(Ok(()), join_worker)
     }
 }
 
@@ -204,32 +163,8 @@ fn join_worker(thread: std::thread::JoinHandle<()>) -> Result<(), String> {
     })
 }
 
-struct ConsoleLogLevelGuard {
-    original: Option<String>,
-}
-
-impl ConsoleLogLevelGuard {
-    fn quiet() -> Self {
-        let path = "/proc/sys/kernel/printk";
-        let original = std::fs::read_to_string(path).ok();
-        if original.is_some() {
-            let _ = std::fs::write(path, "1\n");
-        }
-        Self { original }
-    }
-}
-
-impl Drop for ConsoleLogLevelGuard {
-    fn drop(&mut self) {
-        if let Some(original) = &self.original {
-            let _ = std::fs::write("/proc/sys/kernel/printk", original);
-        }
-    }
-}
-
 pub struct Installer {
     pub ctx: Context,
-    pub(crate) render_tree: RefCell<RenderTree>,
     pub(crate) state: AppState,
 }
 
@@ -237,7 +172,6 @@ impl Installer {
     pub fn new(ctx: Context) -> Self {
         Self {
             ctx,
-            render_tree: RefCell::new(RenderTree::new()),
             state: AppState::default(),
         }
     }
@@ -247,12 +181,6 @@ impl Installer {
     }
 
     pub fn run(&mut self) -> Trap {
-        let _panic_hook = install_panic_hook();
-        let _console_log_level = ConsoleLogLevelGuard::quiet();
-        let mut terminal = Terminal::new(std::io::stdout());
-        if let Err(e) = terminal.activate() {
-            fatal_io(&e, "activate terminal");
-        }
-        crate::tui::runtime::run(self, &mut terminal)
+        self.run_iocraft()
     }
 }

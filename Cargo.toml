@@ -17,7 +17,7 @@ repository = "https://codeberg.org/puu/puu-installer"
 anyhow = "1"
 argh = "0.1"
 blkid = "1"
-crossterm = "0.28"
+crossterm = "0.29"
 duct = "1.1"
 efivar = "2"
 gptman = { version = "3", features = ["nix"] }
@@ -34,3 +34,7 @@ strum = { version = "0.26", features = ["derive"] }
 tar = "0.4"
 udev = "0.9"
 uuid = { version = "1", features = ["v4"] }
+iocraft = "0.8.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+smol = "2"

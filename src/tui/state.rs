@@ -5,7 +5,6 @@
 
 use std::time::Instant;
 
-use crate::tui::engine::NodeId;
 use crate::tui::message::{DriveInfo, FirmwareStatus};
 
 #[derive(Default)]
@@ -97,7 +96,6 @@ pub(crate) struct AppState {
     pub(crate) identity: Option<IdentityDraft>,
     pub(crate) timezone: TimezoneDraft,
     pub(crate) validation_error: Option<String>,
-    pub(crate) focused: Option<NodeId>,
     pub(crate) selection: SelectionState,
     pub(crate) scroll: ScrollState,
     pub(crate) drives: Vec<DriveInfo>,
@@ -114,7 +112,6 @@ impl Default for AppState {
             identity: None,
             timezone: TimezoneDraft::default(),
             validation_error: None,
-            focused: None,
             selection: SelectionState::default(),
             scroll: ScrollState::default(),
             drives: Vec::new(),
@@ -131,7 +128,6 @@ impl AppState {
         self.modal_stack.clear();
         self.validation_error = None;
         self.timezone = TimezoneDraft::default();
-        self.focused = None;
         self.selection = SelectionState::default();
         self.scroll = ScrollState::default();
         self.drives.clear();
