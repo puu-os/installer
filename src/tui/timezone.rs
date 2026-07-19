@@ -22,6 +22,7 @@ const PAN_SNAP: f64 = 0.02;
 const PAN_KEY_STEP: f64 = 10.0;
 const PAN_MAX_LEAD: f64 = 20.0;
 const MAX_FRAME_DT: f64 = 0.05;
+const VISIBLE_ZONE_ROWS: usize = 8;
 const MAP_W: usize = 720;
 const MAP_H: usize = 360;
 const ROW_BYTES: usize = MAP_W / 8;
@@ -33,6 +34,7 @@ const WORLD_MASK: &[u8] = include_bytes!("world_mask.bin");
 #[derive(Clone, Debug)]
 pub(crate) struct Zone {
     pub(crate) name: String,
+    search_name: String,
     lat: f64,
     lon: f64,
     has_coord: bool,
@@ -46,11 +48,13 @@ fn parse_zone_line(line: &str) -> Option<Zone> {
     let mut columns = line.split('\t');
     let _codes = columns.next()?;
     let coord = columns.next()?;
-    let name = columns.next()?;
+    let name = columns.next()?.to_string();
+    let search_name = name.to_ascii_lowercase();
     let coord =
         iso6709parse::parse_string_representation::<iso6709parse::ISO6709Coord>(coord).ok()?;
     Some(Zone {
-        name: name.to_string(),
+        name,
+        search_name,
         lat: coord.lat,
         lon: coord.lon,
         has_coord: true,
@@ -66,6 +70,7 @@ fn zones() -> &'static [Zone] {
             0,
             Zone {
                 name: "UTC".to_string(),
+                search_name: "utc".to_string(),
                 lat: 0.0,
                 lon: 0.0,
                 has_coord: false,
@@ -145,12 +150,14 @@ impl TzPick {
             .iter()
             .position(|&index| zones()[index].name == current)
             .unwrap_or(0);
-        Self {
+        let mut pick = Self {
             filtered,
             selected,
             top: 0,
             filter: String::new(),
-        }
+        };
+        pick.ensure_visible();
+        pick
     }
 
     fn selected(&self) -> Option<&'static Zone> {
@@ -165,9 +172,7 @@ impl TzPick {
         self.filtered = zones()
             .iter()
             .enumerate()
-            .filter(|(_, zone)| {
-                needle.is_empty() || zone.name.to_ascii_lowercase().contains(&needle)
-            })
+            .filter(|(_, zone)| needle.is_empty() || zone.search_name.contains(&needle))
             .map(|(index, _)| index)
             .collect();
         self.selected = retained
@@ -176,7 +181,18 @@ impl TzPick {
         if self.selected >= self.filtered.len() && !self.filtered.is_empty() {
             self.selected = self.filtered.len() - 1;
         }
-        self.top = self.top.min(self.selected);
+        self.ensure_visible();
+    }
+
+    fn ensure_visible(&mut self) {
+        if self.selected < self.top {
+            self.top = self.selected;
+        } else if self.selected >= self.top + VISIBLE_ZONE_ROWS {
+            self.top = self.selected + 1 - VISIBLE_ZONE_ROWS;
+        }
+        self.top = self
+            .top
+            .min(self.filtered.len().saturating_sub(VISIBLE_ZONE_ROWS));
     }
 
     fn move_by(&mut self, direction: isize) {
@@ -185,6 +201,7 @@ impl TzPick {
         }
         self.selected =
             (self.selected as isize + direction).rem_euclid(self.filtered.len() as isize) as usize;
+        self.ensure_visible();
     }
 }
 
@@ -263,6 +280,9 @@ pub(crate) fn update_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             pick.filter.clear();
             pick.refilter();
+            if let Some(zone) = pick.selected() {
+                view.follow(zone);
+            }
         }
         KeyCode::Char(ch)
             if ch.is_ascii_graphic() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -279,11 +299,15 @@ pub(crate) fn update_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
     Vec::new()
 }
 
-pub(crate) fn tick(state: &mut AppState, elapsed: Duration) {
+pub(crate) fn tick(state: &mut AppState, elapsed: Duration) -> bool {
     let mut view = reconstruct_view(state);
-    if view.tick(elapsed) {
-        state.timezone.map_center_lon_milli = (view.center_lon * 1000.0).round() as i32;
+    view.tick(elapsed);
+    let center_lon_milli = (view.center_lon * 1000.0).round() as i32;
+    if center_lon_milli == state.timezone.map_center_lon_milli {
+        return false;
     }
+    state.timezone.map_center_lon_milli = center_lon_milli;
+    true
 }
 
 pub(crate) fn visible_names(state: &AppState) -> Vec<String> {
@@ -291,7 +315,7 @@ pub(crate) fn visible_names(state: &AppState) -> Vec<String> {
     pick.filtered
         .iter()
         .skip(pick.top)
-        .take(8)
+        .take(VISIBLE_ZONE_ROWS)
         .enumerate()
         .map(|(row, &index)| {
             format!(
@@ -395,6 +419,7 @@ impl Component for WorldMap {
         let start_lon = wrap_lon(self.center_lon - VIEW_LON_SPAN / 2.0);
         let lon_step = VIEW_LON_SPAN / width as f64;
         let row_span = LAT_MAX - LAT_MIN;
+        let raster_width = (lon_step * LON_SCALE).round().max(1.0) as usize;
         let mut canvas = drawer.canvas();
         for y in 0..height {
             let sea = if y % 6 < 2 {
@@ -402,26 +427,38 @@ impl Component for WorldMap {
             } else {
                 Color::DarkBlue
             };
+            canvas.set_background_color(0, y as isize, width, 1, sea);
             let top_lat = LAT_MAX - y as f64 / height as f64 * row_span;
             let raster_y = ((90.0 - top_lat) * LAT_SCALE).round() as usize;
             let raster_rows = ((row_span / height as f64) * LAT_SCALE).round().max(1.0) as usize;
-            for x in 0..width {
-                let lon = wrap_lon(start_lon + (x as f64 + 0.5) * lon_step);
-                let raster_x = ((lon + 180.0) * LON_SCALE).round() as usize % MAP_W;
-                let raster_width = (lon_step * LON_SCALE).round().max(1.0) as usize;
-                let fraction = land_fraction(raster_y, raster_x, raster_width, raster_rows);
-                let (glyph, color) = if fraction > 0.7 {
-                    ('█', Color::Green)
-                } else if fraction > 0.15 {
-                    ('▓', Color::Cyan)
-                } else {
-                    (' ', Color::Grey)
+            let cells = (0..width)
+                .map(|x| {
+                    let lon = wrap_lon(start_lon + (x as f64 + 0.5) * lon_step);
+                    let raster_x = ((lon + 180.0) * LON_SCALE).round() as usize % MAP_W;
+                    let fraction = land_fraction(raster_y, raster_x, raster_width, raster_rows);
+                    if fraction > 0.7 {
+                        Some(('█', Color::Green))
+                    } else if fraction > 0.15 {
+                        Some(('▓', Color::Cyan))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut x = 0;
+            while x < width {
+                let Some((glyph, color)) = cells[x] else {
+                    x += 1;
+                    continue;
                 };
-                canvas.set_background_color(x as isize, y as isize, 1, 1, sea);
+                let start = x;
+                while x < width && cells[x] == Some((glyph, color)) {
+                    x += 1;
+                }
                 canvas.set_text(
-                    x as isize,
+                    start as isize,
                     y as isize,
-                    &glyph.to_string(),
+                    &glyph.to_string().repeat(x - start),
                     map_text_style(color, Weight::Normal),
                 );
             }
@@ -437,5 +474,39 @@ impl Component for WorldMap {
                 canvas.set_text(x, y, "X", map_text_style(Color::Black, Weight::Bold));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picker_keeps_selection_visible() {
+        let mut pick = TzPick::new("UTC");
+
+        for _ in 0..VISIBLE_ZONE_ROWS + 2 {
+            pick.move_by(1);
+        }
+
+        assert!(pick.selected >= pick.top);
+        assert!(pick.selected < pick.top + VISIBLE_ZONE_ROWS);
+
+        pick.selected = 0;
+        pick.top = 0;
+        pick.move_by(-1);
+        assert!(pick.selected >= pick.top);
+        assert!(pick.selected < pick.top + VISIBLE_ZONE_ROWS);
+    }
+
+    #[test]
+    fn tick_persists_final_snap() {
+        let mut state = AppState::default();
+        state.timezone.map_center_lon_milli = 0;
+        state.timezone.map_target_lon_milli = 10;
+
+        assert!(tick(&mut state, Duration::from_millis(100)));
+        assert_eq!(state.timezone.map_center_lon_milli, 10);
+        assert!(!tick(&mut state, Duration::from_millis(100)));
     }
 }

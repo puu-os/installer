@@ -3,7 +3,7 @@
 
 //! iocraft application runtime and state transitions.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
@@ -479,6 +479,7 @@ struct UiController {
     ctx: crate::engine::pipeline::Context,
     state: AppState,
     task: Option<InstallTask>,
+    drive_rx: Option<mpsc::Receiver<Message>>,
     trap: Option<Trap>,
     last_countdown: Instant,
     terminal_size: (u16, u16),
@@ -486,7 +487,16 @@ struct UiController {
 
 fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Message> {
     match effect {
-        Effect::RefreshDrives => Some(Message::DrivesRefreshed(drive_messages())),
+        Effect::RefreshDrives => {
+            if controller.drive_rx.is_none() {
+                let (tx, rx) = mpsc::sync_channel(1);
+                controller.drive_rx = Some(rx);
+                std::thread::spawn(move || {
+                    let _ = tx.send(Message::DrivesRefreshed(drive_messages()));
+                });
+            }
+            None
+        }
         Effect::DetectFirmware => {
             let status = firmware::detect_setup_mode();
             Some(Message::FirmwareReady {
@@ -614,60 +624,67 @@ fn prepare_state(controller: &mut UiController) {
     }
 }
 
-fn service(controller: &mut UiController) {
+fn service(controller: &mut UiController) -> bool {
     if controller.trap.is_some() {
-        return;
+        return false;
     }
+    let mut dirty = false;
     let mut messages = Vec::new();
+    let drive_message = controller
+        .drive_rx
+        .as_ref()
+        .and_then(|rx| match rx.try_recv() {
+            Ok(message) => Some(message),
+            Err(mpsc::TryRecvError::Disconnected) => Some(Message::DrivesRefreshed(Vec::new())),
+            Err(mpsc::TryRecvError::Empty) => None,
+        });
+    if let Some(message) = drive_message {
+        controller.drive_rx = None;
+        messages.push(message);
+    }
     if let Some(task) = controller.task.as_ref() {
         while let Ok(step_index) = task.commit_rx.try_recv() {
             if pipeline::STEPS
                 .get(step_index)
                 .is_some_and(|step| step.point_of_no_return)
+                && !controller.state.install.committed
             {
                 controller.state.install.committed = true;
+                dirty = true;
             }
         }
         while let Ok(message) = task.events_rx.try_recv() {
             messages.push(message);
         }
     }
+    if !messages.is_empty() {
+        dirty = true;
+    }
     for message in messages {
         dispatch(controller, message);
     }
-    dispatch(controller, Message::Tick);
-    timezone::tick(&mut controller.state, TICK_INTERVAL);
-    if controller.last_countdown.elapsed() >= Duration::from_secs(1) {
-        dispatch(controller, Message::CountdownTick);
-        controller.last_countdown = Instant::now();
+    if controller.state.route == Route::Timezone {
+        dirty |= timezone::tick(&mut controller.state, TICK_INTERVAL);
     }
+    if controller.last_countdown.elapsed() >= Duration::from_secs(1) {
+        controller.last_countdown = Instant::now();
+        if controller.state.route == Route::Reboot && controller.state.reboot.automatic {
+            dispatch(controller, Message::CountdownTick);
+            dirty = true;
+        }
+    }
+    dirty
 }
 
-fn modal_text(state: &AppState) -> Option<String> {
-    let modal = state.active_modal()?;
-    let (title, body) = match modal {
-        Modal::WipeConfirmation => (
-            "Wipe target disk?",
-            "All data on this disk will be destroyed.",
-        ),
-        Modal::RebootConfirmation => ("Reboot now?", "The machine will reboot immediately."),
-        Modal::Failure => (
-            "Installation failed",
-            state.install.failure.as_deref().unwrap_or("Unknown error"),
-        ),
-        Modal::Cancellation => (
-            "Cancel install?",
-            "The installer will stop and clean up mounts.",
-        ),
-        Modal::None => return None,
-    };
-    let selected = if state.selection.modal == 0 {
-        "[ No ]   Yes"
-    } else {
-        "No   [ Yes ]"
-    };
-    Some(format!("\n{title}\n{body}\n{selected}"))
-}
+const FG: Color = Color::AnsiValue(15);
+const BG: Color = Color::AnsiValue(0);
+const OK: Color = Color::AnsiValue(10);
+const WARN: Color = Color::AnsiValue(11);
+const ACCENT: Color = Color::AnsiValue(6);
+const SELECT: Color = Color::AnsiValue(13);
+const ON_SELECT: Color = Color::AnsiValue(0);
+const TITLE_BG: Color = Color::AnsiValue(4);
+const PANEL: Color = Color::AnsiValue(8);
 
 fn overall_install_progress(state: &AppState) -> u16 {
     if state.install.complete {
@@ -693,33 +710,400 @@ fn overall_install_progress(state: &AppState) -> u16 {
     u16::try_from(progressed_weight * 100 / total_weight.max(1)).unwrap_or(100)
 }
 
-fn screen_text(controller: &UiController) -> String {
-    let state = &controller.state;
-    let body = match state.route {
-        Route::Welcome => ["Install", "Shell", "Reboot"].iter().enumerate().map(|(i, label)| format!("{} {label}", if i == state.selection.welcome { ">" } else { " " })).collect::<Vec<_>>().join("\n"),
-        Route::Target => state.drives.iter().enumerate().map(|(i, drive)| format!("{} {}  {}  {}  {}", if state.selection.target == Some(i) { ">" } else { " " }, drive.path, drive.size, drive.transport, if drive.busy_reasons.is_empty() { "available" } else { "BUSY" })).collect::<Vec<_>>().join("\n"),
-        Route::Identity => state.identity.as_ref().map_or_else(|| "Loading identity...".to_string(), |draft| {
-            let password = if draft.reveal_password { draft.password.clone() } else { "*".repeat(draft.password.len()) };
-            let repeated = if draft.reveal_password { draft.repeated_password.clone() } else { "*".repeat(draft.repeated_password.len()) };
-            format!("{} Language: {}\n{} Hostname: {}\n{} Username: {}\n{} Password: {}\n{} Repeat: {}\n{} Shell: {}{}", if draft.field_index == 0 { ">" } else { " " }, LANGUAGES[draft.language_index].0, if draft.field_index == 1 { ">" } else { " " }, draft.hostname, if draft.field_index == 2 { ">" } else { " " }, draft.username, if draft.field_index == 3 { ">" } else { " " }, password, if draft.field_index == 4 { ">" } else { " " }, repeated, if draft.field_index == 5 { ">" } else { " " }, if draft.shell_index == 0 { "bash" } else { "zsh" }, state.validation_error.as_ref().map_or_else(String::new, |error| format!("\nError: {error}")))
-        }),
-        Route::Timezone => format!("Filter: {}\n{}", state.timezone.filter, timezone::visible_names(state).join("\n")),
-        Route::SecureBoot => format!("Secure Boot setup mode: {:?}\n{} [ Back ]\n{} [ Continue ]\n{} [ Reboot ]", state.firmware.as_ref().and_then(|status| status.setup_mode), if state.selection.secure_boot == 0 { ">" } else { " " }, if state.selection.secure_boot == 1 { ">" } else { " " }, if state.selection.secure_boot == 2 { ">" } else { " " }),
-        Route::Review => format!("Target disk: {}\nHostname: {}\nTimezone: {}\n\n{} [ Back ]\n{} [ Start install ]", controller.ctx.drive_label, controller.ctx.config.identity.hostname, controller.ctx.config.identity.timezone, if state.selection.review == 0 { ">" } else { " " }, if state.selection.review == 1 { ">" } else { " " }),
-        Route::Install => {
-            let step = state.install.current_step.and_then(|index| pipeline::STEPS.get(index)).map_or("Starting install", |step| step.title);
-            let status = if state.install.complete { "Install complete" } else if state.install.failed { "Install failed" } else { step };
-            let logs = state.install.logs.iter().rev().take(12).collect::<Vec<_>>().into_iter().rev().map(String::as_str).collect::<Vec<_>>().join("\n");
-            format!(
-                "{status}\nOverall progress: {}%\nStep progress: {}%\n\nLog\n{logs}",
-                overall_install_progress(state),
-                state.install.step_fraction
-            )
-        }
-        Route::Reboot => format!("Target: {}\nAuto-reboot in {}s\n\n{} [ Shell ]\n{} [ Reboot ]", controller.ctx.drive_label, state.reboot.remaining_seconds.unwrap_or(0), if state.selection.reboot == 0 { ">" } else { " " }, if state.selection.reboot == 1 { ">" } else { " " }),
+fn selected_row(content: String, selected: bool) -> AnyElement<'static> {
+    let (foreground, background, weight) = if selected {
+        (ON_SELECT, SELECT, Weight::Bold)
+    } else {
+        (FG, BG, Weight::Normal)
     };
+    element! {
+        View(width: 100pct, height: 1, padding_left: 1, background_color: background) {
+            Text(content: content, color: foreground, weight: weight, wrap: TextWrap::NoWrap)
+        }
+    }
+    .into_any()
+}
+
+fn text_row(content: String, color: Color) -> AnyElement<'static> {
+    element! {
+        View(width: 100pct, min_height: 1) {
+            Text(content: content, color: color)
+        }
+    }
+    .into_any()
+}
+
+fn panel(label: &str, rows: Vec<AnyElement<'static>>) -> AnyElement<'static> {
+    element! {
+        View(width: 100pct, height: 100pct, flex_direction: FlexDirection::Column, row_gap: 1, overflow: Overflow::Hidden) {
+            Text(content: format!("◆ {label}"), color: ACCENT, weight: Weight::Bold)
+            #(rows)
+        }
+    }
+    .into_any()
+}
+
+fn progress_row(label: &str, percent: u16, terminal_width: u16) -> AnyElement<'static> {
+    let bar_width = usize::from(terminal_width.saturating_sub(24)).clamp(8, 40);
+    let filled = usize::from(percent.min(100)) * bar_width / 100;
+    let bar = format!(
+        "{label:<8} [{}{}] {percent:3}%",
+        "#".repeat(filled),
+        "-".repeat(bar_width - filled)
+    );
+    text_row(bar, ACCENT)
+}
+
+fn welcome_content(state: &AppState) -> AnyElement<'static> {
+    let rows = ["Install system", "Open shell", "Reboot"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| selected_row(label.to_string(), state.selection.welcome == index))
+        .collect();
+    panel("Actions", rows)
+}
+
+fn target_content(controller: &UiController) -> AnyElement<'static> {
+    let state = &controller.state;
+    let rows = if controller.drive_rx.is_some() && state.drives.is_empty() {
+        vec![text_row("Scanning for target disks…".to_string(), ACCENT)]
+    } else if state.drives.is_empty() {
+        vec![text_row("No target disks detected".to_string(), WARN)]
+    } else {
+        state
+            .drives
+            .iter()
+            .enumerate()
+            .map(|(index, drive)| {
+                let status = if drive.busy_reasons.is_empty() {
+                    "available"
+                } else {
+                    "BUSY"
+                };
+                selected_row(
+                    format!(
+                        "{:<18} {:<10} {:<8} {:<20} {status}",
+                        drive.path,
+                        drive.size,
+                        drive.transport,
+                        drive.model.chars().take(20).collect::<String>()
+                    ),
+                    state.selection.target == Some(index),
+                )
+            })
+            .collect()
+    };
+    panel("Target disks", rows)
+}
+
+fn identity_content(state: &AppState) -> AnyElement<'static> {
+    let Some(draft) = state.identity.as_ref() else {
+        return panel(
+            "User account",
+            vec![text_row("Loading identity…".to_string(), FG)],
+        );
+    };
+    let password = if draft.reveal_password {
+        draft.password.clone()
+    } else {
+        "*".repeat(draft.password.chars().count())
+    };
+    let repeated = if draft.reveal_password {
+        draft.repeated_password.clone()
+    } else {
+        "*".repeat(draft.repeated_password.chars().count())
+    };
+    let language = LANGUAGES
+        .get(draft.language_index)
+        .map_or("?", |(label, _)| *label);
+    let shell = if draft.shell_index == 0 {
+        "bash"
+    } else {
+        "zsh"
+    };
+    let values = [
+        format!("Language       {language}"),
+        format!("Hostname       {}", draft.hostname),
+        format!("Username       {}", draft.username),
+        format!("Password       {password}"),
+        format!("Repeat         {repeated}"),
+        format!("Shell          {shell}"),
+    ];
+    let mut rows = values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| selected_row(value, draft.field_index == index))
+        .collect::<Vec<_>>();
+    if draft.reveal_password {
+        rows.push(text_row("Password reveal is on".to_string(), WARN));
+    }
+    if let Some(error) = state.validation_error.as_ref() {
+        rows.push(text_row(format!("Error: {error}"), Color::Red));
+    }
+    panel("User account", rows)
+}
+
+fn timezone_content(state: &AppState) -> AnyElement<'static> {
+    let zone_rows = timezone::visible_names(state)
+        .into_iter()
+        .map(|name| {
+            let selected = name.starts_with('>');
+            selected_row(name.trim_start_matches(['>', ' ']).to_string(), selected)
+        })
+        .collect::<Vec<_>>();
+    let filter = if state.timezone.filter.is_empty() {
+        "Type to filter…".to_string()
+    } else {
+        state.timezone.filter.clone()
+    };
+    let selected_zone = timezone::selected_zone(state);
+    element! {
+        View(width: 100pct, height: 100pct, flex_direction: FlexDirection::Row, column_gap: 1) {
+            View(width: 62pct, height: 100pct, border_style: BorderStyle::Single, border_color: ACCENT) {
+                WorldMap(
+                    center_lon_milli: state.timezone.map_center_lon_milli,
+                    selected_zone,
+                    width: 100pct,
+                    height: 100pct,
+                )
+            }
+            View(width: 38pct, height: 100pct, flex_direction: FlexDirection::Column, row_gap: 1, overflow: Overflow::Hidden) {
+                Text(content: "◆ Time zones", color: ACCENT, weight: Weight::Bold)
+                View(width: 100pct, height: 3, padding: 1, border_style: BorderStyle::Single, border_color: PANEL) {
+                    Text(content: filter, color: FG, wrap: TextWrap::NoWrap)
+                }
+                #(zone_rows)
+            }
+        }
+    }
+    .into_any()
+}
+
+fn secure_boot_content(controller: &UiController) -> AnyElement<'static> {
+    let state = &controller.state;
+    let setup_mode = state.firmware.as_ref().and_then(|status| status.setup_mode);
+    let mut rows = Vec::new();
+    if setup_mode == Some(true) {
+        rows.push(text_row(
+            format!(
+                "{} can enroll its own Secure Boot keys.",
+                controller.ctx.config.branding.name
+            ),
+            FG,
+        ));
+        rows.push(text_row(
+            "This writes firmware Secure Boot variables.".to_string(),
+            WARN,
+        ));
+        rows.push(selected_row(
+            "[ Back ]".to_string(),
+            state.selection.secure_boot == 0,
+        ));
+        rows.push(selected_row(
+            "[ Enroll keys ]".to_string(),
+            state.selection.secure_boot == 1,
+        ));
+    } else {
+        let message = if setup_mode == Some(false) {
+            "Setup Mode is off; keys cannot be enrolled."
+        } else {
+            "Firmware Setup Mode could not be detected."
+        };
+        rows.push(text_row(message.to_string(), WARN));
+        if let Some(status) = state
+            .firmware
+            .as_ref()
+            .filter(|status| !status.reason.is_empty())
+        {
+            rows.push(text_row(status.reason.clone(), WARN));
+        }
+        for (index, label) in ["[ Back ]", "[ Continue without Secure Boot ]", "[ Reboot ]"]
+            .into_iter()
+            .enumerate()
+        {
+            rows.push(selected_row(
+                label.to_string(),
+                state.selection.secure_boot == index,
+            ));
+        }
+    }
+    panel("Secure Boot configuration", rows)
+}
+
+fn review_content(controller: &UiController) -> AnyElement<'static> {
+    let state = &controller.state;
+    let rows = vec![
+        text_row(format!("Target disk  {}", controller.ctx.drive_label), FG),
+        text_row(
+            format!("Hostname     {}", controller.ctx.config.identity.hostname),
+            FG,
+        ),
+        text_row(
+            format!("Timezone     {}", controller.ctx.config.identity.timezone),
+            FG,
+        ),
+        selected_row("[ Back ]".to_string(), state.selection.review == 0),
+        selected_row(
+            "[ Start installation ]".to_string(),
+            state.selection.review == 1,
+        ),
+    ];
+    panel("Installation summary", rows)
+}
+
+fn install_content(controller: &UiController) -> AnyElement<'static> {
+    let state = &controller.state;
+    let step = state
+        .install
+        .current_step
+        .and_then(|index| pipeline::STEPS.get(index))
+        .map_or("Starting installation", |step| step.title);
+    let (status, color) = if state.install.complete {
+        ("Installation complete", OK)
+    } else if state.install.failed {
+        ("Installation failed", Color::Red)
+    } else {
+        (step, FG)
+    };
+    let visible_lines = usize::from(controller.terminal_size.1.saturating_sub(13)).max(3);
+    let end = state
+        .install
+        .logs
+        .len()
+        .saturating_sub(state.scroll.install_log.min(state.install.logs.len()));
+    let start = end.saturating_sub(visible_lines);
+    let logs = state
+        .install
+        .logs
+        .iter()
+        .skip(start)
+        .take(end - start)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    element! {
+        View(width: 100pct, height: 100pct, flex_direction: FlexDirection::Column, row_gap: 1, overflow: Overflow::Hidden) {
+            Text(content: status, color: color, weight: Weight::Bold)
+            #(progress_row("Overall", overall_install_progress(state), controller.terminal_size.0))
+            #(progress_row("Step", state.install.step_fraction, controller.terminal_size.0))
+            View(width: 100pct, flex_grow: 1.0_f32, padding: 1, border_style: BorderStyle::Single, border_color: PANEL, overflow: Overflow::Hidden) {
+                Text(content: logs, color: FG)
+            }
+        }
+    }
+    .into_any()
+}
+
+fn reboot_content(controller: &UiController) -> AnyElement<'static> {
+    let state = &controller.state;
+    panel(
+        "Installation complete",
+        vec![
+            text_row(format!("Target  {}", controller.ctx.drive_label), FG),
+            text_row(
+                format!(
+                    "Automatic reboot in {} seconds",
+                    state.reboot.remaining_seconds.unwrap_or(0)
+                ),
+                ACCENT,
+            ),
+            selected_row("[ Open shell ]".to_string(), state.selection.reboot == 0),
+            selected_row("[ Reboot now ]".to_string(), state.selection.reboot == 1),
+        ],
+    )
+}
+
+fn modal_element(state: &AppState, width: u16, height: u16) -> Option<AnyElement<'static>> {
+    let modal = state.active_modal()?;
+    let (title, body) = match modal {
+        Modal::WipeConfirmation => (
+            "Wipe target disk?".to_string(),
+            "All data on this disk will be destroyed.".to_string(),
+        ),
+        Modal::RebootConfirmation => (
+            "Reboot now?".to_string(),
+            "The machine will reboot immediately.".to_string(),
+        ),
+        Modal::Failure => (
+            "Installation failed".to_string(),
+            state
+                .install
+                .failure
+                .clone()
+                .unwrap_or_else(|| "Unknown error".to_string()),
+        ),
+        Modal::Cancellation => (
+            "Cancel installation?".to_string(),
+            "The installer will stop and clean up mounts.".to_string(),
+        ),
+        Modal::None => return None,
+    };
+    let max_dialog_width = width.saturating_sub(2).max(1);
+    let dialog_width = width
+        .saturating_mul(2)
+        .saturating_div(3)
+        .max(36)
+        .min(max_dialog_width);
+    let body_width = dialog_width.saturating_sub(4).max(1);
+    let body_lines = u16::try_from(body.chars().count())
+        .unwrap_or(u16::MAX)
+        .div_ceil(body_width);
+    let dialog_height = body_lines
+        .saturating_add(7)
+        .max(9)
+        .min(height.saturating_sub(2).max(1));
+    let left = width.saturating_sub(dialog_width) / 2;
+    let top = height.saturating_sub(dialog_height) / 2;
+    let buttons = if state.selection.modal == 0 {
+        "[ No ]     Yes"
+    } else {
+        "No     [ Yes ]"
+    };
+    Some(
+        element! {
+            View(
+                position: Position::Absolute,
+                left,
+                top,
+                width: dialog_width,
+                height: dialog_height,
+                padding: 1,
+                flex_direction: FlexDirection::Column,
+                row_gap: 1,
+                background_color: BG,
+                border_style: BorderStyle::Double,
+                border_color: SELECT,
+                overflow: Overflow::Hidden,
+            ) {
+                Text(content: title, color: FG, weight: Weight::Bold, align: TextAlign::Center)
+                Text(content: body, color: WARN, align: TextAlign::Center)
+                Text(content: buttons, color: SELECT, weight: Weight::Bold, align: TextAlign::Center)
+            }
+        }
+        .into_any(),
+    )
+}
+
+struct Screen {
+    title: String,
+    content: AnyElement<'static>,
+    footer: &'static str,
+    modal: Option<AnyElement<'static>>,
+}
+
+fn screen(controller: &UiController) -> Screen {
+    let state = &controller.state;
     let title = match state.route {
-        Route::Welcome => format!("{} Installer", controller.ctx.config.branding.name),
+        Route::Welcome => {
+            if controller.ctx.image_version.is_empty() {
+                format!("{} Installer", controller.ctx.config.branding.name)
+            } else {
+                format!(
+                    "{} {} Installer",
+                    controller.ctx.config.branding.name, controller.ctx.image_version
+                )
+            }
+        }
         Route::Target => "Select Target Drive".to_string(),
         Route::Identity => "System Identity".to_string(),
         Route::Timezone => "Select Time Zone".to_string(),
@@ -728,10 +1112,39 @@ fn screen_text(controller: &UiController) -> String {
         Route::Install => format!("Installing {}", controller.ctx.config.branding.name),
         Route::Reboot => "Install Complete".to_string(),
     };
-    format!(
-        "{title}\n\n{body}{}\n\nArrows/Tab select, Enter activates, Esc goes back",
-        modal_text(state).unwrap_or_default()
-    )
+    let content = match state.route {
+        Route::Welcome => welcome_content(state),
+        Route::Target => target_content(controller),
+        Route::Identity => identity_content(state),
+        Route::Timezone => timezone_content(state),
+        Route::SecureBoot => secure_boot_content(controller),
+        Route::Review => review_content(controller),
+        Route::Install => install_content(controller),
+        Route::Reboot => reboot_content(controller),
+    };
+    let footer = match state.route {
+        Route::Welcome => " ↑↓ select · Enter activate · Esc quit",
+        Route::Target => " ↑↓ select · Enter continue · Ctrl-R rescan · Esc back",
+        Route::Identity => " ↑↓/Tab field · ←→ choose · Enter continue · Esc back",
+        Route::Timezone => " Type filter · ↑↓ choose · ←→ pan · Enter continue · Esc back",
+        Route::SecureBoot | Route::Review | Route::Reboot => {
+            " ↑↓/Tab select · Enter activate · Esc back"
+        }
+        Route::Install if state.install.complete => " Enter continue",
+        Route::Install if state.install.failed => " Enter back to menu",
+        Route::Install if state.install.committed => " PgUp/PgDn scroll",
+        Route::Install => " Esc cancel · PgUp/PgDn scroll",
+    };
+    Screen {
+        title,
+        content,
+        footer,
+        modal: modal_element(
+            state,
+            controller.terminal_size.0,
+            controller.terminal_size.1,
+        ),
+    }
 }
 
 #[derive(Props)]
@@ -746,6 +1159,7 @@ impl Default for InstallerTuiProps {
                 ctx: crate::engine::pipeline::Context::default(),
                 state: AppState::default(),
                 task: None,
+                drive_rx: None,
                 trap: None,
                 last_countdown: Instant::now(),
                 terminal_size: terminal_size(),
@@ -794,8 +1208,9 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
                 if controller.trap.is_some() {
                     break;
                 }
-                service(&mut controller);
-                revision.set(revision.get().wrapping_add(1));
+                if service(&mut controller) {
+                    revision.set(revision.get().wrapping_add(1));
+                }
                 if controller.trap.is_some() {
                     break;
                 }
@@ -803,53 +1218,59 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
         }
     });
 
-    let (
-        text,
-        timezone,
-        center_lon_milli,
-        selected_zone,
-        terminal_width,
-        terminal_height,
-        should_exit,
-    ) = props.controller.lock().map_or_else(
-        |_| {
-            (
-                "Installer state unavailable".to_string(),
-                false,
-                0,
-                None,
-                80,
-                24,
-                true,
-            )
-        },
-        |controller| {
-            (
-                screen_text(&controller),
-                controller.state.route == Route::Timezone,
-                controller.state.timezone.map_center_lon_milli,
-                timezone::selected_zone(&controller.state),
-                controller.terminal_size.0,
-                controller.terminal_size.1,
-                controller.trap.is_some(),
-            )
-        },
-    );
+    let (screen_view, terminal_width, terminal_height, should_exit) =
+        props.controller.lock().map_or_else(
+            |_| {
+                (
+                    Screen {
+                        title: "Installer unavailable".to_string(),
+                        content: text_row("Installer state unavailable".to_string(), Color::Red),
+                        footer: "",
+                        modal: None,
+                    },
+                    80,
+                    24,
+                    true,
+                )
+            },
+            |controller| {
+                let terminal_width = controller.terminal_size.0;
+                let terminal_height = controller.terminal_size.1;
+                (
+                    screen(&controller),
+                    terminal_width,
+                    terminal_height,
+                    controller.trap.is_some(),
+                )
+            },
+        );
     if should_exit {
         system_context.exit();
     }
+    let Screen {
+        title,
+        content,
+        footer,
+        modal,
+    } = screen_view;
     element! {
-        View(width: terminal_width, height: terminal_height, flex_direction: FlexDirection::Column, padding: 1, background_color: Color::Black) {
-            #(if timezone {
-                element! {
-                    View(height: 55pct, border_style: BorderStyle::Single, border_color: Color::Blue) {
-                        WorldMap(center_lon_milli, selected_zone, width: 100pct, height: 100pct)
-                    }
-                }
-            } else {
-                element! { View }
-            })
-            Text(content: text, color: Color::White)
+        View(
+            width: terminal_width,
+            height: terminal_height,
+            position: Position::Relative,
+            flex_direction: FlexDirection::Column,
+            background_color: BG,
+        ) {
+            View(width: 100pct, height: 1, padding_left: 1, background_color: TITLE_BG) {
+                Text(content: title, color: FG, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            }
+            View(width: 100pct, flex_grow: 1.0_f32, padding: 1, overflow: Overflow::Hidden) {
+                #(content)
+            }
+            View(width: 100pct, height: 1, background_color: PANEL) {
+                Text(content: footer, color: ACCENT, wrap: TextWrap::NoWrap)
+            }
+            #(modal)
         }
     }
 }
@@ -860,6 +1281,7 @@ impl Installer {
             ctx: std::mem::take(&mut self.ctx),
             state: std::mem::take(&mut self.state),
             task: None,
+            drive_rx: None,
             trap: None,
             last_countdown: Instant::now(),
             terminal_size: terminal_size(),
