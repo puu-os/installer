@@ -471,12 +471,17 @@ fn drive_messages() -> Vec<DriveInfo> {
     )
 }
 
+fn terminal_size() -> (u16, u16) {
+    crossterm::terminal::size().unwrap_or((80, 24))
+}
+
 struct UiController {
     ctx: crate::engine::pipeline::Context,
     state: AppState,
     task: Option<InstallTask>,
     trap: Option<Trap>,
     last_countdown: Instant,
+    terminal_size: (u16, u16),
 }
 
 fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Message> {
@@ -743,6 +748,7 @@ impl Default for InstallerTuiProps {
                 task: None,
                 trap: None,
                 last_countdown: Instant::now(),
+                terminal_size: terminal_size(),
             })),
         }
     }
@@ -754,21 +760,30 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
     let mut system_context = hooks.use_context_mut::<SystemContext>();
     let controller = props.controller.clone();
     hooks.use_terminal_events(move |event| {
-        if let TerminalEvent::Key(key) = event
-            && key.kind != KeyEventKind::Release
-            && let Ok(mut controller) = controller.lock()
-            && controller.trap.is_none()
-        {
-            dispatch(
-                &mut controller,
-                Message::Key(KeyEvent {
-                    code: key.code,
-                    modifiers: key.modifiers,
-                    kind: key.kind,
-                    state: KeyEventState::NONE,
-                }),
-            );
-            revision.set(revision.get().wrapping_add(1));
+        let Ok(mut controller) = controller.lock() else {
+            return;
+        };
+        if controller.trap.is_some() {
+            return;
+        }
+        match event {
+            TerminalEvent::Key(key) if key.kind != KeyEventKind::Release => {
+                dispatch(
+                    &mut controller,
+                    Message::Key(KeyEvent {
+                        code: key.code,
+                        modifiers: key.modifiers,
+                        kind: key.kind,
+                        state: KeyEventState::NONE,
+                    }),
+                );
+                revision.set(revision.get().wrapping_add(1));
+            }
+            TerminalEvent::Resize(width, height) => {
+                controller.terminal_size = (width, height);
+                revision.set(revision.get().wrapping_add(1));
+            }
+            _ => {}
         }
     });
     let controller = props.controller.clone();
@@ -788,32 +803,43 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
         }
     });
 
-    let (text, timezone, center_lon_milli, selected_zone, should_exit) =
-        props.controller.lock().map_or_else(
-            |_| {
-                (
-                    "Installer state unavailable".to_string(),
-                    false,
-                    0,
-                    None,
-                    true,
-                )
-            },
-            |controller| {
-                (
-                    screen_text(&controller),
-                    controller.state.route == Route::Timezone,
-                    controller.state.timezone.map_center_lon_milli,
-                    timezone::selected_zone(&controller.state),
-                    controller.trap.is_some(),
-                )
-            },
-        );
+    let (
+        text,
+        timezone,
+        center_lon_milli,
+        selected_zone,
+        terminal_width,
+        terminal_height,
+        should_exit,
+    ) = props.controller.lock().map_or_else(
+        |_| {
+            (
+                "Installer state unavailable".to_string(),
+                false,
+                0,
+                None,
+                80,
+                24,
+                true,
+            )
+        },
+        |controller| {
+            (
+                screen_text(&controller),
+                controller.state.route == Route::Timezone,
+                controller.state.timezone.map_center_lon_milli,
+                timezone::selected_zone(&controller.state),
+                controller.terminal_size.0,
+                controller.terminal_size.1,
+                controller.trap.is_some(),
+            )
+        },
+    );
     if should_exit {
         system_context.exit();
     }
     element! {
-        View(width: 100pct, height: 100pct, flex_direction: FlexDirection::Column, padding: 1, background_color: Color::Black) {
+        View(width: terminal_width, height: terminal_height, flex_direction: FlexDirection::Column, padding: 1, background_color: Color::Black) {
             #(if timezone {
                 element! {
                     View(height: 55pct, border_style: BorderStyle::Single, border_color: Color::Blue) {
@@ -836,6 +862,7 @@ impl Installer {
             task: None,
             trap: None,
             last_countdown: Instant::now(),
+            terminal_size: terminal_size(),
         }));
         if let Ok(mut state) = controller.lock() {
             prepare_state(&mut state);
