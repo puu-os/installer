@@ -8,7 +8,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::app::Installer;
 use crate::tui::message::Effect;
-use crate::tui::render::{Color, CursorStyle, Frame, Modifier, Paragraph, Rect, Style};
+use crate::tui::render::{
+    Color, CursorStyle, Frame, Modifier, Paragraph, Rect, Style, rendered_width,
+};
 use crate::tui::runtime::{ACCENT, ERR, LAND, ON_SELECT, SELECT};
 use crate::tui::state::{AppState, Route};
 
@@ -598,7 +600,8 @@ fn draw_timezone(f: &mut Frame, pick: &TzPick, view: &MapView) {
     // of the underscore that used to fake it, and use a blinking underline so
     // the cursor is visible against the dark background.
     f.set_cursor_style(CursorStyle::BlinkingUnderline);
-    f.set_cursor_position((9 + pick.filter.len() as u16, layout.filter_y));
+    let cursor_x = 9u16.saturating_add(rendered_width(&pick.filter));
+    f.set_cursor_position((cursor_x.min(area.width.saturating_sub(1)), layout.filter_y));
 
     if pick.filtered.is_empty() {
         f.render_widget(

@@ -494,6 +494,13 @@ fn render_line(frame: &mut Frame, x: u16, y: u16, width: u16, line: Line, base_s
     }
 }
 
+/// Width in cells after applying the renderer's character folding rules.
+pub(crate) fn rendered_width(text: &str) -> u16 {
+    text.chars()
+        .map(|ch| expand_char(ch).map_or(1, |expanded| expanded.len() as u16))
+        .sum()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ColorMode {
     Mono,
@@ -735,17 +742,21 @@ impl<W: Write> Terminal<W> {
 }
 
 fn restore_terminal<W: Write>(out: &mut W) -> io::Result<()> {
-    // Reset the cursor shape to the terminal's default before leaving, so a
-    // steady underline set for a text field does not outlive the installer.
-    out.write_all(CURSOR_DEFAULT)?;
-    execute!(
+    // Continue cleanup after errors so the terminal is restored as completely as possible.
+    let mut result = out.write_all(CURSOR_DEFAULT).err();
+    if let Err(error) = execute!(
         out,
         ResetColor,
         SetAttribute(Attribute::Reset),
         Show,
         EnableLineWrap,
         LeaveAlternateScreen
-    )
+    ) && result.is_none()
+    {
+        result = Some(error);
+    }
+
+    result.map_or(Ok(()), Err)
 }
 
 impl<W: Write> Drop for Terminal<W> {
@@ -946,4 +957,52 @@ pub(crate) fn poll_input(timeout: Duration) -> Option<Input> {
         return None;
     }
     read_input()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+
+    use super::{CURSOR_DEFAULT, rendered_width, restore_terminal};
+
+    struct FailingWriter {
+        writes: usize,
+        output: Vec<u8>,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            if self.writes == 1 {
+                return Err(io::Error::other("write failed"));
+            }
+            self.output.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn rendered_width_matches_character_folding() {
+        assert_eq!(rendered_width("UTC"), 3);
+        assert_eq!(rendered_width("\u{2192}"), 2);
+        assert_eq!(rendered_width("\u{0301}\u{4e16}"), 2);
+    }
+
+    #[test]
+    fn restore_terminal_continues_after_cursor_reset_failure() {
+        let mut out = FailingWriter {
+            writes: 0,
+            output: Vec::new(),
+        };
+
+        assert!(restore_terminal(&mut out).is_err());
+        assert!(!out.output.starts_with(CURSOR_DEFAULT));
+        assert!(out.output.windows(6).any(|bytes| bytes == b"\x1b[?25h"));
+        assert!(out.output.windows(5).any(|bytes| bytes == b"\x1b[?7h"));
+        assert!(out.output.windows(8).any(|bytes| bytes == b"\x1b[?1049l"));
+    }
 }
