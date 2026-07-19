@@ -233,6 +233,9 @@ impl Runner {
             }
             self.step_index = i;
             self.progress(0.0);
+            if !committed && is_cancelled() {
+                return Ok(false);
+            }
             if step.point_of_no_return {
                 self.log("entering point of no return");
                 committed = true;

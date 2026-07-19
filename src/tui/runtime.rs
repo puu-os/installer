@@ -193,8 +193,10 @@ fn update_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
     }
 
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        if state.route == Route::Install && !state.install.committed && !state.install.complete {
-            state.push_modal(Modal::Cancellation);
+        if state.route == Route::Install && !state.install.complete && !state.install.failed {
+            if !state.install.committed {
+                state.push_modal(Modal::Cancellation);
+            }
             return Vec::new();
         }
         return vec![Effect::Quit];
@@ -1526,6 +1528,15 @@ pub(crate) fn run(installer: &mut Installer, terminal: &mut Terminal) -> Trap {
     let mut terminal_too_small = screen_too_small(size.width, size.height);
 
     loop {
+        if let Some(active_task) = task.as_ref()
+            && let Ok(step_index) = active_task.commit_rx.try_recv()
+            && pipeline::STEPS
+                .get(step_index)
+                .is_some_and(|step| step.point_of_no_return)
+        {
+            installer.state.install.committed = true;
+            scheduler.request_render();
+        }
         let mut worker_disconnected = false;
         for _ in 0..MAX_EVENTS_PER_TURN {
             let Some(active_task) = task.as_ref() else {
@@ -1584,9 +1595,8 @@ pub(crate) fn run(installer: &mut Installer, terminal: &mut Terminal) -> Trap {
                     enqueue_bounded(&mut pending, message);
                 }
                 if let Some(trap) = trap {
-                    if let Some(task) = task.as_mut() {
-                        task.cancel();
-                        let _ = task.join();
+                    if let Some(task) = task.take() {
+                        let _ = task.cancel_and_join();
                     }
                     return trap;
                 }

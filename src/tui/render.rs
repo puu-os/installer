@@ -2,6 +2,9 @@
 // Copyright (C) Opinsys Oy 2026
 
 use std::io::{self, Stdout, Write};
+use std::panic;
+use std::sync::{Mutex, Once};
+use std::thread::{self, ThreadId};
 use std::time::Duration;
 
 use crossterm::{
@@ -75,6 +78,9 @@ const CURSOR_STEADY_UNDERLINE: &[u8] = b"\x1b[4 q";
 const CURSOR_BLINKING_BAR: &[u8] = b"\x1b[5 q";
 const CURSOR_STEADY_BAR: &[u8] = b"\x1b[6 q";
 const CURSOR_DEFAULT: &[u8] = b"\x1b[0 q";
+
+static PANIC_HOOK_INIT: Once = Once::new();
+static TUI_THREAD: Mutex<Option<ThreadId>> = Mutex::new(None);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[allow(dead_code, reason = "complete set of DECSCUSR cursor shapes")]
@@ -759,6 +765,49 @@ fn restore_terminal<W: Write>(out: &mut W) -> io::Result<()> {
     result.map_or(Ok(()), Err)
 }
 
+pub(crate) struct TuiPanicHookGuard {
+    thread: ThreadId,
+}
+
+impl Drop for TuiPanicHookGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = TUI_THREAD.lock()
+            && active.as_ref() == Some(&self.thread)
+        {
+            *active = None;
+        }
+    }
+}
+
+pub(crate) fn install_panic_hook() -> TuiPanicHookGuard {
+    PANIC_HOOK_INIT.call_once(|| {
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            let current = thread::current().id();
+            let tui_panicked = TUI_THREAD
+                .lock()
+                .is_ok_and(|active| active.as_ref() == Some(&current));
+            if tui_panicked {
+                restore_terminal_now();
+            }
+            previous(info);
+        }));
+    });
+
+    let thread = thread::current().id();
+    if let Ok(mut active) = TUI_THREAD.lock() {
+        *active = Some(thread);
+    }
+    TuiPanicHookGuard { thread }
+}
+
+fn restore_terminal_now() {
+    let _ = terminal::disable_raw_mode();
+    let mut stdout = io::stdout();
+    let _ = restore_terminal(&mut stdout);
+    let _ = stdout.flush();
+}
+
 impl<W: Write> Drop for Terminal<W> {
     fn drop(&mut self) {
         let _ = self.deactivate();
@@ -914,10 +963,7 @@ pub(crate) fn screen_size() -> io::Result<Size> {
 }
 
 pub(crate) fn fatal_io(err: &io::Error, ctx: &str) -> ! {
-    let _ = terminal::disable_raw_mode();
-    let mut stdout = io::stdout();
-    let _ = restore_terminal(&mut stdout);
-    let _ = stdout.flush();
+    restore_terminal_now();
     eprintln!("Terminal error ({ctx}): {err}");
     std::process::exit(1);
 }
