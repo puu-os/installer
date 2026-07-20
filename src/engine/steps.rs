@@ -16,9 +16,8 @@ use udev::AsRaw;
 use crate::engine::image;
 use crate::engine::partition;
 use crate::engine::pipeline::{
-    self, BOOTC_IMAGE_STORAGE, BOOTC_RUNROOT, BOOTC_STORAGE_MOUNT, BOOTC_VAR_TMP,
-    CONTAINERS_RUNROOT, DEPENDENCIES, Runner, Step, TARGET_EFI_MOUNT, TARGET_HOME_MOUNT,
-    TARGET_MOUNT,
+    self, BOOTC_IMAGE_STORAGE, BOOTC_RUNROOT, BOOTC_STORAGE_MOUNT, CONTAINERS_RUNROOT,
+    DEPENDENCIES, Runner, Step, TARGET_EFI_MOUNT, TARGET_HOME_MOUNT, TARGET_MOUNT,
 };
 use crate::engine::progress;
 
@@ -270,6 +269,7 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
 
     let bootc_tmp_dir = PathBuf::from(BOOTC_STORAGE_MOUNT).join("tmp");
     std::fs::create_dir_all(&bootc_tmp_dir)?;
+    std::fs::set_permissions(&bootc_tmp_dir, PermissionsExt::from_mode(0o1777))?;
 
     if !pipeline::path_is_mount(BOOTC_IMAGE_STORAGE) {
         pipeline::bind_mount(BOOTC_IMAGE_STORAGE, BOOTC_IMAGE_STORAGE)?;
@@ -282,12 +282,6 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
         pipeline::bind_mount(&bootc_tmp_dir_str, &bootc_tmp_dir_str)?;
         cleanups.push(move || {
             let _ = pipeline::unmount(&bootc_tmp_dir_str);
-        });
-    }
-
-    if pipeline::mount_bootc_vartmp()? {
-        cleanups.push(|| {
-            let _ = pipeline::unmount(BOOTC_VAR_TMP);
         });
     }
 
@@ -330,7 +324,7 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
             "CONTAINERS_STORAGE_CONF".into(),
             storage_conf.to_string_lossy().to_string(),
         ),
-        ("TMPDIR".into(), BOOTC_VAR_TMP.into()),
+        ("TMPDIR".into(), bootc_tmp_dir.to_string_lossy().to_string()),
     ];
 
     let tracker = image::install_size_estimate(source_image.as_deref())

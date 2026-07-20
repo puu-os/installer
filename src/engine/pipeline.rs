@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -32,7 +31,6 @@ pub type SkipCb = Box<dyn FnMut(usize) + Send>;
 pub const BOOTC_STORAGE_MOUNT: &str = "/run/puu-installer/target/var/tmp/puu-bootc-storage";
 pub const BOOTC_IMAGE_STORAGE: &str =
     "/run/puu-installer/target/var/tmp/puu-bootc-storage/containers/storage";
-pub const BOOTC_VAR_TMP: &str = "/var/tmp";
 pub const CONTAINERS_RUNROOT: &str = "/run/containers/storage";
 pub const BOOTC_RUNROOT: &str = "/run/puu-installer/bootc-runroot";
 
@@ -266,10 +264,7 @@ fn mounted_target_points() -> Vec<String> {
         let Some((mount_point, _, _)) = crate::engine::util::parse_mountinfo_line(line) else {
             continue;
         };
-        if mount_point == TARGET_MOUNT
-            || mount_point.starts_with(&format!("{TARGET_MOUNT}/"))
-            || mount_point == BOOTC_VAR_TMP
-        {
+        if mount_point == TARGET_MOUNT || mount_point.starts_with(&format!("{TARGET_MOUNT}/")) {
             points.push(mount_point);
         }
     }
@@ -281,9 +276,6 @@ fn mounted_target_points() -> Vec<String> {
 /// followed by the target filesystems from deepest to root.
 fn teardown_mount_points() -> Vec<String> {
     let mut points = mounted_target_points();
-    if path_is_mount(BOOTC_VAR_TMP) {
-        points.push(BOOTC_VAR_TMP.to_string());
-    }
     for (_, rel) in CHROOT_BIND_MOUNTS.iter().rev() {
         points.push(format!("{TARGET_MOUNT}/{rel}"));
     }
@@ -398,20 +390,6 @@ pub fn wait_for_block_device(runner: &mut Runner, part: &str) -> Result<()> {
         runner.log(&format!("waiting for {part} to appear..."));
         std::thread::sleep(Duration::from_millis(PART_WAIT_INTERVAL_MS));
     }
-}
-
-pub fn mount_bootc_vartmp() -> Result<bool> {
-    let bootc_tmp = PathBuf::from(BOOTC_STORAGE_MOUNT).join("tmp");
-    std::fs::create_dir_all(&bootc_tmp)?;
-    std::fs::set_permissions(&bootc_tmp, PermissionsExt::from_mode(0o1777))?;
-
-    std::fs::create_dir_all(BOOTC_VAR_TMP)?;
-    std::fs::set_permissions(BOOTC_VAR_TMP, PermissionsExt::from_mode(0o1777))?;
-
-    // bootc always unpacks OCI archives under /var/tmp.  It may already be a
-    // live-media mount, so stack the target-backed bind mount over it.
-    bind_mount(&bootc_tmp.to_string_lossy(), BOOTC_VAR_TMP)?;
-    Ok(true)
 }
 
 pub fn deployment_root() -> Result<PathBuf> {
