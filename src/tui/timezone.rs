@@ -15,19 +15,21 @@ use crate::tui::state::{AppState, Route};
 const VIEW_LON_SPAN: f64 = 180.0;
 const LAT_MIN: f64 = -60.0;
 const LAT_MAX: f64 = 78.0;
-const PAN_TAU: f64 = 0.12;
+const PAN_TAU: f64 = 0.1;
 const PAN_MIN_SPEED: f64 = 12.0;
-const PAN_MAX_SPEED: f64 = 900.0;
-const PAN_SNAP: f64 = 0.02;
+const PAN_MAX_SPEED: f64 = 360.0;
+const PAN_SNAP: f64 = 0.001;
 const PAN_KEY_STEP: f64 = 10.0;
 const PAN_MAX_LEAD: f64 = 20.0;
-const MAX_FRAME_DT: f64 = 0.05;
+const MAX_FRAME_DT: f64 = 0.1;
 const VISIBLE_ZONE_ROWS: usize = 8;
 const MAP_W: usize = 720;
 const MAP_H: usize = 360;
 const ROW_BYTES: usize = MAP_W / 8;
+const INTEGRAL_STRIDE: usize = MAP_W + 1;
 const LON_SCALE: f64 = MAP_W as f64 / 360.0;
 const LAT_SCALE: f64 = MAP_H as f64 / 180.0;
+const LAND_GLYPHS: [char; 5] = [' ', '░', '▒', '▓', '█'];
 const ZONE_TAB: &str = include_str!("zone1970.tab");
 const WORLD_MASK: &[u8] = include_bytes!("world_mask.bin");
 
@@ -38,6 +40,12 @@ pub(crate) struct Zone {
     lat: f64,
     lon: f64,
     has_coord: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MapPoint {
+    lat: f64,
+    lon: f64,
 }
 
 fn parse_zone_line(line: &str) -> Option<Zone> {
@@ -310,68 +318,107 @@ pub(crate) fn tick(state: &mut AppState, elapsed: Duration) -> bool {
     true
 }
 
-pub(crate) fn visible_names(state: &AppState) -> Vec<String> {
-    let pick = reconstruct_pick(state);
-    pick.filtered
+pub(crate) fn visible_names(state: &AppState) -> Vec<(&'static str, bool)> {
+    state
+        .timezone
+        .filtered
         .iter()
-        .skip(pick.top)
+        .skip(state.timezone.top)
         .take(VISIBLE_ZONE_ROWS)
         .enumerate()
         .map(|(row, &index)| {
-            format!(
-                "{} {}",
-                if pick.top + row == pick.selected {
-                    ">"
-                } else {
-                    " "
-                },
-                zones()[index].name
+            (
+                zones()[index].name.as_str(),
+                state.timezone.top + row == state.timezone.selected,
             )
         })
         .collect()
 }
 
-pub(crate) fn selected_zone(state: &AppState) -> Option<Zone> {
-    reconstruct_pick(state).selected().cloned()
+pub(crate) fn selected_zone(state: &AppState) -> Option<MapPoint> {
+    state
+        .timezone
+        .filtered
+        .get(state.timezone.selected)
+        .and_then(|&index| zones().get(index))
+        .filter(|zone| zone.has_coord)
+        .map(|zone| MapPoint {
+            lat: zone.lat,
+            lon: zone.lon,
+        })
 }
 
-fn row_land_count(row: usize, start: usize, end: usize) -> u32 {
-    if start >= end {
-        return 0;
-    }
-    let row = &WORLD_MASK[row * ROW_BYTES..(row + 1) * ROW_BYTES];
-    let first = start / 8;
-    let last = (end - 1) / 8;
-    let head = 0xffu8 >> (start % 8);
-    let tail = 0xffu8 << (7 - ((end - 1) % 8));
-    if first == last {
-        return (row[first] & head & tail).count_ones();
-    }
-    (row[first] & head).count_ones()
-        + row[first + 1..last]
-            .iter()
-            .map(|byte| byte.count_ones())
-            .sum::<u32>()
-        + (row[last] & tail).count_ones()
+struct LandIntegral {
+    values: Vec<u32>,
 }
 
-fn land_fraction(row: usize, start: usize, width: usize, rows: usize) -> f64 {
-    let mut total = 0;
-    for map_row in row..(row + rows).min(MAP_H) {
-        let end = start + width;
-        total += if end <= MAP_W {
-            row_land_count(map_row, start, end)
+impl LandIntegral {
+    fn new() -> Self {
+        let mut values = vec![0; INTEGRAL_STRIDE * (MAP_H + 1)];
+        for y in 0..MAP_H {
+            let mut row_sum = 0;
+            for x in 0..MAP_W {
+                let byte = WORLD_MASK[y * ROW_BYTES + x / 8];
+                row_sum += u32::from(byte & (0x80 >> (x % 8)) != 0);
+                values[(y + 1) * INTEGRAL_STRIDE + x + 1] =
+                    values[y * INTEGRAL_STRIDE + x + 1] + row_sum;
+            }
+        }
+        Self { values }
+    }
+
+    fn at(&self, x: f64, y: f64) -> f64 {
+        let x = x.clamp(0.0, MAP_W as f64);
+        let y = y.clamp(0.0, MAP_H as f64);
+        let left = x.floor() as usize;
+        let top = y.floor() as usize;
+        let right = (left + 1).min(MAP_W);
+        let bottom = (top + 1).min(MAP_H);
+        let x_fraction = x - left as f64;
+        let y_fraction = y - top as f64;
+        let top_left = f64::from(self.values[top * INTEGRAL_STRIDE + left]);
+        let top_right = f64::from(self.values[top * INTEGRAL_STRIDE + right]);
+        let bottom_left = f64::from(self.values[bottom * INTEGRAL_STRIDE + left]);
+        let bottom_right = f64::from(self.values[bottom * INTEGRAL_STRIDE + right]);
+        let top_value = top_left + (top_right - top_left) * x_fraction;
+        let bottom_value = bottom_left + (bottom_right - bottom_left) * x_fraction;
+        top_value + (bottom_value - top_value) * y_fraction
+    }
+
+    fn rectangle(&self, left: f64, top: f64, right: f64, bottom: f64) -> f64 {
+        self.at(right, bottom) - self.at(left, bottom) - self.at(right, top) + self.at(left, top)
+    }
+
+    fn wrapped_rectangle(&self, left: f64, top: f64, right: f64, bottom: f64) -> f64 {
+        let width = right - left;
+        let left = left.rem_euclid(MAP_W as f64);
+        let right = left + width;
+        if right <= MAP_W as f64 {
+            self.rectangle(left, top, right, bottom)
         } else {
-            row_land_count(map_row, start, MAP_W) + row_land_count(map_row, 0, end - MAP_W)
-        };
+            self.rectangle(left, top, MAP_W as f64, bottom)
+                + self.rectangle(0.0, top, right - MAP_W as f64, bottom)
+        }
     }
-    f64::from(total) / (width * rows) as f64
 }
 
-fn map_text_style(color: Color, weight: Weight) -> CanvasTextStyle {
+fn land_integral() -> &'static LandIntegral {
+    static LAND: OnceLock<LandIntegral> = OnceLock::new();
+    LAND.get_or_init(LandIntegral::new)
+}
+
+fn land_fraction(left: f64, top: f64, right: f64, bottom: f64) -> f64 {
+    let area = (right - left) * (bottom - top);
+    if area <= f64::EPSILON {
+        return 0.0;
+    }
+    land_integral().wrapped_rectangle(left, top, right, bottom) / area
+}
+
+fn map_text_style(weight: Weight, invert: bool) -> CanvasTextStyle {
     let mut style = CanvasTextStyle::default();
-    style.color = Some(color);
     style.weight = weight;
+    style.invert = invert;
     style
 }
 
@@ -379,13 +426,13 @@ fn map_text_style(color: Color, weight: Weight) -> CanvasTextStyle {
 #[derive(Default, Props)]
 pub(crate) struct WorldMapProps {
     pub(crate) center_lon_milli: i32,
-    pub(crate) selected_zone: Option<Zone>,
+    pub(crate) selected_zone: Option<MapPoint>,
 }
 
 #[derive(Default)]
 pub(crate) struct WorldMap {
     center_lon: f64,
-    selected_zone: Option<Zone>,
+    selected_zone: Option<MapPoint>,
 }
 
 impl Component for WorldMap {
@@ -394,7 +441,7 @@ impl Component for WorldMap {
     fn new(props: &Self::Props<'_>) -> Self {
         Self {
             center_lon: f64::from(props.center_lon_milli) / 1000.0,
-            selected_zone: props.selected_zone.clone(),
+            selected_zone: props.selected_zone,
         }
     }
 
@@ -405,7 +452,7 @@ impl Component for WorldMap {
         updater: &mut ComponentUpdater,
     ) {
         self.center_lon = f64::from(props.center_lon_milli) / 1000.0;
-        self.selected_zone.clone_from(&props.selected_zone);
+        self.selected_zone = props.selected_zone;
         updater.set_layout_style(props.layout_style().into());
     }
 
@@ -416,62 +463,40 @@ impl Component for WorldMap {
         }
         let width = usize::from(size.width);
         let height = usize::from(size.height);
-        let start_lon = wrap_lon(self.center_lon - VIEW_LON_SPAN / 2.0);
-        let lon_step = VIEW_LON_SPAN / width as f64;
+        let start_x = (wrap_lon(self.center_lon - VIEW_LON_SPAN / 2.0) + 180.0) * LON_SCALE;
+        let cell_width = VIEW_LON_SPAN * LON_SCALE / width as f64;
         let row_span = LAT_MAX - LAT_MIN;
-        let raster_width = (lon_step * LON_SCALE).round().max(1.0) as usize;
+        let cell_height = row_span * LAT_SCALE / height as f64;
+        let start_y = (90.0 - LAT_MAX) * LAT_SCALE;
+        let land_style = map_text_style(Weight::Normal, false);
+        let mut row = String::with_capacity(width * 3);
         let mut canvas = drawer.canvas();
         for y in 0..height {
-            let sea = if y % 6 < 2 {
-                Color::Blue
-            } else {
-                Color::DarkBlue
-            };
-            canvas.set_background_color(0, y as isize, width, 1, sea);
-            let top_lat = LAT_MAX - y as f64 / height as f64 * row_span;
-            let raster_y = ((90.0 - top_lat) * LAT_SCALE).round() as usize;
-            let raster_rows = ((row_span / height as f64) * LAT_SCALE).round().max(1.0) as usize;
-            let cells = (0..width)
-                .map(|x| {
-                    let lon = wrap_lon(start_lon + (x as f64 + 0.5) * lon_step);
-                    let raster_x = ((lon + 180.0) * LON_SCALE).round() as usize % MAP_W;
-                    let fraction = land_fraction(raster_y, raster_x, raster_width, raster_rows);
-                    if fraction > 0.7 {
-                        Some(('█', Color::Green))
-                    } else if fraction > 0.15 {
-                        Some(('▓', Color::Cyan))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-            let mut x = 0;
-            while x < width {
-                let Some((glyph, color)) = cells[x] else {
-                    x += 1;
-                    continue;
+            row.clear();
+            let top = start_y + y as f64 * cell_height;
+            for x in 0..width {
+                let left = start_x + x as f64 * cell_width;
+                let fraction =
+                    land_fraction(left, top, left + cell_width, top + cell_height).clamp(0.0, 1.0);
+                let glyph = if fraction < 0.01 {
+                    0
+                } else {
+                    ((fraction * 3.0).round() as usize + 1).min(LAND_GLYPHS.len() - 1)
                 };
-                let start = x;
-                while x < width && cells[x] == Some((glyph, color)) {
-                    x += 1;
-                }
-                canvas.set_text(
-                    start as isize,
-                    y as isize,
-                    &glyph.to_string().repeat(x - start),
-                    map_text_style(color, Weight::Normal),
-                );
+                row.push(LAND_GLYPHS[glyph]);
             }
+            canvas.set_text(0, y as isize, row.trim_end(), land_style);
         }
-        if let Some(zone) = self.selected_zone.as_ref().filter(|zone| zone.has_coord) {
+        if let Some(zone) = self
+            .selected_zone
+            .filter(|zone| (LAT_MIN..=LAT_MAX).contains(&zone.lat))
+        {
             let x = ((lon_delta(self.center_lon, zone.lon) + VIEW_LON_SPAN / 2.0) / VIEW_LON_SPAN
                 * width as f64)
                 .floor() as isize;
-            let y = ((LAT_MAX - zone.lat.clamp(LAT_MIN, LAT_MAX)) / row_span * height as f64)
-                .floor() as isize;
+            let y = ((LAT_MAX - zone.lat) / row_span * height as f64).floor() as isize;
             if x >= 0 && x < width as isize && y >= 0 && y < height as isize {
-                canvas.set_background_color(x, y, 1, 1, Color::Magenta);
-                canvas.set_text(x, y, "X", map_text_style(Color::Black, Weight::Bold));
+                canvas.set_text(x, y, "X", map_text_style(Weight::Bold, true));
             }
         }
     }
