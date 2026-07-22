@@ -2,6 +2,7 @@
 // Copyright (C) Opinsys Oy 2026
 
 use anyhow::Result;
+use zeroize::Zeroize;
 
 /// Fill an `N`-byte array with cryptographically secure random bytes.
 pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N]> {
@@ -15,14 +16,9 @@ pub(crate) fn sync_all() {
     unsafe { libc::sync() };
 }
 
-/// Overwrite a secret string's full allocation before releasing its contents.
+/// Overwrite a secret string before releasing its contents.
 pub(crate) fn clear_secret(secret: &mut String) {
-    // NUL is valid UTF-8, so wiping initialized bytes preserves String's invariant.
-    let bytes = unsafe { secret.as_mut_vec() };
-    for offset in 0..bytes.capacity() {
-        unsafe { std::ptr::write_volatile(bytes.as_mut_ptr().add(offset), 0) };
-    }
-    bytes.clear();
+    secret.zeroize();
 }
 
 /// Whether the current process has superuser privileges.

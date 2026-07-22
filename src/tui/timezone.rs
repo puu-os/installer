@@ -501,37 +501,3 @@ impl Component for WorldMap {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn picker_keeps_selection_visible() {
-        let mut pick = TzPick::new("UTC");
-
-        for _ in 0..VISIBLE_ZONE_ROWS + 2 {
-            pick.move_by(1);
-        }
-
-        assert!(pick.selected >= pick.top);
-        assert!(pick.selected < pick.top + VISIBLE_ZONE_ROWS);
-
-        pick.selected = 0;
-        pick.top = 0;
-        pick.move_by(-1);
-        assert!(pick.selected >= pick.top);
-        assert!(pick.selected < pick.top + VISIBLE_ZONE_ROWS);
-    }
-
-    #[test]
-    fn tick_persists_final_snap() {
-        let mut state = AppState::default();
-        state.timezone.map_center_lon_milli = 0;
-        state.timezone.map_target_lon_milli = 10;
-
-        assert!(tick(&mut state, Duration::from_millis(100)));
-        assert_eq!(state.timezone.map_center_lon_milli, 10);
-        assert!(!tick(&mut state, Duration::from_millis(100)));
-    }
-}

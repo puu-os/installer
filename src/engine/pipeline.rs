@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use nix::mount::MsFlags;
 use nix::sched::{CloneFlags, unshare};
 
-use crate::engine::command::{self, LogFn};
+use crate::engine::command;
 use crate::engine::partition::DerivedPartitions;
 
 pub use crate::engine::steps::STEPS;
@@ -51,16 +51,13 @@ pub fn enter_private_mount_namespace() -> Result<()> {
 
 /// Mount `source` at `target` via `mount(2)`, creating the mountpoint and
 /// skipping if it is already mounted. Replaces shelling out to `mount(8)`.
-pub fn mount_target(
-    log: &mut dyn FnMut(String),
-    source: &str,
-    target: &str,
-    fstype: &str,
-    data: Option<&str>,
-) -> Result<()> {
+pub fn mount_target(source: &str, target: &str, fstype: &str, data: Option<&str>) -> Result<()> {
     std::fs::create_dir_all(target)?;
     if path_is_mount(target) {
-        log(format!("{target} is already mounted; reusing it"));
+        tracing::info!(
+            target: crate::engine::INSTALLATION_LOG_TARGET,
+            "{target} is already mounted; reusing it"
+        );
         return Ok(());
     }
     nix::mount::mount(Some(source), target, Some(fstype), MsFlags::empty(), data)
@@ -179,41 +176,27 @@ impl Drop for CleanupStack {
 
 pub struct Runner {
     pub ctx: Context,
-    pub log: LogFn,
     pub progress: ProgressCb,
     pub skipped: SkipCb,
     pub step_index: usize,
 }
 
 impl Runner {
-    pub fn log(&mut self, msg: &str) {
-        (self.log)(msg.to_string());
-    }
-
     pub fn progress(&mut self, fraction: f64) {
         (self.progress)(self.step_index, fraction);
     }
 
-    /// Begin building a subprocess invocation. Use [`command::Command::env`],
-    /// [`command::Command::heartbeat`] and [`command::Command::chroot`] to opt into
-    /// extras, then [`command::Command::run`] to execute it.
-    pub fn cmd<S: AsRef<str>>(&mut self, argv: &[S]) -> command::Command<'_> {
-        let argv = argv.iter().map(|a| a.as_ref().to_string()).collect();
-        command::Command::new(&mut self.log, argv)
-    }
-
-    /// Like [`Runner::cmd`], but samples `source` while the command runs and
+    /// Build a command that samples `source` while it runs and
     /// reports it as the current step's progress.
     pub fn cmd_tracked<S: AsRef<str>>(
         &mut self,
         argv: &[S],
         source: Box<dyn crate::engine::progress::ProgressSource>,
     ) -> command::Command<'_> {
-        let argv = argv.iter().map(|a| a.as_ref().to_string()).collect();
         let step_index = self.step_index;
         let progress = &mut self.progress;
         let emit = move |fraction: f64| (progress)(step_index, fraction);
-        command::Command::new(&mut self.log, argv).track(source, Box::new(emit))
+        command::Command::new(argv).track(source, Box::new(emit))
     }
 
     pub fn execute(
@@ -236,7 +219,10 @@ impl Runner {
                 return Ok(false);
             }
             if step.point_of_no_return {
-                self.log("entering point of no return");
+                tracing::info!(
+                    target: crate::engine::INSTALLATION_LOG_TARGET,
+                    "entering point of no return"
+                );
                 committed = true;
             }
             (step.fn_)(self)?;
@@ -295,10 +281,10 @@ fn teardown_mount_points() -> Vec<String> {
     points
 }
 
-pub fn cleanup_mounts(runner: &mut Runner) -> Result<()> {
+pub fn cleanup_mounts() -> Result<()> {
     for mp in teardown_mount_points() {
         if path_is_mount(&mp) {
-            runner.log(&format!("unmounting {mp}"));
+            tracing::info!(target: crate::engine::INSTALLATION_LOG_TARGET, "unmounting {mp}");
             unmount(&mp)?;
         }
     }
@@ -378,7 +364,7 @@ pub fn install_kernel_args(root_uuid: &str, config: &crate::engine::config::Conf
 const PART_WAIT_TIMEOUT_S: u64 = 30;
 const PART_WAIT_INTERVAL_MS: u64 = 500;
 
-pub fn wait_for_block_device(runner: &mut Runner, part: &str) -> Result<()> {
+pub fn wait_for_block_device(part: &str) -> Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(PART_WAIT_TIMEOUT_S);
     loop {
         if Path::new(part).exists() && std::fs::OpenOptions::new().read(true).open(part).is_ok() {
@@ -394,7 +380,10 @@ pub fn wait_for_block_device(runner: &mut Runner, part: &str) -> Result<()> {
                  after writing the partition table"
             );
         }
-        runner.log(&format!("waiting for {part} to appear..."));
+        tracing::info!(
+            target: crate::engine::INSTALLATION_LOG_TARGET,
+            "waiting for {part} to appear..."
+        );
         std::thread::sleep(Duration::from_millis(PART_WAIT_INTERVAL_MS));
     }
 }
@@ -458,10 +447,13 @@ pub fn copy_tree_files(src: &Path, dst: &Path) -> Result<()> {
     recurse(src, dst)
 }
 
-pub fn rollback(log: &mut LogFn) {
+pub fn rollback() {
     for mp in teardown_mount_points() {
         if path_is_mount(&mp) {
-            log(format!("rollback: unmounting {mp}"));
+            tracing::info!(
+                target: crate::engine::INSTALLATION_LOG_TARGET,
+                "rollback: unmounting {mp}"
+            );
             let _ = unmount(&mp);
         }
     }

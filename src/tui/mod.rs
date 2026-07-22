@@ -2,6 +2,7 @@
 // Copyright (C) Opinsys Oy 2026
 
 pub(crate) mod app;
+pub(crate) mod logging;
 pub(crate) mod message;
 pub(crate) mod runtime;
 pub(crate) mod state;

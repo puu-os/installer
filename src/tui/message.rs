@@ -164,6 +164,5 @@ pub(crate) enum Effect {
     EnrollKeys,
     Reboot,
     Quit,
-    Log(String),
     None,
 }

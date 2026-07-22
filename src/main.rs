@@ -53,8 +53,8 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    tui::app::init_tracing()?;
-    tracing::trace!(target: "puu_installer::installation", "installer started");
+    tui::logging::init()?;
+    tracing::info!(target: engine::INSTALLATION_LOG_TARGET, "installer started");
 
     engine::pipeline::enter_private_mount_namespace()?;
 

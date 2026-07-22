@@ -584,7 +584,7 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
             controller.trap = Some(Trap::Quit);
             None
         }
-        Effect::EnrollKeys | Effect::Log(_) | Effect::None => None,
+        Effect::EnrollKeys | Effect::None => None,
     }
 }
 

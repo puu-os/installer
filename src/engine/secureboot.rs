@@ -24,7 +24,6 @@ use openssl::stack::Stack;
 use openssl::x509::X509;
 use openssl::x509::store::X509StoreBuilder;
 
-use crate::engine::command::LogFn;
 use crate::engine::der::{
     algorithm_identifier, der_int_u8, der_octet, der_oid, der_read, der_seq, der_set, der_tlv,
 };
@@ -766,9 +765,12 @@ pub(crate) fn generate_sb_key(common_name: &str) -> Result<(String, String)> {
     Ok((key_pem, cert_pem))
 }
 
-pub fn ensure_sbctl_keys(log: &mut LogFn) -> Result<()> {
+pub fn ensure_sbctl_keys() -> Result<()> {
     if target_sbctl_keys_exist() {
-        log("Secure Boot signing keys already exist; reusing them".to_string());
+        tracing::info!(
+            target: crate::engine::INSTALLATION_LOG_TARGET,
+            "Secure Boot signing keys already exist; reusing them"
+        );
         return Ok(());
     }
     let keydir = target_sbctl_dir().join("keys");
@@ -785,6 +787,9 @@ pub fn ensure_sbctl_keys(log: &mut LogFn) -> Result<()> {
     if !guid_path.exists() {
         std::fs::write(&guid_path, format!("{}\n", random_uuid()?))?;
     }
-    log("generated Secure Boot PK/KEK/db keys".to_string());
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
+        "generated Secure Boot PK/KEK/db keys"
+    );
     Ok(())
 }

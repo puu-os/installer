@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::sync::mpsc;
 use std::time::Instant;
 
-use crate::engine::command::LogFn;
 use crate::engine::pipeline::{self, Context, ProgressCb, Runner, SkipCb};
 use crate::tui::message::{Message, bounded_text};
 use crate::tui::state::AppState;
@@ -16,36 +14,6 @@ pub enum Trap {
     Quit,
     Reboot,
     Shell,
-}
-
-pub fn init_tracing() -> anyhow::Result<()> {
-    let directory = "/run/puu-installer";
-    std::fs::create_dir_all(directory)?;
-    std::fs::set_permissions(directory, PermissionsExt::from_mode(0o700))?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open("/run/puu-installer/install.log")?;
-    file.set_permissions(PermissionsExt::from_mode(0o600))?;
-    tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_max_level(tracing::Level::TRACE)
-        .with_writer(file)
-        .try_init()
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    Ok(())
-}
-
-fn send_log(tx: &mpsc::SyncSender<Message>, line: &str) {
-    tracing::trace!(target: "puu_installer::installation", "{line}");
-    let _ = tx.try_send(Message::Log(bounded_text(line)));
-}
-
-fn make_log(tx: mpsc::SyncSender<Message>) -> LogFn {
-    Box::new(move |line: String| send_log(&tx, &line))
 }
 
 pub struct InstallTask {
@@ -65,9 +33,12 @@ impl InstallTask {
         pipeline_ctx.parts = crate::engine::partition::DerivedPartitions::default();
 
         let thread = std::thread::spawn(move || {
+            let _screen_log = crate::tui::logging::show_on_screen(events_tx.clone());
             let started = Instant::now();
-            tracing::trace!(target: "puu_installer::installation", "installation worker started");
-            let log = make_log(events_tx.clone());
+            tracing::info!(
+                target: crate::engine::INSTALLATION_LOG_TARGET,
+                "installation worker started"
+            );
             let progress: ProgressCb = {
                 let tx = events_tx.clone();
                 Box::new(move |step_index: usize, fraction: f64| {
@@ -94,14 +65,12 @@ impl InstallTask {
             };
             let mut runner = Runner {
                 ctx: pipeline_ctx,
-                log,
                 progress,
                 skipped,
                 step_index: 0,
             };
             let fail = |at: usize, error: anyhow::Error| {
-                let mut log = make_log(events_tx.clone());
-                pipeline::rollback(&mut log);
+                pipeline::rollback();
                 let _ = events_tx.send(Message::InstallFinished {
                     at: Some(at),
                     elapsed: Some(started.elapsed()),
@@ -110,7 +79,7 @@ impl InstallTask {
             };
             match runner.execute(pipeline::STEPS, || cancel_rx.try_recv().is_ok()) {
                 Ok(true) => {
-                    tracing::trace!(target: "puu_installer::installation", "installation completed");
+                    tracing::info!(target: crate::engine::INSTALLATION_LOG_TARGET, "installation completed");
                     let _ = events_tx.send(Message::InstallFinished {
                         at: None,
                         elapsed: Some(started.elapsed()),
@@ -119,7 +88,7 @@ impl InstallTask {
                 }
                 Ok(false) => fail(runner.step_index, anyhow::anyhow!("installation cancelled")),
                 Err(error) => {
-                    send_log(&events_tx, &format!("error: {error:#}"));
+                    tracing::error!(target: crate::engine::INSTALLATION_LOG_TARGET, "error: {error:#}");
                     fail(runner.step_index, error);
                 }
             }

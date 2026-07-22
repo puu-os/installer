@@ -19,8 +19,6 @@ const SECRET_OPTIONS: &[&str] = &["--password", "--passphrase", "--secret", "--t
 
 const REDACTED: &str = "<redacted>";
 
-pub type LogFn = Box<dyn FnMut(String) + Send>;
-
 /// A [`ProgressSource`] paired with a sink that forwards each sampled reading.
 type ProgressTracker<'a> = (Box<dyn ProgressSource>, Box<dyn FnMut(f64) + 'a>);
 
@@ -101,10 +99,9 @@ unsafe fn enter_chroot(target: Option<&CStr>) -> io::Result<()> {
     Ok(())
 }
 
-/// A command invocation built from [`crate::engine::pipeline::Runner::cmd`]. Merged
-/// stdout+stderr is streamed to the log; a non-zero exit becomes an error.
+/// A subprocess invocation. Merged stdout+stderr is emitted as tracing events;
+/// a non-zero exit becomes an error.
 pub struct Command<'a> {
-    log: &'a mut LogFn,
     argv: Vec<String>,
     env: Option<&'a [(String, String)]>,
     heartbeat: Option<(Duration, &'a str)>,
@@ -113,9 +110,9 @@ pub struct Command<'a> {
 }
 
 impl<'a> Command<'a> {
-    pub fn new(log: &'a mut LogFn, argv: Vec<String>) -> Self {
+    pub fn new<S: AsRef<str>>(argv: &[S]) -> Self {
+        let argv = argv.iter().map(|arg| arg.as_ref().to_string()).collect();
         Self {
-            log,
             argv,
             env: None,
             heartbeat: None,
@@ -157,12 +154,12 @@ impl<'a> Command<'a> {
         self
     }
 
-    /// Run the command, streaming merged stdout+stderr line-by-line to the log
-    /// callback, and raise an error if the exit code is non-zero. The child
+    /// Run the command, emitting merged stdout+stderr line-by-line as tracing
+    /// events, and raise an error if the exit code is non-zero. The child
     /// chroots into `chroot_dir` before exec when it is set.
     pub fn run(mut self) -> Result<()> {
-        let display = format_argv(&self.argv);
-        (self.log)(format!("$ {display}"));
+        let command_line = format_argv(&self.argv);
+        tracing::info!(target: crate::engine::INSTALLATION_LOG_TARGET, "$ {command_line}");
 
         let reader = build_expression(&self.argv, self.env, self.chroot_dir)
             .reader()
@@ -203,7 +200,7 @@ impl<'a> Command<'a> {
                             output_tail.pop_front();
                         }
                         output_tail.push_back(line.clone());
-                        (self.log)(line);
+                        tracing::info!(target: crate::engine::INSTALLATION_LOG_TARGET, "{line}");
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -213,7 +210,10 @@ impl<'a> Command<'a> {
             if let Some((interval, msg)) = self.heartbeat {
                 if last_heartbeat.elapsed() >= interval {
                     let elapsed = started.elapsed().as_secs();
-                    (self.log)(format!("{msg} ({elapsed}s elapsed)"));
+                    tracing::info!(
+                        target: crate::engine::INSTALLATION_LOG_TARGET,
+                        "{msg} ({elapsed}s elapsed)"
+                    );
                     last_heartbeat = Instant::now();
                 }
             }
@@ -233,9 +233,9 @@ impl<'a> Command<'a> {
             .map_err(|_| anyhow::anyhow!("command output reader thread panicked"))?;
         if rc != 0 {
             if let Some(last_line) = output_tail.back() {
-                bail!("command failed (exit {rc}): {last_line}\ncommand: {display}");
+                bail!("command failed (exit {rc}): {last_line}\ncommand: {command_line}");
             }
-            bail!("command failed (exit {rc}): {display}");
+            bail!("command failed (exit {rc}): {command_line}");
         }
         Ok(())
     }

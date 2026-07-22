@@ -50,12 +50,7 @@ const PART_TYPE_LINUX: [u8; 16] = [
 ///
 /// Layout mirrors the previous `sgdisk` calls: EFI (`efi_size`) at the front,
 /// home (`home_size`) pinned to the end of the disk, and root filling the gap.
-pub fn partition_drive(
-    log: &mut dyn FnMut(String),
-    drive: &str,
-    efi_size: &str,
-    home_size: &str,
-) -> Result<PartitionLayout> {
+pub fn partition_drive(drive: &str, efi_size: &str, home_size: &str) -> Result<PartitionLayout> {
     let efi_bytes = part_size_bytes(efi_size)?;
     let home_bytes = part_size_bytes(home_size)?;
 
@@ -107,12 +102,13 @@ pub fn partition_drive(
     )?;
 
     let part_bytes = |n: u32| (gpt[n].ending_lba - gpt[n].starting_lba + 1) * sector_size;
-    log(format!(
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
         "wrote GPT to {drive}: EFI {}, root {}, home {}",
         crate::engine::util::human_size(part_bytes(1)),
         crate::engine::util::human_size(part_bytes(2)),
         crate::engine::util::human_size(part_bytes(3)),
-    ));
+    );
 
     commit_gpt(&mut file, &mut gpt, drive, sector_size)?;
 

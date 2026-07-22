@@ -13,6 +13,7 @@ use efivar::boot::{
 
 use udev::AsRaw;
 
+use crate::engine::command::Command;
 use crate::engine::image;
 use crate::engine::partition;
 use crate::engine::pipeline::{
@@ -22,37 +23,49 @@ use crate::engine::pipeline::{
 };
 use crate::engine::progress;
 
-fn step_dependencies(r: &mut Runner) -> Result<()> {
+fn step_dependencies(_r: &mut Runner) -> Result<()> {
     let missing: Vec<&str> = DEPENDENCIES
         .iter()
         .copied()
         .filter(|d| !crate::engine::util::which_exists(d))
         .collect();
     if !missing.is_empty() {
-        r.log("missing required tools:");
+        tracing::info!(target: crate::engine::INSTALLATION_LOG_TARGET, "missing required tools:");
         for dep in &missing {
-            r.log(&format!("  {dep}"));
+            tracing::info!(target: crate::engine::INSTALLATION_LOG_TARGET, "  {dep}");
         }
         bail!("missing dependencies: {}", missing.join(", "));
     }
-    r.log(&format!("all {} dependencies present", DEPENDENCIES.len()));
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
+        "all {} dependencies present",
+        DEPENDENCIES.len()
+    );
     Ok(())
 }
 
 fn step_setup_mode(r: &mut Runner) -> Result<()> {
     if !r.ctx.secure_boot {
-        r.log("Secure Boot disabled; skipping firmware setup check");
+        tracing::info!(
+            target: crate::engine::INSTALLATION_LOG_TARGET,
+            "Secure Boot disabled; skipping firmware setup check"
+        );
         return Ok(());
     }
     let status = crate::engine::firmware::detect_setup_mode();
     if status.setup_mode.is_none() {
         r.ctx.secure_boot = false;
-        r.log(
+        tracing::info!(
+            target: crate::engine::INSTALLATION_LOG_TARGET,
             "Secure Boot Setup Mode could not be detected; \
-             continuing without Secure Boot",
+             continuing without Secure Boot"
         );
         if !status.reason.is_empty() {
-            r.log(&format!("  reason: {}", status.reason));
+            tracing::info!(
+                target: crate::engine::INSTALLATION_LOG_TARGET,
+                "  reason: {}",
+                status.reason
+            );
         }
         return Ok(());
     }
@@ -67,14 +80,15 @@ fn step_setup_mode(r: &mut Runner) -> Result<()> {
     } else {
         "disabled"
     };
-    r.log(&format!(
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
         "firmware reports Setup Mode on; Secure Boot is {state}"
-    ));
+    );
     Ok(())
 }
 
-fn step_cleanup(r: &mut Runner) -> Result<()> {
-    pipeline::cleanup_mounts(r)
+fn step_cleanup(_r: &mut Runner) -> Result<()> {
+    pipeline::cleanup_mounts()
 }
 
 fn validate_target_drive(drive: &str, config: &crate::engine::config::Config) -> Result<u64> {
@@ -111,13 +125,14 @@ fn step_validate_drive(r: &mut Runner) -> Result<()> {
 
     r.ctx.parts = partition::derive_partitions(drive);
 
-    r.log(&format!(
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
         "target {drive} ({}; {}, {}, {})",
         crate::engine::util::human_size(size_b),
         r.ctx.parts.efi_part,
         r.ctx.parts.root_part,
         r.ctx.parts.home_part
-    ));
+    );
     Ok(())
 }
 
@@ -126,7 +141,6 @@ fn step_partition(r: &mut Runner) -> Result<()> {
     // Revalidate immediately before taking exclusive access and writing the GPT.
     validate_target_drive(&drive, &r.ctx.config)?;
     r.ctx.parts.layout = Some(partition::partition_drive(
-        &mut *r.log,
         &drive,
         &r.ctx.config.partitions.efi,
         &r.ctx.config.partitions.home,
@@ -156,17 +170,20 @@ fn step_partition(r: &mut Runner) -> Result<()> {
     }
     unsafe { udev::ffi::udev_queue_unref(queue) };
 
-    pipeline::wait_for_block_device(r, &r.ctx.parts.efi_part.clone())?;
-    pipeline::wait_for_block_device(r, &r.ctx.parts.root_part.clone())?;
-    pipeline::wait_for_block_device(r, &r.ctx.parts.home_part.clone())?;
+    pipeline::wait_for_block_device(&r.ctx.parts.efi_part)?;
+    pipeline::wait_for_block_device(&r.ctx.parts.root_part)?;
+    pipeline::wait_for_block_device(&r.ctx.parts.home_part)?;
     Ok(())
 }
 
 fn step_format_efi(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.efi_part.clone();
-    pipeline::wait_for_block_device(r, &part)?;
-    r.log(&format!("formatting {part} as FAT32 (label EFI)"));
-    r.cmd(&["mkfs.fat", "-F32", "-n", "EFI", &part]).run()?;
+    pipeline::wait_for_block_device(&part)?;
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
+        "formatting {part} as FAT32 (label EFI)"
+    );
+    Command::new(&["mkfs.fat", "-F32", "-n", "EFI", &part]).run()?;
     r.ctx.parts.efi_uuid = crate::engine::block::capture_partuuid(&part)?;
     Ok(())
 }
@@ -174,9 +191,12 @@ fn step_format_efi(r: &mut Runner) -> Result<()> {
 fn step_format_root(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.root_part.clone();
     let label = r.ctx.config.labels.root.clone();
-    pipeline::wait_for_block_device(r, &part)?;
-    r.log(&format!("formatting {part} as XFS (label {label})"));
-    r.cmd(&["mkfs.xfs", "-f", "-L", &label, &part]).run()?;
+    pipeline::wait_for_block_device(&part)?;
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
+        "formatting {part} as XFS (label {label})"
+    );
+    Command::new(&["mkfs.xfs", "-f", "-L", &label, &part]).run()?;
     r.ctx.parts.root_uuid = crate::engine::block::capture_uuid(&part)?;
     Ok(())
 }
@@ -184,8 +204,8 @@ fn step_format_root(r: &mut Runner) -> Result<()> {
 fn step_format_home(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.home_part.clone();
     let label = r.ctx.config.labels.home.clone();
-    pipeline::wait_for_block_device(r, &part)?;
-    r.cmd(&[
+    pipeline::wait_for_block_device(&part)?;
+    Command::new(&[
         "mke2fs", "-t", "ext4", "-O", "encrypt", "-F", "-L", &label, &part,
     ])
     .run()?;
@@ -195,7 +215,6 @@ fn step_format_home(r: &mut Runner) -> Result<()> {
 
 fn mount_efi(r: &mut Runner) -> Result<()> {
     pipeline::mount_target(
-        &mut *r.log,
         &r.ctx.parts.efi_part,
         TARGET_EFI_MOUNT,
         "vfat",
@@ -204,23 +223,11 @@ fn mount_efi(r: &mut Runner) -> Result<()> {
 }
 
 fn step_mount(r: &mut Runner) -> Result<()> {
-    pipeline::mount_target(
-        &mut *r.log,
-        &r.ctx.parts.root_part,
-        TARGET_MOUNT,
-        "xfs",
-        None,
-    )
+    pipeline::mount_target(&r.ctx.parts.root_part, TARGET_MOUNT, "xfs", None)
 }
 
 fn step_mount_home(r: &mut Runner) -> Result<()> {
-    pipeline::mount_target(
-        &mut *r.log,
-        &r.ctx.parts.home_part,
-        TARGET_HOME_MOUNT,
-        "ext4",
-        None,
-    )?;
+    pipeline::mount_target(&r.ctx.parts.home_part, TARGET_HOME_MOUNT, "ext4", None)?;
     Ok(())
 }
 
@@ -237,10 +244,11 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
         if let Some(ref img) = default {
             r.ctx.target_imgref = image::load_target_imgref(Some(img), &r.ctx.config);
             r.ctx.image_version = image::load_image_version(Some(img));
-            r.log(&format!(
+            tracing::info!(
+                target: crate::engine::INSTALLATION_LOG_TARGET,
                 "using local bootc image source: {}",
                 img.display()
-            ));
+            );
         }
         default
     } else {
@@ -332,7 +340,10 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
 
     argv.push(TARGET_MOUNT.into());
 
-    r.log("bootc image deployment may take several minutes without native progress output");
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
+        "bootc image deployment may take several minutes without native progress output"
+    );
 
     let env = vec![
         (
@@ -347,7 +358,7 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
         .map(|source| Box::new(source) as Box<dyn progress::ProgressSource>);
     let cmd = match tracker {
         Some(source) => r.cmd_tracked(&argv, source),
-        None => r.cmd(&argv),
+        None => Command::new(&argv),
     };
     cmd.env(&env)
         .heartbeat(
@@ -384,7 +395,10 @@ fn step_configure_mounts(r: &mut Runner) -> Result<()> {
 
 fn step_verify_image(r: &mut Runner) -> Result<()> {
     let Some(src) = r.ctx.source_image.clone() else {
-        r.log("using running bootc image as install source");
+        tracing::info!(
+            target: crate::engine::INSTALLATION_LOG_TARGET,
+            "using running bootc image as install source"
+        );
         return Ok(());
     };
     let expected = r.ctx.config.image.expected_digest.clone();
@@ -392,13 +406,19 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
         bail!("image.expectedDigest is required when installing from a local image source");
     }
 
-    r.log(&format!("expected image digest: {expected}"));
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
+        "expected image digest: {expected}"
+    );
     let raw = image::raw_manifest(&src)?;
     let actual = format!("sha256:{}", hex::encode(openssl::sha::sha256(&raw)));
     if !actual.eq_ignore_ascii_case(&expected) {
         bail!("image digest mismatch: expected {expected}, got {actual}");
     }
-    r.log(&format!("image digest verified: {actual}"));
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
+        "image digest verified: {actual}"
+    );
     Ok(())
 }
 
@@ -472,14 +492,20 @@ fn step_firstboot(r: &mut Runner) -> Result<()> {
         let vconsole = etc.join("vconsole.conf");
         std::fs::write(&vconsole, format!("KEYMAP={keymap}\n"))?;
         std::fs::set_permissions(&vconsole, PermissionsExt::from_mode(0o644))?;
-        r.log(&format!("staged keymap {keymap} in /etc/vconsole.conf"));
+        tracing::info!(
+            target: crate::engine::INSTALLATION_LOG_TARGET,
+            "staged keymap {keymap} in /etc/vconsole.conf"
+        );
     }
     Ok(())
 }
 
 fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
     if r.ctx.config.k3s.role == "server" && r.ctx.config.k3s.node_name.is_empty() {
-        r.log("k3s cluster: using image default server configuration");
+        tracing::info!(
+            target: crate::engine::INSTALLATION_LOG_TARGET,
+            "k3s cluster: using image default server configuration"
+        );
         return Ok(());
     }
 
@@ -525,14 +551,15 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
         argv.push("--node-name".into());
         argv.push(r.ctx.config.k3s.node_name.clone());
     }
-    r.cmd(&argv).chroot(TARGET_MOUNT).run()?;
+    Command::new(&argv).chroot(TARGET_MOUNT).run()?;
     drop(cleanups);
     crate::engine::util::clear_secret(&mut r.ctx.k3s_token);
 
-    r.log(&format!(
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
         "k3s cluster: staged {} configuration",
         r.ctx.config.k3s.role
-    ));
+    );
     Ok(())
 }
 
@@ -591,9 +618,10 @@ fn step_stage_homed_identity(r: &mut Runner) -> Result<()> {
     identity_file.sync_all()?;
     drop(identity);
     crate::engine::util::clear_secret(&mut r.ctx.user_password);
-    r.log(&format!(
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
         "staged homed identity for {name} at /var/lib/puu/identity.json"
-    ));
+    );
     Ok(())
 }
 
@@ -602,7 +630,10 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
         Path::new(TARGET_MOUNT).join(r.ctx.config.flatpak.manifest_path.trim_start_matches('/'));
     let refs = pipeline::flatpak_manifest_refs(&manifest);
     if refs.is_empty() {
-        r.log("flatpak-seed: no Flatpak refs in manifest");
+        tracing::info!(
+            target: crate::engine::INSTALLATION_LOG_TARGET,
+            "flatpak-seed: no Flatpak refs in manifest"
+        );
         return Ok(());
     }
 
@@ -612,10 +643,11 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
         bail!("flatpak-sync helper not found at {}", sync.display());
     }
 
-    r.log(&format!(
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
         "flatpak-seed: installing {} system Flatpak refs",
         refs.len()
-    ));
+    );
     let mounted = pipeline::mount_chroot_binds()?;
     let sync_helper = r.ctx.config.flatpak.sync_helper.clone();
     let source = Box::new(progress::MarkerProgress::default()) as Box<dyn progress::ProgressSource>;
@@ -629,9 +661,10 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
         .run();
     pipeline::unmount_chroot_binds(&mounted)?;
     result?;
-    r.log(
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
         "flatpak-seed: system Flatpaks installed; system flatpak-sync.timer \
-         will keep them reconciled",
+         will keep them reconciled"
     );
     Ok(())
 }
@@ -646,7 +679,10 @@ fn step_install_bootloader(r: &mut Runner) -> Result<()> {
     std::fs::create_dir_all(&fallback_dir)?;
     std::fs::copy(&source, systemd_dir.join(format!("systemd-boot{arch}.efi")))?;
     std::fs::copy(&source, fallback_dir.join(format!("BOOT{arch}.EFI")))?;
-    r.log("installed systemd-boot on the ESP");
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
+        "installed systemd-boot on the ESP"
+    );
     Ok(())
 }
 
@@ -719,9 +755,10 @@ fn step_nvram(r: &mut Runner) -> Result<()> {
             result_status(&restore_order)
         );
     }
-    r.log(&format!(
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
         "registered Boot{boot_id:04X} and placed it first in BootOrder"
-    ));
+    );
     Ok(())
 }
 
@@ -821,23 +858,32 @@ fn step_stage_esp_boot(r: &mut Runner) -> Result<()> {
     }
     pipeline::copy_tree_files(&source_ostree, &esp_ostree)?;
     crate::engine::util::sync_all();
-    r.log("staged boot loader entries and ostree kernel files on ESP");
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
+        "staged boot loader entries and ostree kernel files on ESP"
+    );
     Ok(())
 }
 
-fn step_secureboot(r: &mut Runner) -> Result<()> {
-    crate::engine::secureboot::ensure_sbctl_keys(&mut r.log)?;
+fn step_secureboot(_r: &mut Runner) -> Result<()> {
+    crate::engine::secureboot::ensure_sbctl_keys()?;
     let keydir = crate::engine::secureboot::sbctl_keydir();
     let owner = crate::engine::secureboot::sbctl_owner_guid();
     match crate::engine::secureboot::enroll_keys(&keydir, &owner) {
         Ok(()) => {
-            r.log("enrolled Secure Boot PK/KEK/db keys");
+            tracing::info!(
+                target: crate::engine::INSTALLATION_LOG_TARGET,
+                "enrolled Secure Boot PK/KEK/db keys"
+            );
             Ok(())
         }
         Err(e) => {
             // If the firmware already left Setup Mode, keys are likely enrolled.
             if crate::engine::firmware::detect_setup_mode().setup_mode == Some(false) {
-                r.log("Secure Boot keys appear to be enrolled already");
+                tracing::info!(
+                    target: crate::engine::INSTALLATION_LOG_TARGET,
+                    "Secure Boot keys appear to be enrolled already"
+                );
                 Ok(())
             } else {
                 Err(e)
@@ -846,8 +892,8 @@ fn step_secureboot(r: &mut Runner) -> Result<()> {
     }
 }
 
-fn step_sign(r: &mut Runner) -> Result<()> {
-    crate::engine::secureboot::ensure_sbctl_keys(&mut r.log)?;
+fn step_sign(_r: &mut Runner) -> Result<()> {
+    crate::engine::secureboot::ensure_sbctl_keys()?;
     let efi_binaries = crate::engine::secureboot::target_efi_binaries();
     if efi_binaries.is_empty() {
         bail!("no EFI binaries found under {TARGET_EFI_MOUNT}");
@@ -870,9 +916,10 @@ fn step_sign(r: &mut Runner) -> Result<()> {
         std::fs::write(binary, &signed)?;
         signed_count += 1;
     }
-    r.log(&format!(
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
         "signed {signed_count} EFI binaries on target ESP ({skipped_count} already signed)"
-    ));
+    );
 
     for binary in &efi_binaries {
         let image = std::fs::read(binary)?;
@@ -883,9 +930,12 @@ fn step_sign(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
-fn step_final_cleanup(r: &mut Runner) -> Result<()> {
-    pipeline::cleanup_mounts(r)?;
-    r.log("target filesystems unmounted; ready to reboot");
+fn step_final_cleanup(_r: &mut Runner) -> Result<()> {
+    pipeline::cleanup_mounts()?;
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
+        "target filesystems unmounted; ready to reboot"
+    );
     Ok(())
 }
 

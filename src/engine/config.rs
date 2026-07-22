@@ -99,10 +99,14 @@ pub struct Identity {
 
 impl Default for Identity {
     fn default() -> Self {
+        let timezone = match iana_time_zone::get_timezone() {
+            Ok(timezone) => timezone,
+            Err(_) => "UTC".into(),
+        };
         Self {
             keymap: "us".into(),
             locale: "C.UTF-8".into(),
-            timezone: "UTC".into(),
+            timezone,
             hostname: "puu".into(),
         }
     }
