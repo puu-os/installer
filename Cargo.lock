@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "puu-installer"
-version = "1.0.37"
+version = "1.0.38"
 dependencies = [
  "anyhow",
  "argh",
