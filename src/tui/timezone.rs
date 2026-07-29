@@ -11,25 +11,34 @@ use iocraft::prelude::*;
 
 use crate::tui::message::Effect;
 use crate::tui::state::{AppState, Route};
+use crate::tui::theme;
 
 const VIEW_LON_SPAN: f64 = 180.0;
 const LAT_MIN: f64 = -60.0;
 const LAT_MAX: f64 = 78.0;
-const PAN_TAU: f64 = 0.1;
+const PAN_TAU: f64 = 0.12;
 const PAN_MIN_SPEED: f64 = 12.0;
-const PAN_MAX_SPEED: f64 = 360.0;
-const PAN_SNAP: f64 = 0.001;
+const PAN_MAX_SPEED: f64 = 900.0;
+const PAN_SNAP: f64 = 0.02;
 const PAN_KEY_STEP: f64 = 10.0;
 const PAN_MAX_LEAD: f64 = 20.0;
-const MAX_FRAME_DT: f64 = 0.1;
-const VISIBLE_ZONE_ROWS: usize = 8;
+const MAX_FRAME_DT: f64 = 0.05;
+const VISIBLE_ZONE_ROWS: usize = 6;
 const MAP_W: usize = 720;
 const MAP_H: usize = 360;
 const ROW_BYTES: usize = MAP_W / 8;
 const INTEGRAL_STRIDE: usize = MAP_W + 1;
 const LON_SCALE: f64 = MAP_W as f64 / 360.0;
 const LAT_SCALE: f64 = MAP_H as f64 / 180.0;
-const LAND_GLYPHS: [char; 5] = [' ', '░', '▒', '▓', '█'];
+const SHADES: [(char, f64, f64); 7] = [
+    (' ', 0.00, 0.00),
+    ('░', 0.25, 0.25),
+    ('▒', 0.50, 0.50),
+    ('▓', 0.75, 0.75),
+    ('█', 1.00, 1.00),
+    ('▀', 1.00, 0.00),
+    ('▄', 0.00, 1.00),
+];
 const ZONE_TAB: &str = include_str!("zone1970.tab");
 const WORLD_MASK: &[u8] = include_bytes!("world_mask.bin");
 
@@ -415,11 +424,130 @@ fn land_fraction(left: f64, top: f64, right: f64, bottom: f64) -> f64 {
     land_integral().wrapped_rectangle(left, top, right, bottom) / area
 }
 
-fn map_text_style(weight: Weight, invert: bool) -> CanvasTextStyle {
+fn map_text_style(color: Color, weight: Weight, invert: bool) -> CanvasTextStyle {
     let mut style = CanvasTextStyle::default();
+    style.color = Some(color);
     style.weight = weight;
     style.invert = invert;
     style
+}
+
+fn pick_glyph(top: f64, bottom: f64) -> char {
+    SHADES
+        .into_iter()
+        .min_by(|(_, left_top, left_bottom), (_, right_top, right_bottom)| {
+            let left_error = (left_top - top).powi(2) + (left_bottom - bottom).powi(2);
+            let right_error = (right_top - top).powi(2) + (right_bottom - bottom).powi(2);
+            left_error.total_cmp(&right_error)
+        })
+        .map_or(' ', |(glyph, _, _)| glyph)
+}
+
+fn near_grid(value: f64, spacing: f64, tolerance: f64) -> bool {
+    (value - (value / spacing).round() * spacing).abs() <= tolerance
+}
+
+struct MapRun {
+    x: isize,
+    text: String,
+    color: Color,
+}
+
+struct MapRow {
+    background: Color,
+    runs: Vec<MapRun>,
+}
+
+struct MapCache {
+    start_column: i32,
+    width: usize,
+    height: usize,
+    rows: Vec<MapRow>,
+}
+
+fn build_map_cache(start_column: i32, width: usize, height: usize) -> MapCache {
+    let start_x = f64::from(start_column);
+    let cell_width = VIEW_LON_SPAN * LON_SCALE / width as f64;
+    let row_span = LAT_MAX - LAT_MIN;
+    let half_height = row_span * LAT_SCALE / (height * 2) as f64;
+    let start_y = (90.0 - LAT_MAX) * LAT_SCALE;
+    let lon_tolerance = VIEW_LON_SPAN / width as f64 * 0.4;
+    let lat_tolerance = row_span / height as f64 * 0.18;
+    let mut rows = Vec::with_capacity(height);
+
+    for y in 0..height {
+        let top = start_y + (y * 2) as f64 * half_height;
+        let lat = LAT_MAX - (y as f64 + 0.5) / height as f64 * row_span;
+        let on_parallel = near_grid(lat, 30.0, lat_tolerance);
+        let mut runs = Vec::new();
+        let mut run_text = String::with_capacity(width * 3);
+        let mut run_color = None;
+        let mut run_start = 0;
+
+        for x in 0..width {
+            let left = start_x + x as f64 * cell_width;
+            let top_fraction =
+                land_fraction(left, top, left + cell_width, top + half_height).clamp(0.0, 1.0);
+            let bottom_fraction = land_fraction(
+                left,
+                top + half_height,
+                left + cell_width,
+                top + half_height * 2.0,
+            )
+            .clamp(0.0, 1.0);
+            let coverage = (top_fraction + bottom_fraction) * 0.5;
+            let (glyph, color) = if coverage <= 0.01 {
+                let lon = wrap_lon((left + cell_width * 0.5) / LON_SCALE - 180.0);
+                let on_meridian = near_grid(lon, 30.0, lon_tolerance);
+                if on_parallel && on_meridian {
+                    ('+', theme::ACCENT)
+                } else if on_parallel {
+                    ('─', theme::GUIDE)
+                } else if on_meridian {
+                    ('·', theme::GUIDE)
+                } else {
+                    (' ', theme::GUIDE)
+                }
+            } else if coverage >= 0.99 {
+                (pick_glyph(top_fraction, bottom_fraction), theme::LAND)
+            } else {
+                (pick_glyph(top_fraction, bottom_fraction), theme::COAST)
+            };
+
+            if run_color.is_some_and(|current| current != color) {
+                runs.push(MapRun {
+                    x: run_start as isize,
+                    text: std::mem::take(&mut run_text),
+                    color: run_color.unwrap_or(theme::GUIDE),
+                });
+                run_start = x;
+            }
+            run_color = Some(color);
+            run_text.push(glyph);
+        }
+        if !run_text.is_empty() {
+            runs.push(MapRun {
+                x: run_start as isize,
+                text: run_text,
+                color: run_color.unwrap_or(theme::GUIDE),
+            });
+        }
+        rows.push(MapRow {
+            background: if y % 8 < 2 {
+                theme::SEA_SHIMMER
+            } else {
+                theme::SEA
+            },
+            runs,
+        });
+    }
+
+    MapCache {
+        start_column,
+        width,
+        height,
+        rows,
+    }
 }
 
 #[with_layout_style_props]
@@ -433,6 +561,7 @@ pub(crate) struct WorldMapProps {
 pub(crate) struct WorldMap {
     center_lon: f64,
     selected_zone: Option<MapPoint>,
+    cache: Option<MapCache>,
 }
 
 impl Component for WorldMap {
@@ -442,6 +571,7 @@ impl Component for WorldMap {
         Self {
             center_lon: f64::from(props.center_lon_milli) / 1000.0,
             selected_zone: props.selected_zone,
+            cache: None,
         }
     }
 
@@ -463,30 +593,32 @@ impl Component for WorldMap {
         }
         let width = usize::from(size.width);
         let height = usize::from(size.height);
-        let start_x = (wrap_lon(self.center_lon - VIEW_LON_SPAN / 2.0) + 180.0) * LON_SCALE;
-        let cell_width = VIEW_LON_SPAN * LON_SCALE / width as f64;
-        let row_span = LAT_MAX - LAT_MIN;
-        let cell_height = row_span * LAT_SCALE / height as f64;
-        let start_y = (90.0 - LAT_MAX) * LAT_SCALE;
-        let land_style = map_text_style(Weight::Normal, false);
-        let mut row = String::with_capacity(width * 3);
-        let mut canvas = drawer.canvas();
-        for y in 0..height {
-            row.clear();
-            let top = start_y + y as f64 * cell_height;
-            for x in 0..width {
-                let left = start_x + x as f64 * cell_width;
-                let fraction =
-                    land_fraction(left, top, left + cell_width, top + cell_height).clamp(0.0, 1.0);
-                let glyph = if fraction < 0.01 {
-                    0
-                } else {
-                    ((fraction * 3.0).round() as usize + 1).min(LAND_GLYPHS.len() - 1)
-                };
-                row.push(LAND_GLYPHS[glyph]);
-            }
-            canvas.set_text(0, y as isize, row.trim_end(), land_style);
+        let start_column =
+            ((wrap_lon(self.center_lon - VIEW_LON_SPAN / 2.0) + 180.0) * LON_SCALE).round() as i32;
+        let start_column = start_column.rem_euclid(MAP_W as i32);
+        let cache_matches = self.cache.as_ref().is_some_and(|cache| {
+            cache.start_column == start_column && cache.width == width && cache.height == height
+        });
+        if !cache_matches {
+            self.cache = Some(build_map_cache(start_column, width, height));
         }
+
+        let mut canvas = drawer.canvas();
+        if let Some(cache) = self.cache.as_ref() {
+            for (y, row) in cache.rows.iter().enumerate() {
+                canvas.set_background_color(0, y as isize, width, 1, row.background);
+                for run in &row.runs {
+                    canvas.set_text(
+                        run.x,
+                        y as isize,
+                        &run.text,
+                        map_text_style(run.color, Weight::Normal, false),
+                    );
+                }
+            }
+        }
+
+        let row_span = LAT_MAX - LAT_MIN;
         if let Some(zone) = self
             .selected_zone
             .filter(|zone| (LAT_MIN..=LAT_MAX).contains(&zone.lat))
@@ -494,9 +626,15 @@ impl Component for WorldMap {
             let x = ((lon_delta(self.center_lon, zone.lon) + VIEW_LON_SPAN / 2.0) / VIEW_LON_SPAN
                 * width as f64)
                 .floor() as isize;
-            let y = ((LAT_MAX - zone.lat) / row_span * height as f64).floor() as isize;
-            if x >= 0 && x < width as isize && y >= 0 && y < height as isize {
-                canvas.set_text(x, y, "X", map_text_style(Weight::Bold, true));
+            let y = ((LAT_MAX - zone.lat) / row_span * height as f64).floor() as usize;
+            let y = y.min(height.saturating_sub(1)) as isize;
+            if x >= 0 && x < width as isize {
+                canvas.set_text(
+                    x,
+                    y,
+                    "X",
+                    map_text_style(theme::WARNING, Weight::Bold, true),
+                );
             }
         }
     }

@@ -13,12 +13,16 @@ use crate::engine::{block, firmware, pipeline};
 use crate::tui::app::{InstallTask, Installer, Trap};
 use crate::tui::message::{DriveInfo, Effect, FieldId, FormId, Message, ToggleId};
 use crate::tui::state::{AppState, IdentityDraft, InstallStepState, Modal, Route};
+use crate::tui::theme;
 use crate::tui::timezone;
 use crate::tui::timezone::WorldMap;
 
 const MAX_LOG_LINES: usize = 2000;
 const REBOOT_DELAY_SECONDS: u16 = 30;
-const TICK_INTERVAL: Duration = Duration::from_micros(16_667);
+const MAP_FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const INSTALL_PULSE_INTERVAL: Duration = Duration::from_millis(100);
 
 const LANGUAGES: &[(&str, &str)] = &[
     ("English (US)", "en_US.UTF-8"),
@@ -481,8 +485,10 @@ struct UiController {
     task: Option<InstallTask>,
     drive_rx: Option<mpsc::Receiver<Message>>,
     trap: Option<Trap>,
+    wake_tx: smol::channel::Sender<()>,
     last_countdown: Instant,
     last_animation: Instant,
+    last_visual_pulse: Instant,
     terminal_size: (u16, u16),
 }
 
@@ -633,6 +639,14 @@ fn service(controller: &mut UiController) -> bool {
     let animation_elapsed = now.saturating_duration_since(controller.last_animation);
     controller.last_animation = now;
     let mut dirty = false;
+    if controller.state.route == Route::Install
+        && !controller.state.install.complete
+        && !controller.state.install.failed
+        && now.saturating_duration_since(controller.last_visual_pulse) >= INSTALL_PULSE_INTERVAL
+    {
+        controller.last_visual_pulse = now;
+        dirty = true;
+    }
     let mut messages = Vec::new();
     let drive_message = controller
         .drive_rx
@@ -680,6 +694,22 @@ fn service(controller: &mut UiController) -> bool {
     dirty
 }
 
+fn poll_interval(controller: &UiController) -> Duration {
+    if controller.state.route == Route::Timezone
+        && controller.state.timezone.map_center_lon_milli
+            != controller.state.timezone.map_target_lon_milli
+    {
+        MAP_FRAME_INTERVAL
+    } else if controller.task.is_some()
+        || controller.drive_rx.is_some()
+        || (controller.state.route == Route::Reboot && controller.state.reboot.automatic)
+    {
+        ACTIVE_POLL_INTERVAL
+    } else {
+        IDLE_POLL_INTERVAL
+    }
+}
+
 fn overall_install_progress(state: &AppState) -> u16 {
     if state.install.complete {
         return 100;
@@ -704,6 +734,23 @@ fn overall_install_progress(state: &AppState) -> u16 {
     u16::try_from(progressed_weight * 100 / total_weight.max(1)).unwrap_or(100)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LayoutMode {
+    Compact,
+    Standard,
+    Wide,
+}
+
+fn layout_mode((width, height): (u16, u16)) -> LayoutMode {
+    if width < 80 || height < 24 {
+        LayoutMode::Compact
+    } else if width >= 120 && height >= 28 {
+        LayoutMode::Wide
+    } else {
+        LayoutMode::Standard
+    }
+}
+
 fn selected_row(content: impl Into<String>, selected: bool) -> AnyElement<'static> {
     let marker = if selected { ">" } else { " " };
     let weight = if selected {
@@ -711,29 +758,53 @@ fn selected_row(content: impl Into<String>, selected: bool) -> AnyElement<'stati
     } else {
         Weight::Normal
     };
+    let background = if selected {
+        theme::SELECTED
+    } else {
+        theme::BACKGROUND
+    };
+    let color = if selected {
+        theme::ON_SELECTED
+    } else {
+        theme::FOREGROUND
+    };
     let content = content.into();
     element! {
-        View(width: 100pct, height: 1, padding_left: 1) {
-            Text(content: format!("{marker} {content}"), weight: weight, invert: selected, wrap: TextWrap::NoWrap)
+        View(width: 100pct, height: 1, padding_left: 1, background_color: background) {
+            Text(content: format!("{marker} {content}"), color: color, weight: weight, wrap: TextWrap::NoWrap)
+        }
+    }
+    .into_any()
+}
+
+fn styled_text_row(content: String, weight: Weight, color: Color) -> AnyElement<'static> {
+    element! {
+        View(width: 100pct, min_height: 1) {
+            Text(content: content, color: color, weight: weight)
         }
     }
     .into_any()
 }
 
 fn text_row(content: String, weight: Weight) -> AnyElement<'static> {
-    element! {
-        View(width: 100pct, min_height: 1) {
-            Text(content: content, weight: weight)
-        }
-    }
-    .into_any()
+    styled_text_row(content, weight, theme::FOREGROUND)
 }
 
 fn panel(label: &str, rows: Vec<AnyElement<'static>>) -> AnyElement<'static> {
     element! {
-        View(width: 100pct, height: 100pct, flex_direction: FlexDirection::Column, overflow: Overflow::Hidden) {
+        View(
+            width: 100pct,
+            height: 100pct,
+            padding_left: 1,
+            padding_right: 1,
+            border_style: BorderStyle::Single,
+            border_color: theme::PANEL,
+            background_color: theme::BACKGROUND,
+            flex_direction: FlexDirection::Column,
+            overflow: Overflow::Hidden,
+        ) {
             View(width: 100pct, height: 2) {
-                Text(content: label.to_string(), weight: Weight::Light)
+                Text(content: label.to_string(), color: theme::ACCENT, weight: Weight::Bold)
             }
             #(rows)
         }
@@ -741,29 +812,60 @@ fn panel(label: &str, rows: Vec<AnyElement<'static>>) -> AnyElement<'static> {
     .into_any()
 }
 
-fn progress_row(label: &str, percent: u16, terminal_width: u16) -> AnyElement<'static> {
-    let bar_width = usize::from(terminal_width.saturating_sub(24)).clamp(8, 40);
-    let filled = usize::from(percent.min(100)) * bar_width / 100;
-    let bar = format!(
-        "{label:<8} [{}{}] {percent:3}%",
-        "#".repeat(filled),
-        "-".repeat(bar_width - filled)
-    );
-    text_row(bar, Weight::Bold)
+fn progress_row(
+    label: &str,
+    percent: u16,
+    available_width: u16,
+    color: Color,
+) -> AnyElement<'static> {
+    let bar_width = usize::from(available_width.saturating_sub(24)).clamp(8, 52);
+    let percent = percent.min(100);
+    let filled = usize::from(percent) * bar_width / 100;
+    let contents = vec![
+        MixedTextContent::new(format!("{label:<8} ["))
+            .color(theme::FOREGROUND)
+            .weight(Weight::Bold),
+        MixedTextContent::new("█".repeat(filled)).color(color),
+        MixedTextContent::new("░".repeat(bar_width - filled)).color(theme::PANEL),
+        MixedTextContent::new(format!("] {percent:3}%")).color(theme::FOREGROUND),
+    ];
+    element! {
+        View(width: 100pct, height: 1) {
+            MixedText(contents: contents, wrap: TextWrap::NoWrap)
+        }
+    }
+    .into_any()
 }
 
 fn welcome_content(state: &AppState) -> AnyElement<'static> {
-    let rows = ["Install system", "Open shell", "Reboot"]
-        .into_iter()
-        .enumerate()
-        .map(|(index, label)| selected_row(label.to_string(), state.selection.welcome == index))
-        .collect();
-    panel("Actions", rows)
+    let mut rows = vec![
+        styled_text_row(
+            "Install a bootc system with guided disk, identity, and security setup.".to_string(),
+            Weight::Normal,
+            theme::MUTED,
+        ),
+        text_row(String::new(), Weight::Normal),
+    ];
+    rows.extend(
+        ["Install system", "Open recovery shell", "Reboot machine"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, label)| selected_row(label, state.selection.welcome == index)),
+    );
+    panel("Get started", rows)
 }
 
-fn target_content(controller: &UiController) -> AnyElement<'static> {
+fn target_content(controller: &UiController, layout: LayoutMode) -> AnyElement<'static> {
     let state = &controller.state;
-    let rows = if controller.drive_rx.is_some() && state.drives.is_empty() {
+    let heading = styled_text_row(
+        format!(
+            "{:<18} {:<10} {:<8} {:<20} STATUS",
+            "DEVICE", "SIZE", "BUS", "MODEL"
+        ),
+        Weight::Bold,
+        theme::MUTED,
+    );
+    let mut rows = if controller.drive_rx.is_some() && state.drives.is_empty() {
         vec![text_row(
             "Scanning for target disks…".to_string(),
             Weight::Bold,
@@ -784,19 +886,24 @@ fn target_content(controller: &UiController) -> AnyElement<'static> {
                 } else {
                     "BUSY"
                 };
-                selected_row(
+                let label = if layout == LayoutMode::Compact {
+                    format!("{:<18} {:<10} {status}", drive.path, drive.size)
+                } else {
                     format!(
                         "{:<18} {:<10} {:<8} {:<20} {status}",
                         drive.path,
                         drive.size,
                         drive.transport,
                         drive.model.chars().take(20).collect::<String>()
-                    ),
-                    state.selection.target == Some(index),
-                )
+                    )
+                };
+                selected_row(label, state.selection.target == Some(index))
             })
             .collect()
     };
+    if !state.drives.is_empty() && layout != LayoutMode::Compact {
+        rows.insert(0, heading);
+    }
     panel("Target disks", rows)
 }
 
@@ -839,47 +946,88 @@ fn identity_content(state: &AppState) -> AnyElement<'static> {
         .map(|(index, value)| selected_row(value, draft.field_index == index))
         .collect::<Vec<_>>();
     if draft.reveal_password {
-        rows.push(text_row("Password reveal is on".to_string(), Weight::Bold));
+        rows.push(styled_text_row(
+            "Password reveal is on".to_string(),
+            Weight::Bold,
+            theme::WARNING,
+        ));
     }
     if let Some(error) = state.validation_error.as_ref() {
-        rows.push(text_row(format!("Error: {error}"), Weight::Bold));
+        rows.push(styled_text_row(
+            format!("Error: {error}"),
+            Weight::Bold,
+            theme::DANGER,
+        ));
     }
     panel("User account", rows)
 }
 
-fn timezone_content(state: &AppState) -> AnyElement<'static> {
-    let zone_rows = timezone::visible_names(state)
+fn world_map_panel(state: &AppState) -> AnyElement<'static> {
+    let selected_zone = timezone::selected_zone(state);
+    element! {
+        View(
+            width: 100pct,
+            height: 100pct,
+            border_style: BorderStyle::Single,
+            border_color: theme::PANEL,
+            background_color: theme::SEA,
+            flex_direction: FlexDirection::Column,
+            overflow: Overflow::Hidden,
+        ) {
+            WorldMap(
+                center_lon_milli: state.timezone.map_center_lon_milli,
+                selected_zone,
+                width: 100pct,
+                height: 100pct,
+            )
+        }
+    }
+    .into_any()
+}
+
+fn timezone_list_panel(state: &AppState) -> AnyElement<'static> {
+    let mut zone_rows = timezone::visible_names(state)
         .into_iter()
         .map(|(name, selected)| selected_row(name, selected))
         .collect::<Vec<_>>();
     let filter = if state.timezone.filter.is_empty() {
-        "Type to filter…".to_string()
+        "Type to filter...".to_string()
     } else {
         state.timezone.filter.clone()
     };
-    let selected_zone = timezone::selected_zone(state);
-    element! {
-        View(width: 100pct, height: 100pct, flex_direction: FlexDirection::Row) {
-            View(width: 64pct, height: 100pct) {
-                WorldMap(
-                    center_lon_milli: state.timezone.map_center_lon_milli,
-                    selected_zone,
-                    width: 100pct,
-                    height: 100pct,
-                )
-            }
-            View(width: 36pct, height: 100pct, padding_left: 2, flex_direction: FlexDirection::Column, overflow: Overflow::Hidden) {
-                View(width: 100pct, height: 2) {
-                    Text(content: "Time zones", weight: Weight::Light)
+    zone_rows.insert(
+        0,
+        styled_text_row(format!("Filter  {filter}"), Weight::Bold, theme::ACCENT),
+    );
+    panel("Time zones", zone_rows)
+}
+
+fn timezone_content(state: &AppState, layout: LayoutMode) -> AnyElement<'static> {
+    if layout == LayoutMode::Compact {
+        element! {
+            View(width: 100pct, height: 100pct, flex_direction: FlexDirection::Column, row_gap: 1) {
+                View(width: 100pct, height: 40pct) {
+                    #(world_map_panel(state))
                 }
-                View(width: 100pct, height: 2) {
-                    Text(content: format!("Filter  {filter}"), wrap: TextWrap::NoWrap)
+                View(width: 100pct, height: 60pct) {
+                    #(timezone_list_panel(state))
                 }
-                #(zone_rows)
             }
         }
+        .into_any()
+    } else {
+        element! {
+            View(width: 100pct, height: 100pct, flex_direction: FlexDirection::Row, column_gap: 1) {
+                View(width: 66pct, height: 100pct) {
+                    #(world_map_panel(state))
+                }
+                View(width: 34pct, height: 100pct) {
+                    #(timezone_list_panel(state))
+                }
+            }
+        }
+        .into_any()
     }
-    .into_any()
 }
 
 fn secure_boot_content(controller: &UiController) -> AnyElement<'static> {
@@ -894,9 +1042,10 @@ fn secure_boot_content(controller: &UiController) -> AnyElement<'static> {
             ),
             Weight::Normal,
         ));
-        rows.push(text_row(
+        rows.push(styled_text_row(
             "This writes firmware Secure Boot variables.".to_string(),
             Weight::Bold,
+            theme::WARNING,
         ));
         rows.push(selected_row(
             "[ Back ]".to_string(),
@@ -912,13 +1061,21 @@ fn secure_boot_content(controller: &UiController) -> AnyElement<'static> {
         } else {
             "Firmware Setup Mode could not be detected."
         };
-        rows.push(text_row(message.to_string(), Weight::Bold));
+        rows.push(styled_text_row(
+            message.to_string(),
+            Weight::Bold,
+            theme::WARNING,
+        ));
         if let Some(status) = state
             .firmware
             .as_ref()
             .filter(|status| !status.reason.is_empty())
         {
-            rows.push(text_row(status.reason.clone(), Weight::Bold));
+            rows.push(styled_text_row(
+                status.reason.clone(),
+                Weight::Bold,
+                theme::DANGER,
+            ));
         }
         for (index, label) in ["[ Back ]", "[ Continue without Secure Boot ]", "[ Reboot ]"]
             .into_iter()
@@ -936,6 +1093,13 @@ fn secure_boot_content(controller: &UiController) -> AnyElement<'static> {
 fn review_content(controller: &UiController) -> AnyElement<'static> {
     let state = &controller.state;
     let rows = vec![
+        styled_text_row(
+            "Review these settings carefully. Starting installation will erase the target disk."
+                .to_string(),
+            Weight::Bold,
+            theme::WARNING,
+        ),
+        text_row(String::new(), Weight::Normal),
         text_row(
             format!("Target disk  {}", controller.ctx.drive_label),
             Weight::Normal,
@@ -948,30 +1112,116 @@ fn review_content(controller: &UiController) -> AnyElement<'static> {
             format!("Timezone     {}", controller.ctx.config.identity.timezone),
             Weight::Normal,
         ),
-        selected_row("[ Back ]".to_string(), state.selection.review == 0),
-        selected_row(
-            "[ Start installation ]".to_string(),
-            state.selection.review == 1,
-        ),
+        selected_row("[ Back ]", state.selection.review == 0),
+        selected_row("[ Start installation ]", state.selection.review == 1),
     ];
     panel("Installation summary", rows)
 }
 
-fn install_content(controller: &UiController) -> AnyElement<'static> {
+fn format_elapsed(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+fn install_step_rows(state: &AppState, max_rows: usize) -> Vec<AnyElement<'static>> {
+    let current = state.install.current_step.unwrap_or(0);
+    let start = current
+        .saturating_sub(max_rows / 2)
+        .min(pipeline::STEPS.len().saturating_sub(max_rows));
+    pipeline::STEPS
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(max_rows)
+        .map(|(index, step)| {
+            let step_state = state
+                .install
+                .step_states
+                .get(index)
+                .copied()
+                .unwrap_or(InstallStepState::Pending);
+            let (marker, color, weight) = match step_state {
+                InstallStepState::Done => ("[x]", theme::SUCCESS, Weight::Bold),
+                InstallStepState::Active => ("[>]", theme::ACCENT, Weight::Bold),
+                InstallStepState::Skipped => ("[-]", theme::MUTED, Weight::Light),
+                InstallStepState::Failed => ("[!]", theme::DANGER, Weight::Bold),
+                InstallStepState::Pending => ("[ ]", theme::MUTED, Weight::Normal),
+            };
+            styled_text_row(
+                format!("{marker} {:02} {}", index + 1, step.title),
+                weight,
+                color,
+            )
+        })
+        .collect()
+}
+
+fn install_log_panel(logs: String, scroll: usize) -> AnyElement<'static> {
+    let title = if scroll == 0 {
+        "Live installation log".to_string()
+    } else {
+        format!("Live installation log  [^{scroll} lines - PgDn to follow]")
+    };
+    element! {
+        View(
+            width: 100pct,
+            height: 100pct,
+            padding_left: 1,
+            padding_right: 1,
+            border_style: BorderStyle::Single,
+            border_color: theme::PANEL,
+            background_color: theme::BACKGROUND,
+            flex_direction: FlexDirection::Column,
+            overflow: Overflow::Hidden,
+        ) {
+            View(width: 100pct, height: 2) {
+                Text(content: title, color: theme::ACCENT, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            }
+            View(width: 100pct, flex_grow: 1.0_f32, overflow: Overflow::Hidden) {
+                Text(content: logs, color: theme::MUTED, wrap: TextWrap::NoWrap)
+            }
+        }
+    }
+    .into_any()
+}
+
+fn install_content(controller: &UiController, layout: LayoutMode) -> AnyElement<'static> {
     let state = &controller.state;
+    let step_index = state.install.current_step.unwrap_or(0);
     let step = state
         .install
         .current_step
         .and_then(|index| pipeline::STEPS.get(index))
-        .map_or("Starting installation", |step| step.title);
-    let status = if state.install.complete {
-        "Installation complete"
+        .map_or("Preparing installation", |step| step.title);
+    let running = !state.install.complete && !state.install.failed;
+    let spinner_frame = state.install.started.map_or(0, |started| {
+        (Instant::now()
+            .saturating_duration_since(started)
+            .as_millis() as usize
+            / 100)
+            % 4
+    });
+    let spinner = ["|", "/", "-", "\\"][spinner_frame];
+    let (status, status_color) = if state.install.complete {
+        ("Installation complete".to_string(), theme::SUCCESS)
     } else if state.install.failed {
-        "Installation failed"
+        ("Installation failed".to_string(), theme::DANGER)
     } else {
-        step
+        (
+            format!(
+                "{spinner} Step {} of {}  {step}",
+                step_index.saturating_add(1).min(pipeline::STEPS.len()),
+                pipeline::STEPS.len()
+            ),
+            theme::ACCENT,
+        )
     };
-    let visible_lines = usize::from(controller.terminal_size.1.saturating_sub(13)).max(3);
+    let elapsed = match (state.install.started, state.install.elapsed_seconds) {
+        (_, Some(seconds)) => Duration::from_secs(seconds),
+        (Some(started), None) if running => started.elapsed(),
+        _ => Duration::ZERO,
+    };
+    let visible_lines = usize::from(controller.terminal_size.1.saturating_sub(15)).max(3);
     let end = state
         .install
         .logs
@@ -987,17 +1237,50 @@ fn install_content(controller: &UiController) -> AnyElement<'static> {
         .cloned()
         .collect::<Vec<_>>()
         .join("\n");
-    element! {
-        View(width: 100pct, height: 100pct, flex_direction: FlexDirection::Column, row_gap: 1, overflow: Overflow::Hidden) {
-            Text(content: status, weight: Weight::Bold)
-            #(progress_row("Overall", overall_install_progress(state), controller.terminal_size.0))
-            #(progress_row("Step", state.install.step_fraction, controller.terminal_size.0))
-            View(width: 100pct, flex_grow: 1.0_f32, padding: 1, overflow: Overflow::Hidden) {
-                Text(content: logs)
+    let progress_width = controller.terminal_size.0.saturating_sub(8);
+    let overview = element! {
+        View(width: 100pct, height: 5, flex_direction: FlexDirection::Column) {
+            View(width: 100pct, height: 1, flex_direction: FlexDirection::Row) {
+                Text(content: status, color: status_color, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+                Text(content: format!("  Elapsed {}", format_elapsed(elapsed)), color: theme::MUTED, wrap: TextWrap::NoWrap)
             }
+            #(progress_row("Overall", overall_install_progress(state), progress_width, theme::SUCCESS))
+            #(progress_row("Step", state.install.step_fraction, progress_width, theme::ACCENT))
+            Text(
+                content: if state.install.committed { "Point of no return reached" } else { "Installation can still be cancelled safely" },
+                color: if state.install.committed { theme::WARNING } else { theme::MUTED },
+                weight: Weight::Light,
+                wrap: TextWrap::NoWrap,
+            )
         }
     }
-    .into_any()
+    .into_any();
+
+    if layout == LayoutMode::Wide {
+        let max_step_rows = usize::from(controller.terminal_size.1.saturating_sub(15)).max(6);
+        element! {
+            View(width: 100pct, height: 100pct, flex_direction: FlexDirection::Column, row_gap: 1, overflow: Overflow::Hidden) {
+                #(overview)
+                View(width: 100pct, flex_grow: 1.0_f32, flex_direction: FlexDirection::Row, column_gap: 1, overflow: Overflow::Hidden) {
+                    View(width: 37pct, height: 100pct) {
+                        #(panel("Installation steps", install_step_rows(state, max_step_rows)))
+                    }
+                    View(width: 63pct, height: 100pct) {
+                        #(install_log_panel(logs, state.scroll.install_log))
+                    }
+                }
+            }
+        }
+        .into_any()
+    } else {
+        element! {
+            View(width: 100pct, height: 100pct, flex_direction: FlexDirection::Column, row_gap: 1, overflow: Overflow::Hidden) {
+                #(overview)
+                #(install_log_panel(logs, state.scroll.install_log))
+            }
+        }
+        .into_any()
+    }
 }
 
 fn reboot_content(controller: &UiController) -> AnyElement<'static> {
@@ -1009,12 +1292,13 @@ fn reboot_content(controller: &UiController) -> AnyElement<'static> {
                 format!("Target  {}", controller.ctx.drive_label),
                 Weight::Normal,
             ),
-            text_row(
+            styled_text_row(
                 format!(
                     "Automatic reboot in {} seconds",
                     state.reboot.remaining_seconds.unwrap_or(0)
                 ),
                 Weight::Bold,
+                theme::ACCENT,
             ),
             selected_row("[ Open shell ]".to_string(), state.selection.reboot == 0),
             selected_row("[ Reboot now ]".to_string(), state.selection.reboot == 1),
@@ -1046,6 +1330,11 @@ fn modal_element(state: &AppState, width: u16, height: u16) -> Option<AnyElement
             "The installer will stop and clean up mounts.".to_string(),
         ),
         Modal::None => return None,
+    };
+    let modal_color = if modal == Modal::Failure {
+        theme::DANGER
+    } else {
+        theme::WARNING
     };
     let max_dialog_width = width.saturating_sub(2).max(1);
     let dialog_width = width
@@ -1080,11 +1369,13 @@ fn modal_element(state: &AppState, width: u16, height: u16) -> Option<AnyElement
                 flex_direction: FlexDirection::Column,
                 row_gap: 1,
                 border_style: BorderStyle::Single,
+                border_color: modal_color,
+                background_color: theme::BACKGROUND,
                 overflow: Overflow::Hidden,
             ) {
-                Text(content: title, weight: Weight::Bold, align: TextAlign::Center)
-                Text(content: body, weight: Weight::Bold, align: TextAlign::Center)
-                Text(content: buttons, weight: Weight::Bold, align: TextAlign::Center)
+                Text(content: title, color: modal_color, weight: Weight::Bold, align: TextAlign::Center)
+                Text(content: body, color: theme::FOREGROUND, weight: Weight::Bold, align: TextAlign::Center)
+                Text(content: buttons, color: theme::ACCENT, weight: Weight::Bold, align: TextAlign::Center)
             }
         }
         .into_any(),
@@ -1093,6 +1384,7 @@ fn modal_element(state: &AppState, width: u16, height: u16) -> Option<AnyElement
 
 struct Screen {
     title: String,
+    subtitle: &'static str,
     content: AnyElement<'static>,
     footer: &'static str,
     modal: Option<AnyElement<'static>>,
@@ -1119,14 +1411,25 @@ fn screen(controller: &UiController) -> Screen {
         Route::Install => format!("Installing {}", controller.ctx.config.branding.name),
         Route::Reboot => "Install Complete".to_string(),
     };
+    let subtitle = match state.route {
+        Route::Welcome => "READY  /  GUIDED SYSTEM INSTALLATION",
+        Route::Target => "SETUP  1 / 5  /  TARGET DISK",
+        Route::Identity => "SETUP  2 / 5  /  SYSTEM IDENTITY",
+        Route::Timezone => "SETUP  3 / 5  /  TIME ZONE",
+        Route::SecureBoot => "SETUP  4 / 5  /  PLATFORM SECURITY",
+        Route::Review => "SETUP  5 / 5  /  REVIEW",
+        Route::Install => "INSTALLATION IN PROGRESS",
+        Route::Reboot => "INSTALLATION COMPLETE",
+    };
+    let layout = layout_mode(controller.terminal_size);
     let content = match state.route {
         Route::Welcome => welcome_content(state),
-        Route::Target => target_content(controller),
+        Route::Target => target_content(controller, layout),
         Route::Identity => identity_content(state),
-        Route::Timezone => timezone_content(state),
+        Route::Timezone => timezone_content(state, layout),
         Route::SecureBoot => secure_boot_content(controller),
         Route::Review => review_content(controller),
-        Route::Install => install_content(controller),
+        Route::Install => install_content(controller, layout),
         Route::Reboot => reboot_content(controller),
     };
     let footer = match state.route {
@@ -1144,6 +1447,7 @@ fn screen(controller: &UiController) -> Screen {
     };
     Screen {
         title,
+        subtitle,
         content,
         footer,
         modal: modal_element(
@@ -1157,10 +1461,12 @@ fn screen(controller: &UiController) -> Screen {
 #[derive(Props)]
 struct InstallerTuiProps {
     controller: Arc<Mutex<UiController>>,
+    wake_rx: smol::channel::Receiver<()>,
 }
 
 impl Default for InstallerTuiProps {
     fn default() -> Self {
+        let (wake_tx, wake_rx) = smol::channel::bounded(1);
         Self {
             controller: Arc::new(Mutex::new(UiController {
                 ctx: crate::engine::pipeline::Context::default(),
@@ -1168,10 +1474,13 @@ impl Default for InstallerTuiProps {
                 task: None,
                 drive_rx: None,
                 trap: None,
+                wake_tx,
                 last_countdown: Instant::now(),
                 last_animation: Instant::now(),
+                last_visual_pulse: Instant::now(),
                 terminal_size: terminal_size(),
             })),
+            wake_rx,
         }
     }
 }
@@ -1188,7 +1497,7 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
         if controller.trap.is_some() {
             return;
         }
-        match event {
+        let should_wake = match event {
             TerminalEvent::Key(key) if key.kind != KeyEventKind::Release => {
                 dispatch(
                     &mut controller,
@@ -1200,18 +1509,37 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
                     }),
                 );
                 revision.set(revision.get().wrapping_add(1));
+                true
             }
             TerminalEvent::Resize(width, height) => {
                 controller.terminal_size = (width, height);
                 revision.set(revision.get().wrapping_add(1));
+                true
             }
-            _ => {}
+            _ => false,
+        };
+        if should_wake {
+            let _ = controller.wake_tx.try_send(());
         }
     });
     let controller = props.controller.clone();
+    let wake_rx = props.wake_rx.clone();
     hooks.use_future(async move {
+        let mut next_deadline = Instant::now() + IDLE_POLL_INTERVAL;
         loop {
-            smol::Timer::after(TICK_INTERVAL).await;
+            let woke = smol::future::race(
+                async {
+                    smol::Timer::after(next_deadline.saturating_duration_since(Instant::now()))
+                        .await;
+                    false
+                },
+                async {
+                    let _ = wake_rx.recv().await;
+                    true
+                },
+            )
+            .await;
+            let mut interval = IDLE_POLL_INTERVAL;
             if let Ok(mut controller) = controller.lock() {
                 if controller.trap.is_some() {
                     break;
@@ -1219,8 +1547,18 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
                 if service(&mut controller) {
                     revision.set(revision.get().wrapping_add(1));
                 }
+                interval = poll_interval(&controller);
                 if controller.trap.is_some() {
                     break;
+                }
+            }
+            let now = Instant::now();
+            if woke {
+                next_deadline = now + interval;
+            } else {
+                next_deadline += interval;
+                if next_deadline <= now {
+                    next_deadline = now + interval;
                 }
             }
         }
@@ -1232,6 +1570,7 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
                 (
                     Screen {
                         title: "Installer unavailable".to_string(),
+                        subtitle: "ERROR",
                         content: text_row("Installer state unavailable".to_string(), Weight::Bold),
                         footer: "",
                         modal: None,
@@ -1257,6 +1596,7 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
     }
     let Screen {
         title,
+        subtitle,
         content,
         footer,
         modal,
@@ -1267,15 +1607,30 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
             height: terminal_height,
             position: Position::Relative,
             flex_direction: FlexDirection::Column,
+            background_color: theme::BACKGROUND,
         ) {
-            View(width: 100pct, height: 1, padding_left: 2) {
-                Text(content: title, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            View(width: 100pct, height: 1, padding_left: 2, background_color: theme::TITLE) {
+                Text(content: title, color: theme::FOREGROUND, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             }
-            View(width: 100pct, flex_grow: 1.0_f32, padding_top: 1, padding_bottom: 1, padding_left: 2, padding_right: 2, overflow: Overflow::Hidden) {
-                #(content)
+            View(width: 100pct, height: 1, padding_left: 2, background_color: theme::TITLE_DETAIL) {
+                Text(content: subtitle, color: theme::ACCENT, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             }
-            View(width: 100pct, height: 1, padding_left: 1) {
-                Text(content: footer, weight: Weight::Light, wrap: TextWrap::NoWrap)
+            View(
+                width: 100pct,
+                flex_grow: 1.0_f32,
+                padding_top: 1,
+                padding_bottom: 1,
+                padding_left: 2,
+                padding_right: 2,
+                align_items: AlignItems::Center,
+                overflow: Overflow::Hidden,
+            ) {
+                View(width: 100pct, max_width: 180, height: 100pct, overflow: Overflow::Hidden) {
+                    #(content)
+                }
+            }
+            View(width: 100pct, height: 1, padding_left: 1, background_color: theme::PANEL) {
+                Text(content: footer, color: theme::ACCENT, weight: Weight::Light, wrap: TextWrap::NoWrap)
             }
             #(modal)
         }
@@ -1284,20 +1639,27 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
 
 impl Installer {
     pub(crate) fn run_iocraft(&mut self) -> Trap {
+        let (wake_tx, wake_rx) = smol::channel::bounded(1);
         let controller = Arc::new(Mutex::new(UiController {
             ctx: std::mem::take(&mut self.ctx),
             state: std::mem::take(&mut self.state),
             task: None,
             drive_rx: None,
             trap: None,
+            wake_tx,
             last_countdown: Instant::now(),
             last_animation: Instant::now(),
+            last_visual_pulse: Instant::now(),
             terminal_size: terminal_size(),
         }));
         if let Ok(mut state) = controller.lock() {
             prepare_state(&mut state);
         }
-        let _ = smol::block_on(element!(InstallerTui(controller: controller.clone())).fullscreen());
+        let _ = smol::block_on(
+            element!(InstallerTui(controller: controller.clone(), wake_rx))
+                .fullscreen()
+                .disable_mouse_capture(),
+        );
         let mut controller = controller
             .lock()
             .unwrap_or_else(|_| panic!("installer state lock poisoned"));

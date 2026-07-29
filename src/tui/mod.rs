@@ -6,4 +6,5 @@ pub(crate) mod logging;
 pub(crate) mod message;
 pub(crate) mod runtime;
 pub(crate) mod state;
+pub(crate) mod theme;
 pub(crate) mod timezone;
