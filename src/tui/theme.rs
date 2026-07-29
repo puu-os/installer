@@ -22,3 +22,10 @@ pub(crate) const COAST: Color = Color::Green;
 pub(crate) const SEA: Color = Color::DarkBlue;
 pub(crate) const SEA_SHIMMER: Color = Color::Blue;
 pub(crate) const GUIDE: Color = Color::DarkCyan;
+pub(crate) const LAND_NIGHT: Color = Color::DarkGrey;
+pub(crate) const COAST_NIGHT: Color = Color::Grey;
+pub(crate) const SEA_NIGHT: Color = Color::Black;
+pub(crate) const SEA_NIGHT_SHIMMER: Color = Color::DarkGrey;
+pub(crate) const GUIDE_NIGHT: Color = Color::DarkGrey;
+/// Thin twilight band along the day/night terminator.
+pub(crate) const TERMINATOR: Color = Color::Magenta;

@@ -6,12 +6,16 @@
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEventKind,
+};
 use iocraft::prelude::*;
 
 use crate::engine::{block, firmware, pipeline};
 use crate::tui::app::{InstallTask, Installer, Trap};
-use crate::tui::message::{DriveInfo, Effect, FieldId, FormId, Message, ToggleId};
+use crate::tui::message::{
+    DriveInfo, Effect, FieldId, FormId, Message, MouseKind, ToggleId, sanitize_text,
+};
 use crate::tui::state::{AppState, IdentityDraft, InstallStepState, Modal, Route};
 use crate::tui::theme;
 use crate::tui::timezone;
@@ -22,7 +26,8 @@ const REBOOT_DELAY_SECONDS: u16 = 30;
 const MAP_FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const INSTALL_PULSE_INTERVAL: Duration = Duration::from_millis(100);
+/// Shared budget for install spinner + coalesced log/progress redraws.
+const INSTALL_RENDER_INTERVAL: Duration = Duration::from_millis(100);
 
 const LANGUAGES: &[(&str, &str)] = &[
     ("English (US)", "en_US.UTF-8"),
@@ -44,6 +49,454 @@ fn cycle(index: &mut usize, count: usize, backwards: bool) {
         *index = index.checked_sub(1).unwrap_or(count - 1);
     } else {
         *index = (*index + 1) % count;
+    }
+}
+
+/// Terminal families that implement the xterm mouse protocol.
+const MOUSE_TERM_PREFIXES: &[&str] = &[
+    "xterm",
+    "screen",
+    "tmux",
+    "rxvt",
+    "alacritty",
+    "kitty",
+    "wezterm",
+    "foot",
+    "ghostty",
+    "st",
+    "vte",
+    "gnome",
+    "konsole",
+    "contour",
+];
+
+/// Decide whether mouse reporting should be enabled for this session.
+///
+/// Linux VTs and dumb terminals do not implement xterm mouse protocols cleanly.
+/// Capability is inferred from `$TERM` (and optional override env vars) rather
+/// than probing the terminal, which is unreliable under non-interactive smoke.
+fn mouse_capture_enabled() -> bool {
+    match std::env::var("PUU_INSTALLER_MOUSE").ok().as_deref() {
+        Some("0" | "false" | "no" | "off") => return false,
+        Some("1" | "true" | "yes" | "on") => return true,
+        _ => {}
+    }
+    let term = std::env::var("TERM").unwrap_or_default();
+    if term.is_empty() || term == "dumb" || term == "linux" || term.starts_with("vt") {
+        return false;
+    }
+    MOUSE_TERM_PREFIXES
+        .iter()
+        .any(|prefix| term.starts_with(prefix) || term.contains(&format!("-{prefix}")))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HitAction {
+    /// Select list/button index for the current route; second click activates.
+    Select(usize),
+    /// Modal No/Yes button.
+    ModalSelect(usize),
+    /// World-map horizontal pan direction (-1 left, +1 right).
+    MapPan(i8),
+    /// Install log region (click re-enables follow mode).
+    InstallFollow,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HitTarget {
+    x0: u16,
+    y0: u16,
+    x1: u16,
+    y1: u16,
+    action: HitAction,
+}
+
+impl HitTarget {
+    fn contains(self, column: u16, row: u16) -> bool {
+        column >= self.x0 && column < self.x1 && row >= self.y0 && row < self.y1
+    }
+}
+
+/// Content frame matching `render_screen` geometry (headers + footer + padding).
+fn content_frame(width: u16, height: u16) -> (u16, u16, u16, u16) {
+    let header = 2_u16;
+    let footer = 1_u16;
+    let pad_y = 1_u16;
+    let pad_x = 2_u16;
+    let y0 = header.saturating_add(pad_y);
+    let y1 = height.saturating_sub(footer.saturating_add(pad_y)).max(y0);
+    let x0 = pad_x;
+    // Content is centered with max_width 180; for hit-testing the usable band
+    // is the full padded width, which is close enough for list selection.
+    let x1 = width.saturating_sub(pad_x).max(x0);
+    (x0, y0, x1, y1)
+}
+
+fn list_row_targets(
+    x0: u16,
+    x1: u16,
+    first_row: u16,
+    count: usize,
+    start_index: usize,
+) -> Vec<HitTarget> {
+    (0..count)
+        .map(|offset| {
+            let y = first_row.saturating_add(u16::try_from(offset).unwrap_or(u16::MAX));
+            HitTarget {
+                x0,
+                y0: y,
+                x1,
+                y1: y.saturating_add(1),
+                action: HitAction::Select(start_index.saturating_add(offset)),
+            }
+        })
+        .collect()
+}
+
+fn secure_boot_choice_count(state: &AppState) -> usize {
+    if state.firmware.as_ref().and_then(|status| status.setup_mode) == Some(true) {
+        2
+    } else {
+        3
+    }
+}
+
+fn modal_hit_targets(width: u16, height: u16) -> Vec<HitTarget> {
+    let max_dialog_width = width.saturating_sub(2).max(1);
+    let dialog_width = width
+        .saturating_mul(2)
+        .saturating_div(3)
+        .max(36)
+        .min(max_dialog_width);
+    let dialog_height = 9_u16.min(height.saturating_sub(2).max(1));
+    let left = width.saturating_sub(dialog_width) / 2;
+    let top = height.saturating_sub(dialog_height) / 2;
+    let button_y = top.saturating_add(dialog_height.saturating_sub(2));
+    let mid = left.saturating_add(dialog_width / 2);
+    vec![
+        HitTarget {
+            x0: left,
+            y0: button_y,
+            x1: mid,
+            y1: button_y.saturating_add(1),
+            action: HitAction::ModalSelect(0),
+        },
+        HitTarget {
+            x0: mid,
+            y0: button_y,
+            x1: left.saturating_add(dialog_width),
+            y1: button_y.saturating_add(1),
+            action: HitAction::ModalSelect(1),
+        },
+    ]
+}
+
+fn timezone_hit_targets(
+    state: &AppState,
+    layout: LayoutMode,
+    content: (u16, u16, u16, u16),
+    list_x: (u16, u16),
+) -> Vec<HitTarget> {
+    let (cx0, cy0, cx1, cy1) = content;
+    let (list_x0, list_x1) = list_x;
+    let mut targets = Vec::new();
+    let visible = timezone::visible_zones(state).len();
+    if layout == LayoutMode::Compact {
+        // Map on top (40%), list below (60%).
+        let split = cy0 + (cy1 - cy0) * 2 / 5;
+        let map_mid = list_x0 + (list_x1 - list_x0) / 2;
+        targets.push(HitTarget {
+            x0: list_x0,
+            y0: cy0.saturating_add(1),
+            x1: map_mid,
+            y1: split,
+            action: HitAction::MapPan(-1),
+        });
+        targets.push(HitTarget {
+            x0: map_mid,
+            y0: cy0.saturating_add(1),
+            x1: list_x1,
+            y1: split,
+            action: HitAction::MapPan(1),
+        });
+        // Filter row + zone rows start under the list panel title.
+        let zones_top = split.saturating_add(4);
+        targets.extend(list_row_targets(
+            list_x0,
+            list_x1,
+            zones_top,
+            visible,
+            state.timezone.top,
+        ));
+    } else {
+        // Map left (~66%), list right (~34%).
+        let split = cx0 + (cx1 - cx0) * 2 / 3;
+        let map_mid = cx0 + (split - cx0) / 2;
+        targets.push(HitTarget {
+            x0: cx0.saturating_add(1),
+            y0: cy0.saturating_add(1),
+            x1: map_mid,
+            y1: cy1.saturating_sub(1),
+            action: HitAction::MapPan(-1),
+        });
+        targets.push(HitTarget {
+            x0: map_mid,
+            y0: cy0.saturating_add(1),
+            x1: split.saturating_sub(1),
+            y1: cy1.saturating_sub(1),
+            action: HitAction::MapPan(1),
+        });
+        let zones_left = split.saturating_add(2);
+        let zones_top = cy0.saturating_add(4); // list panel title + filter row
+        targets.extend(list_row_targets(
+            zones_left,
+            cx1.saturating_sub(1).max(zones_left.saturating_add(1)),
+            zones_top,
+            visible,
+            state.timezone.top,
+        ));
+    }
+    targets
+}
+
+fn build_hit_targets(state: &AppState, terminal_size: (u16, u16)) -> Vec<HitTarget> {
+    let (width, height) = terminal_size;
+    let (cx0, cy0, cx1, cy1) = content_frame(width, height);
+    if cx1 <= cx0 || cy1 <= cy0 {
+        return Vec::new();
+    }
+
+    // Modal dialogs sit on top; only their buttons are clickable.
+    if let Some(modal) = state.active_modal() {
+        if modal == Modal::None {
+            return Vec::new();
+        }
+        return modal_hit_targets(width, height);
+    }
+
+    // Panel title occupies two rows inside the bordered content area.
+    let list_x0 = cx0.saturating_add(1);
+    let list_x1 = cx1.saturating_sub(1).max(list_x0.saturating_add(1));
+    let rows_top = cy0.saturating_add(3); // border + title block
+
+    match state.route {
+        Route::Welcome => list_row_targets(list_x0, list_x1, rows_top.saturating_add(2), 3, 0),
+        Route::Target => {
+            let heading = u16::from(
+                !state.drives.is_empty() && layout_mode((width, height)) != LayoutMode::Compact,
+            );
+            list_row_targets(
+                list_x0,
+                list_x1,
+                rows_top.saturating_add(heading),
+                state.drives.len(),
+                0,
+            )
+        }
+        Route::Identity => list_row_targets(list_x0, list_x1, rows_top, 6, 0),
+        Route::Timezone => timezone_hit_targets(
+            state,
+            layout_mode((width, height)),
+            (cx0, cy0, cx1, cy1),
+            (list_x0, list_x1),
+        ),
+        Route::SecureBoot => {
+            let setup = state.firmware.as_ref().and_then(|status| status.setup_mode);
+            let (count, first) = if setup == Some(true) {
+                // message, warning, then two buttons
+                (2_usize, rows_top.saturating_add(2))
+            } else {
+                // message (+ optional reason), then three buttons
+                let reason = state
+                    .firmware
+                    .as_ref()
+                    .is_some_and(|status| !status.reason.is_empty());
+                (3_usize, rows_top.saturating_add(1 + u16::from(reason)))
+            };
+            list_row_targets(list_x0, list_x1, first, count, 0)
+        }
+        Route::Review => {
+            // warning, blank, 3 summary lines, then two buttons
+            list_row_targets(list_x0, list_x1, rows_top.saturating_add(5), 2, 0)
+        }
+        Route::Install => {
+            // Whole content region re-enables log follow on click.
+            vec![HitTarget {
+                x0: cx0,
+                y0: cy0,
+                x1: cx1,
+                y1: cy1,
+                action: HitAction::InstallFollow,
+            }]
+        }
+        Route::Reboot => {
+            // status lines then two buttons
+            list_row_targets(list_x0, list_x1, rows_top.saturating_add(3), 2, 0)
+        }
+    }
+}
+
+fn hit_test(targets: &[HitTarget], column: u16, row: u16) -> Option<HitAction> {
+    targets
+        .iter()
+        .rev()
+        .find(|target| target.contains(column, row))
+        .map(|target| target.action)
+}
+
+fn activate_enter(state: &mut AppState) -> Vec<Effect> {
+    update_key(state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+}
+
+fn scroll_mouse(state: &mut AppState, direction: i8) {
+    match state.route {
+        Route::Install => {
+            if direction < 0 {
+                state.scroll.install_log =
+                    (state.scroll.install_log + 10).min(state.install.logs.len().saturating_sub(1));
+                state.install.follow_logs = false;
+            } else {
+                state.scroll.install_log = state.scroll.install_log.saturating_sub(10);
+                state.install.follow_logs = state.scroll.install_log == 0;
+            }
+        }
+        Route::Timezone => {
+            // Scroll pans the map; list selection uses clicks.
+            timezone::pan_map(state, f64::from(direction), true);
+        }
+        Route::Welcome => cycle(&mut state.selection.welcome, 3, direction < 0),
+        Route::Target => {
+            if state.drives.is_empty() {
+                return;
+            }
+            let mut selected = state.selection.target.unwrap_or(0);
+            cycle(&mut selected, state.drives.len(), direction < 0);
+            state.selection.target = Some(selected);
+        }
+        Route::Identity => {
+            if let Some(draft) = state.identity.as_mut() {
+                let next = if direction < 0 {
+                    draft.field_index.saturating_sub(1)
+                } else {
+                    (draft.field_index + 1) % 6
+                };
+                focus_identity_field(draft, next);
+            }
+        }
+        Route::SecureBoot => {
+            let count = secure_boot_choice_count(state);
+            cycle(&mut state.selection.secure_boot, count, direction < 0);
+        }
+        Route::Review => state.selection.review = 1 - state.selection.review.min(1),
+        Route::Reboot => state.selection.reboot = 1 - state.selection.reboot.min(1),
+    }
+}
+
+fn click_select(state: &mut AppState, index: usize) -> Vec<Effect> {
+    match state.route {
+        Route::Welcome => {
+            if state.selection.welcome == index {
+                return activate_enter(state);
+            }
+            state.selection.welcome = index.min(2);
+        }
+        Route::Target => {
+            if state.drives.is_empty() || index >= state.drives.len() {
+                return Vec::new();
+            }
+            if state.selection.target == Some(index) {
+                return activate_enter(state);
+            }
+            state.selection.target = Some(index);
+        }
+        Route::Identity => {
+            if let Some(draft) = state.identity.as_mut() {
+                focus_identity_field(draft, index.min(5));
+            }
+        }
+        Route::Timezone => {
+            if index >= state.timezone.filtered.len() {
+                return Vec::new();
+            }
+            if state.timezone.selected == index {
+                return timezone::update_key(
+                    state,
+                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                );
+            }
+            timezone::select_index(state, index);
+        }
+        Route::SecureBoot => {
+            let count = secure_boot_choice_count(state);
+            if index >= count {
+                return Vec::new();
+            }
+            if state.selection.secure_boot == index {
+                return activate_enter(state);
+            }
+            state.selection.secure_boot = index;
+        }
+        Route::Review => {
+            if index > 1 {
+                return Vec::new();
+            }
+            if state.selection.review == index {
+                return activate_enter(state);
+            }
+            state.selection.review = index;
+        }
+        Route::Reboot => {
+            if index > 1 {
+                return Vec::new();
+            }
+            if state.selection.reboot == index {
+                return activate_enter(state);
+            }
+            state.selection.reboot = index;
+        }
+        Route::Install => {}
+    }
+    Vec::new()
+}
+
+fn update_mouse(
+    state: &mut AppState,
+    terminal_size: (u16, u16),
+    column: u16,
+    row: u16,
+    kind: MouseKind,
+) -> Vec<Effect> {
+    match kind {
+        MouseKind::ScrollUp => {
+            scroll_mouse(state, -1);
+            return Vec::new();
+        }
+        MouseKind::ScrollDown => {
+            scroll_mouse(state, 1);
+            return Vec::new();
+        }
+        MouseKind::LeftDown => {}
+    }
+
+    let targets = build_hit_targets(state, terminal_size);
+    let Some(action) = hit_test(&targets, column, row) else {
+        return Vec::new();
+    };
+    match action {
+        HitAction::ModalSelect(index) => {
+            state.selection.modal = index.min(1);
+            activate_enter(state)
+        }
+        HitAction::MapPan(direction) => {
+            timezone::pan_map(state, f64::from(direction), false);
+            Vec::new()
+        }
+        HitAction::InstallFollow => {
+            state.scroll.install_log = 0;
+            state.install.follow_logs = true;
+            Vec::new()
+        }
+        HitAction::Select(index) => click_select(state, index),
     }
 }
 
@@ -92,14 +545,50 @@ fn identity_field_mut(draft: &mut IdentityDraft) -> Option<&mut String> {
     }
 }
 
+fn identity_field(draft: &IdentityDraft) -> Option<&str> {
+    match draft.field_index {
+        1 => Some(draft.hostname.as_str()),
+        2 => Some(draft.username.as_str()),
+        3 => Some(draft.password.as_str()),
+        4 => Some(draft.repeated_password.as_str()),
+        _ => None,
+    }
+}
+
+fn identity_field_len(draft: &IdentityDraft) -> usize {
+    identity_field(draft).map_or(0, |value| value.chars().count())
+}
+
+fn clamp_identity_cursor(draft: &mut IdentityDraft) {
+    draft.cursor = draft.cursor.min(identity_field_len(draft));
+}
+
+fn focus_identity_field(draft: &mut IdentityDraft, index: usize) {
+    draft.field_index = index;
+    draft.cursor = identity_field_len(draft);
+}
+
 fn update_identity_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
     let Some(draft) = state.identity.as_mut() else {
         return Vec::new();
     };
     match key.code {
         KeyCode::Esc => state.route = Route::Target,
-        KeyCode::Tab | KeyCode::Down => draft.field_index = (draft.field_index + 1) % 6,
-        KeyCode::Up => cycle(&mut draft.field_index, 6, true),
+        KeyCode::Tab | KeyCode::Down => {
+            focus_identity_field(draft, (draft.field_index + 1) % 6);
+        }
+        KeyCode::Up => {
+            let next = if draft.field_index == 0 {
+                5
+            } else {
+                draft.field_index - 1
+            };
+            focus_identity_field(draft, next);
+        }
+        KeyCode::Home if identity_field(draft).is_some() => draft.cursor = 0,
+        KeyCode::End if identity_field(draft).is_some() => {
+            draft.cursor = identity_field_len(draft);
+        }
         KeyCode::Left if draft.field_index == 0 => {
             cycle(&mut draft.language_index, LANGUAGES.len(), true);
         }
@@ -109,6 +598,13 @@ fn update_identity_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
         KeyCode::Left | KeyCode::Right if draft.field_index == 5 => {
             draft.shell_index = 1 - draft.shell_index.min(1);
         }
+        KeyCode::Left if identity_field(draft).is_some() => {
+            draft.cursor = draft.cursor.saturating_sub(1);
+        }
+        KeyCode::Right if identity_field(draft).is_some() => {
+            let len = identity_field_len(draft);
+            draft.cursor = (draft.cursor + 1).min(len);
+        }
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             draft.reveal_password = !draft.reveal_password;
         }
@@ -116,10 +612,29 @@ fn update_identity_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
             if let Some(field) = identity_field_mut(draft) {
                 field.clear();
             }
+            draft.cursor = 0;
+        }
+        KeyCode::Delete => {
+            let cursor = draft.cursor;
+            if let Some(field) = identity_field_mut(draft) {
+                let mut chars = field.chars().collect::<Vec<_>>();
+                if cursor < chars.len() {
+                    chars.remove(cursor);
+                    *field = chars.into_iter().collect();
+                }
+            }
         }
         KeyCode::Backspace => {
-            if let Some(field) = identity_field_mut(draft) {
-                field.pop();
+            if draft.cursor > 0 {
+                let cursor = draft.cursor - 1;
+                if let Some(field) = identity_field_mut(draft) {
+                    let mut chars = field.chars().collect::<Vec<_>>();
+                    if cursor < chars.len() {
+                        chars.remove(cursor);
+                        *field = chars.into_iter().collect();
+                        draft.cursor = cursor;
+                    }
+                }
             }
         }
         KeyCode::Char(ch)
@@ -130,10 +645,16 @@ fn update_identity_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
                 2 => 32,
                 _ => usize::MAX,
             };
-            if let Some(field) = identity_field_mut(draft)
-                && field.len() < max
-            {
-                field.push(ch);
+            let cursor = draft.cursor;
+            if let Some(field) = identity_field_mut(draft) {
+                let len = field.chars().count();
+                if len < max {
+                    let cursor = cursor.min(len);
+                    let mut chars = field.chars().collect::<Vec<_>>();
+                    chars.insert(cursor, ch);
+                    *field = chars.into_iter().collect();
+                    draft.cursor = cursor + 1;
+                }
             }
         }
         KeyCode::Enter => {
@@ -143,6 +664,7 @@ fn update_identity_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
         }
         _ => {}
     }
+    clamp_identity_cursor(draft);
     Vec::new()
 }
 
@@ -322,24 +844,29 @@ pub(crate) fn update(state: &mut AppState, message: Message) -> Vec<Effect> {
         Message::FieldEdit { field, value, .. } => {
             if let Some(draft) = state.identity.as_mut() {
                 match field {
-                    FieldId::Hostname => draft.hostname = value,
-                    FieldId::Username => draft.username = value,
+                    // Hostnames and usernames are shown as-is; keep them VT-safe.
+                    FieldId::Hostname => draft.hostname = sanitize_text(&value),
+                    FieldId::Username => draft.username = sanitize_text(&value),
+                    // Passwords may contain any printable bytes; never rewrite them.
                     FieldId::Password => draft.password = value,
                     FieldId::RepeatedPassword => draft.repeated_password = value,
                     _ => {}
                 }
+                clamp_identity_cursor(draft);
             }
         }
         Message::FormValidated {
             form: FormId::Identity,
             error,
         } => {
-            state.validation_error = error;
+            state.validation_error = error.map(|text| sanitize_text(&text));
             if state.validation_error.is_none() {
                 state.route = Route::Timezone;
             }
         }
-        Message::Resized { .. }
+        // Mouse is handled in dispatch where terminal geometry is available.
+        Message::Mouse { .. }
+        | Message::Resized { .. }
         | Message::Tick
         | Message::Paste(_)
         | Message::FieldFocused { .. }
@@ -406,7 +933,7 @@ pub(crate) fn update(state: &mut AppState, message: Message) -> Vec<Effect> {
         Message::ShellReturned { status } => {
             state.reboot.shell_active = false;
             if let Err(error) = status {
-                state.validation_error = Some(error);
+                state.validation_error = Some(sanitize_text(&error));
             }
         }
         Message::FirmwareReady { status } => {
@@ -414,7 +941,7 @@ pub(crate) fn update(state: &mut AppState, message: Message) -> Vec<Effect> {
             state.firmware = Some(status);
         }
         Message::EnrollFinished { error } => {
-            state.validation_error = error;
+            state.validation_error = error.map(|text| sanitize_text(&text));
             if state.validation_error.is_none() {
                 state.route = Route::Review;
             }
@@ -457,18 +984,25 @@ fn drive_messages() -> Vec<DriveInfo> {
             devices
                 .into_iter()
                 .enumerate()
-                .map(|(index, device)| DriveInfo {
-                    index,
-                    path: device.path.clone(),
-                    label: format!("{} - {}, {}", device.path, device.model, device.size),
-                    size: device.size,
-                    model: device.model,
-                    transport: device.transport,
-                    busy_reasons: device
-                        .busy_reason
-                        .map(|reason| vec![reason.to_string()])
-                        .unwrap_or_default(),
-                    selected: false,
+                .map(|(index, device)| {
+                    let path = sanitize_text(&device.path);
+                    let model = sanitize_text(&device.model);
+                    let size = sanitize_text(&device.size);
+                    let transport = sanitize_text(&device.transport);
+                    let label = sanitize_text(&format!("{path} - {model}, {size}"));
+                    DriveInfo {
+                        index,
+                        path,
+                        label,
+                        size,
+                        model,
+                        transport,
+                        busy_reasons: device
+                            .busy_reason
+                            .map(|reason| vec![sanitize_text(&reason.to_string())])
+                            .unwrap_or_default(),
+                        selected: false,
+                    }
                 })
                 .collect()
         },
@@ -489,6 +1023,8 @@ struct UiController {
     last_countdown: Instant,
     last_animation: Instant,
     last_visual_pulse: Instant,
+    /// Last solar minute baked into the timezone map terminator.
+    last_map_sun_minute: Option<u64>,
     terminal_size: (u16, u16),
 }
 
@@ -510,7 +1046,7 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
                 status: crate::tui::message::FirmwareStatus {
                     setup_mode: status.setup_mode,
                     secure_boot: status.secure_boot,
-                    reason: status.reason,
+                    reason: sanitize_text(&status.reason),
                 },
             })
         }
@@ -597,7 +1133,17 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
 fn dispatch(controller: &mut UiController, message: Message) {
     let mut messages = vec![message];
     while let Some(message) = messages.pop() {
-        for effect in update(&mut controller.state, message) {
+        let effects = match message {
+            Message::Mouse { column, row, kind } => update_mouse(
+                &mut controller.state,
+                controller.terminal_size,
+                column,
+                row,
+                kind,
+            ),
+            other => update(&mut controller.state, other),
+        };
+        for effect in effects {
             if let Some(message) = execute_effect(controller, effect) {
                 messages.push(message);
             }
@@ -620,6 +1166,7 @@ fn prepare_state(controller: &mut UiController) {
             repeated_password: controller.ctx.user_password.clone(),
             shell_index: usize::from(controller.ctx.user_shell == "/bin/zsh"),
             field_index: 0,
+            cursor: 0,
             reveal_password: false,
         });
     }
@@ -631,6 +1178,11 @@ fn prepare_state(controller: &mut UiController) {
     }
 }
 
+/// High-frequency install stream messages that may be batched into one frame.
+fn is_coalesced_install_message(message: &Message) -> bool {
+    matches!(message, Message::Log(_) | Message::InstallProgress { .. })
+}
+
 fn service(controller: &mut UiController) -> bool {
     if controller.trap.is_some() {
         return false;
@@ -639,14 +1191,7 @@ fn service(controller: &mut UiController) -> bool {
     let animation_elapsed = now.saturating_duration_since(controller.last_animation);
     controller.last_animation = now;
     let mut dirty = false;
-    if controller.state.route == Route::Install
-        && !controller.state.install.complete
-        && !controller.state.install.failed
-        && now.saturating_duration_since(controller.last_visual_pulse) >= INSTALL_PULSE_INTERVAL
-    {
-        controller.last_visual_pulse = now;
-        dirty = true;
-    }
+    let mut coalesced_pending = false;
     let mut messages = Vec::new();
     let drive_message = controller
         .drive_rx
@@ -675,14 +1220,41 @@ fn service(controller: &mut UiController) -> bool {
             messages.push(message);
         }
     }
-    if !messages.is_empty() {
-        dirty = true;
-    }
     for message in messages {
+        if is_coalesced_install_message(&message) {
+            coalesced_pending = true;
+        } else {
+            dirty = true;
+        }
         dispatch(controller, message);
+    }
+    let install_running = controller.state.route == Route::Install
+        && !controller.state.install.complete
+        && !controller.state.install.failed;
+    if install_running {
+        // Spinner and coalesced log/progress share one redraw budget.
+        // Immediate messages already set dirty above and redraw now;
+        // pure coalesced traffic waits for the pulse.
+        let pulse_due =
+            now.saturating_duration_since(controller.last_visual_pulse) >= INSTALL_RENDER_INTERVAL;
+        if pulse_due {
+            dirty = true;
+        }
+        if dirty {
+            // Any install-frame paint restarts the shared budget so we do not
+            // double-paint immediately after an urgent event.
+            controller.last_visual_pulse = now;
+        }
+    } else if coalesced_pending {
+        dirty = true;
     }
     if controller.state.route == Route::Timezone {
         dirty |= timezone::tick(&mut controller.state, animation_elapsed);
+        let sun_minute = timezone::map_sun_minute();
+        if controller.last_map_sun_minute != Some(sun_minute) {
+            controller.last_map_sun_minute = Some(sun_minute);
+            dirty = true;
+        }
     }
     if controller.last_countdown.elapsed() >= Duration::from_secs(1) {
         controller.last_countdown = Instant::now();
@@ -700,6 +1272,13 @@ fn poll_interval(controller: &UiController) -> Duration {
             != controller.state.timezone.map_target_lon_milli
     {
         MAP_FRAME_INTERVAL
+    } else if controller.state.route == Route::Install
+        && !controller.state.install.complete
+        && !controller.state.install.failed
+    {
+        // Drain the install event queue frequently; redraws are budgeted
+        // separately at INSTALL_RENDER_INTERVAL.
+        ACTIVE_POLL_INTERVAL
     } else if controller.task.is_some()
         || controller.drive_rx.is_some()
         || (controller.state.route == Route::Reboot && controller.state.reboot.automatic)
@@ -772,6 +1351,253 @@ fn selected_row(content: impl Into<String>, selected: bool) -> AnyElement<'stati
     element! {
         View(width: 100pct, height: 1, padding_left: 1, background_color: background) {
             Text(content: format!("{marker} {content}"), color: color, weight: weight, wrap: TextWrap::NoWrap)
+        }
+    }
+    .into_any()
+}
+
+fn zone_list_row(zone: &timezone::VisibleZone) -> AnyElement<'static> {
+    let marker = if zone.selected { ">" } else { " " };
+    let background = if zone.selected {
+        theme::SELECTED
+    } else {
+        theme::BACKGROUND
+    };
+    let color = if zone.selected {
+        theme::ON_SELECTED
+    } else {
+        theme::FOREGROUND
+    };
+    let match_color = if zone.selected {
+        theme::WARNING
+    } else {
+        theme::ACCENT
+    };
+    let weight = if zone.selected {
+        Weight::Bold
+    } else {
+        Weight::Normal
+    };
+    let chars = zone.name.chars().collect::<Vec<_>>();
+    let mut contents = vec![
+        MixedTextContent::new(format!("{marker} "))
+            .color(color)
+            .weight(weight),
+    ];
+    if let Some((start, end)) = zone.match_range {
+        let start = start.min(chars.len());
+        let end = end.min(chars.len()).max(start);
+        let before = chars[..start].iter().collect::<String>();
+        let matched = chars[start..end].iter().collect::<String>();
+        let after = chars[end..].iter().collect::<String>();
+        if !before.is_empty() {
+            contents.push(MixedTextContent::new(before).color(color).weight(weight));
+        }
+        if !matched.is_empty() {
+            contents.push(
+                MixedTextContent::new(matched)
+                    .color(match_color)
+                    .weight(Weight::Bold),
+            );
+        }
+        if !after.is_empty() {
+            contents.push(MixedTextContent::new(after).color(color).weight(weight));
+        }
+    } else {
+        contents.push(
+            MixedTextContent::new(zone.name.to_string())
+                .color(color)
+                .weight(weight),
+        );
+    }
+    element! {
+        View(width: 100pct, height: 1, padding_left: 1, background_color: background) {
+            MixedText(contents: contents, wrap: TextWrap::NoWrap)
+        }
+    }
+    .into_any()
+}
+
+fn truncate_display(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 3 {
+        return text.chars().take(max_chars).collect();
+    }
+    let mut out: String = text.chars().take(max_chars - 3).collect();
+    out.push_str("...");
+    out
+}
+
+fn zone_details_rows(details: &timezone::ZoneDetails, filtering: bool) -> Vec<AnyElement<'static>> {
+    let mut rows = vec![styled_text_row(String::new(), Weight::Normal, theme::MUTED)];
+    let count = if filtering {
+        format!("{}/{} matches", details.match_index, details.match_total)
+    } else {
+        format!("{}/{}", details.match_index, details.match_total)
+    };
+    rows.push(styled_text_row(
+        truncate_display(&sanitize_text(&details.name), 24),
+        Weight::Bold,
+        theme::ACCENT,
+    ));
+    rows.push(styled_text_row(count, Weight::Normal, theme::MUTED));
+    if let Some((lat, lon)) = details.coords {
+        rows.push(styled_text_row(
+            format!("{lat:+07.2} {lon:+08.2}"),
+            Weight::Normal,
+            theme::FOREGROUND,
+        ));
+    } else {
+        rows.push(styled_text_row(
+            "No map coordinates".to_string(),
+            Weight::Normal,
+            theme::MUTED,
+        ));
+    }
+    if !details.countries.is_empty() {
+        rows.push(styled_text_row(
+            truncate_display(&sanitize_text(&format!("CC {}", details.countries)), 24),
+            Weight::Normal,
+            theme::MUTED,
+        ));
+    }
+    if !details.comment.is_empty() {
+        rows.push(styled_text_row(
+            truncate_display(&sanitize_text(&details.comment), 24),
+            Weight::Normal,
+            theme::MUTED,
+        ));
+    }
+    rows
+}
+
+fn choice_field_row(label: &str, value: &str, selected: bool) -> AnyElement<'static> {
+    let body = if selected {
+        format!("{label:<14}< {value} >")
+    } else {
+        format!("{label:<14}{value}")
+    };
+    selected_row(body, selected)
+}
+
+fn text_input_row(
+    label: &str,
+    value: &str,
+    selected: bool,
+    cursor: usize,
+    empty_hint: &str,
+) -> AnyElement<'static> {
+    let marker = if selected { ">" } else { " " };
+    let background = if selected {
+        theme::SELECTED
+    } else {
+        theme::BACKGROUND
+    };
+    let color = if selected {
+        theme::ON_SELECTED
+    } else {
+        theme::FOREGROUND
+    };
+    let weight = if selected {
+        Weight::Bold
+    } else {
+        Weight::Normal
+    };
+    if selected {
+        let chars = value.chars().collect::<Vec<_>>();
+        let cursor = cursor.min(chars.len());
+        let before = chars[..cursor].iter().collect::<String>();
+        let at = chars.get(cursor).copied().unwrap_or(' ');
+        let after = if cursor < chars.len() {
+            chars[cursor + 1..].iter().collect::<String>()
+        } else {
+            String::new()
+        };
+        let hint = if value.is_empty() { empty_hint } else { "" };
+        let contents = vec![
+            MixedTextContent::new(format!("{marker} {label:<14}"))
+                .color(color)
+                .weight(weight),
+            MixedTextContent::new(before).color(color).weight(weight),
+            MixedTextContent::new(at.to_string())
+                .color(color)
+                .weight(weight)
+                .invert(),
+            MixedTextContent::new(after).color(color).weight(weight),
+            MixedTextContent::new(if hint.is_empty() {
+                String::new()
+            } else {
+                format!(" {hint}")
+            })
+            .color(theme::MUTED)
+            .weight(Weight::Normal),
+        ];
+        element! {
+            View(width: 100pct, height: 1, padding_left: 1, background_color: background) {
+                MixedText(contents: contents, wrap: TextWrap::NoWrap)
+            }
+        }
+        .into_any()
+    } else {
+        let body = if value.is_empty() {
+            format!("{label:<14}{empty_hint}")
+        } else {
+            format!("{label:<14}{value}")
+        };
+        let body_color = if value.is_empty() {
+            theme::MUTED
+        } else {
+            color
+        };
+        element! {
+            View(width: 100pct, height: 1, padding_left: 1, background_color: background) {
+                Text(
+                    content: format!("{marker} {body}"),
+                    color: body_color,
+                    weight: weight,
+                    wrap: TextWrap::NoWrap,
+                )
+            }
+        }
+        .into_any()
+    }
+}
+
+fn filter_input_row(value: &str) -> AnyElement<'static> {
+    let before = value.to_string();
+    let contents = if value.is_empty() {
+        vec![
+            MixedTextContent::new("  Filter  ")
+                .color(theme::ACCENT)
+                .weight(Weight::Bold),
+            MixedTextContent::new(" ")
+                .color(theme::ON_SELECTED)
+                .weight(Weight::Bold)
+                .invert(),
+            MixedTextContent::new(" Type to filter...")
+                .color(theme::MUTED)
+                .weight(Weight::Normal),
+        ]
+    } else {
+        vec![
+            MixedTextContent::new("  Filter  ")
+                .color(theme::ACCENT)
+                .weight(Weight::Bold),
+            MixedTextContent::new(before)
+                .color(theme::FOREGROUND)
+                .weight(Weight::Bold),
+            MixedTextContent::new(" ")
+                .color(theme::ON_SELECTED)
+                .weight(Weight::Bold)
+                .invert(),
+        ]
+    };
+    element! {
+        View(width: 100pct, height: 1, background_color: theme::BACKGROUND) {
+            MixedText(contents: contents, wrap: TextWrap::NoWrap)
         }
     }
     .into_any()
@@ -867,7 +1693,7 @@ fn target_content(controller: &UiController, layout: LayoutMode) -> AnyElement<'
     );
     let mut rows = if controller.drive_rx.is_some() && state.drives.is_empty() {
         vec![text_row(
-            "Scanning for target disks…".to_string(),
+            "Scanning for target disks...".to_string(),
             Weight::Bold,
         )]
     } else if state.drives.is_empty() {
@@ -911,16 +1737,16 @@ fn identity_content(state: &AppState) -> AnyElement<'static> {
     let Some(draft) = state.identity.as_ref() else {
         return panel(
             "User account",
-            vec![text_row("Loading identity…".to_string(), Weight::Normal)],
+            vec![text_row("Loading identity...".to_string(), Weight::Normal)],
         );
     };
     let password = if draft.reveal_password {
-        draft.password.clone()
+        sanitize_text(&draft.password)
     } else {
         "*".repeat(draft.password.chars().count())
     };
     let repeated = if draft.reveal_password {
-        draft.repeated_password.clone()
+        sanitize_text(&draft.repeated_password)
     } else {
         "*".repeat(draft.repeated_password.chars().count())
     };
@@ -932,19 +1758,38 @@ fn identity_content(state: &AppState) -> AnyElement<'static> {
     } else {
         "zsh"
     };
-    let values = [
-        format!("Language       {language}"),
-        format!("Hostname       {}", draft.hostname),
-        format!("Username       {}", draft.username),
-        format!("Password       {password}"),
-        format!("Repeat         {repeated}"),
-        format!("Shell          {shell}"),
+    let mut rows = vec![
+        choice_field_row("Language", language, draft.field_index == 0),
+        text_input_row(
+            "Hostname",
+            &draft.hostname,
+            draft.field_index == 1,
+            draft.cursor,
+            "required",
+        ),
+        text_input_row(
+            "Username",
+            &draft.username,
+            draft.field_index == 2,
+            draft.cursor,
+            "required",
+        ),
+        text_input_row(
+            "Password",
+            &password,
+            draft.field_index == 3,
+            draft.cursor,
+            "required",
+        ),
+        text_input_row(
+            "Repeat",
+            &repeated,
+            draft.field_index == 4,
+            draft.cursor,
+            "required",
+        ),
+        choice_field_row("Shell", shell, draft.field_index == 5),
     ];
-    let mut rows = values
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| selected_row(value, draft.field_index == index))
-        .collect::<Vec<_>>();
     if draft.reveal_password {
         rows.push(styled_text_row(
             "Password reveal is on".to_string(),
@@ -986,20 +1831,25 @@ fn world_map_panel(state: &AppState) -> AnyElement<'static> {
 }
 
 fn timezone_list_panel(state: &AppState) -> AnyElement<'static> {
-    let mut zone_rows = timezone::visible_names(state)
-        .into_iter()
-        .map(|(name, selected)| selected_row(name, selected))
-        .collect::<Vec<_>>();
-    let filter = if state.timezone.filter.is_empty() {
-        "Type to filter...".to_string()
+    let mut rows = vec![filter_input_row(&state.timezone.filter)];
+    let zones = timezone::visible_zones(state);
+    if zones.is_empty() {
+        let message = if state.timezone.filter.is_empty() {
+            "No time zones available".to_string()
+        } else {
+            format!("No matches for \"{}\"", state.timezone.filter)
+        };
+        rows.push(styled_text_row(message, Weight::Normal, theme::MUTED));
     } else {
-        state.timezone.filter.clone()
-    };
-    zone_rows.insert(
-        0,
-        styled_text_row(format!("Filter  {filter}"), Weight::Bold, theme::ACCENT),
-    );
-    panel("Time zones", zone_rows)
+        rows.extend(zones.iter().map(zone_list_row));
+    }
+    if let Some(details) = timezone::selected_details(state) {
+        rows.extend(zone_details_rows(
+            &details,
+            !state.timezone.filter.is_empty(),
+        ));
+    }
+    panel("Time zones", rows)
 }
 
 fn timezone_content(state: &AppState, layout: LayoutMode) -> AnyElement<'static> {
@@ -1382,11 +2232,154 @@ fn modal_element(state: &AppState, width: u16, height: u16) -> Option<AnyElement
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KeyChip {
+    key: &'static str,
+    action: &'static str,
+}
+
+impl KeyChip {
+    const fn new(key: &'static str, action: &'static str) -> Self {
+        Self { key, action }
+    }
+
+    fn width(self) -> usize {
+        // " [key] action"
+        1 + 1 + self.key.chars().count() + 1 + 1 + self.action.chars().count()
+    }
+}
+
+fn route_footer_chips(state: &AppState) -> Vec<KeyChip> {
+    match state.route {
+        Route::Welcome => vec![
+            KeyChip::new("Up/Dn", "select"),
+            KeyChip::new("Enter", "activate"),
+            KeyChip::new("Esc", "quit"),
+        ],
+        Route::Target => vec![
+            KeyChip::new("Up/Dn", "select"),
+            KeyChip::new("Ctrl-R", "rescan"),
+            KeyChip::new("Enter", "continue"),
+            KeyChip::new("Esc", "back"),
+        ],
+        Route::Identity => vec![
+            KeyChip::new("Up/Dn/Tab", "field"),
+            KeyChip::new("Left/Right", "move"),
+            KeyChip::new("Home/End", "jump"),
+            KeyChip::new("Ctrl-U", "clear"),
+            KeyChip::new("Ctrl-R", "reveal"),
+            KeyChip::new("Enter", "continue"),
+            KeyChip::new("Esc", "back"),
+        ],
+        Route::Timezone => vec![
+            KeyChip::new("Type", "filter"),
+            KeyChip::new("Up/Dn", "choose"),
+            KeyChip::new("Left/Right", "pan"),
+            KeyChip::new("Enter", "continue"),
+            KeyChip::new("Esc", "back"),
+        ],
+        Route::SecureBoot | Route::Review | Route::Reboot => vec![
+            KeyChip::new("Up/Dn/Tab", "select"),
+            KeyChip::new("Enter", "activate"),
+            KeyChip::new("Esc", "back"),
+        ],
+        Route::Install if state.install.complete => vec![KeyChip::new("Enter", "continue")],
+        Route::Install if state.install.failed => vec![KeyChip::new("Enter", "menu")],
+        Route::Install if state.install.committed => vec![KeyChip::new("PgUp/PgDn", "scroll")],
+        Route::Install => vec![
+            KeyChip::new("PgUp/PgDn", "scroll"),
+            KeyChip::new("Esc", "cancel"),
+        ],
+    }
+}
+
+fn is_essential_chip(chip: KeyChip) -> bool {
+    matches!(chip.key, "Enter" | "Esc")
+}
+
+fn fit_footer_chips(chips: &[KeyChip], max_width: usize) -> Vec<KeyChip> {
+    if chips.is_empty() || max_width == 0 {
+        return Vec::new();
+    }
+
+    let essentials = chips
+        .iter()
+        .copied()
+        .filter(|chip| is_essential_chip(*chip))
+        .collect::<Vec<_>>();
+    let others = chips
+        .iter()
+        .copied()
+        .filter(|chip| !is_essential_chip(*chip))
+        .collect::<Vec<_>>();
+
+    let essential_width = essentials.iter().map(|chip| chip.width()).sum::<usize>();
+    if essential_width > max_width {
+        let mut used = 0;
+        let mut out = Vec::new();
+        for chip in essentials {
+            let width = chip.width();
+            if used + width > max_width {
+                break;
+            }
+            used += width;
+            out.push(chip);
+        }
+        return out;
+    }
+
+    let mut remaining = max_width - essential_width;
+    let mut body = Vec::new();
+    for chip in others {
+        let width = chip.width();
+        if width > remaining {
+            break;
+        }
+        remaining -= width;
+        body.push(chip);
+    }
+    body.extend(essentials);
+    body
+}
+
+fn footer_contents(chips: &[KeyChip]) -> Vec<MixedTextContent> {
+    let mut contents = Vec::with_capacity(chips.len().saturating_mul(2));
+    for chip in chips {
+        contents.push(
+            MixedTextContent::new(format!(" [{}]", chip.key))
+                .color(theme::ACCENT)
+                .weight(Weight::Bold),
+        );
+        contents.push(
+            MixedTextContent::new(format!(" {}", chip.action))
+                .color(theme::MUTED)
+                .weight(Weight::Normal),
+        );
+    }
+    contents
+}
+
+fn footer_element(chips: &[KeyChip], terminal_width: u16) -> AnyElement<'static> {
+    let max_width = usize::from(terminal_width.saturating_sub(1));
+    let fitted = fit_footer_chips(chips, max_width);
+    let contents = if fitted.is_empty() {
+        vec![MixedTextContent::new(" ").color(theme::MUTED)]
+    } else {
+        footer_contents(&fitted)
+    };
+    element! {
+        View(width: 100pct, height: 1, padding_left: 1, background_color: theme::PANEL) {
+            MixedText(contents: contents, wrap: TextWrap::NoWrap)
+        }
+    }
+    .into_any()
+}
+
 struct Screen {
     title: String,
     subtitle: &'static str,
     content: AnyElement<'static>,
-    footer: &'static str,
+    footer: Vec<KeyChip>,
     modal: Option<AnyElement<'static>>,
 }
 
@@ -1432,19 +2425,7 @@ fn screen(controller: &UiController) -> Screen {
         Route::Install => install_content(controller, layout),
         Route::Reboot => reboot_content(controller),
     };
-    let footer = match state.route {
-        Route::Welcome => " Up/Down select  Enter activate  Esc quit",
-        Route::Target => " Up/Down select  Enter continue  Ctrl-R rescan  Esc back",
-        Route::Identity => " Up/Down/Tab field  Left/Right choose  Enter continue  Esc back",
-        Route::Timezone => " Type filter  Up/Down choose  Left/Right pan  Enter continue  Esc back",
-        Route::SecureBoot | Route::Review | Route::Reboot => {
-            " Up/Down/Tab select  Enter activate  Esc back"
-        }
-        Route::Install if state.install.complete => " Enter continue",
-        Route::Install if state.install.failed => " Enter back to menu",
-        Route::Install if state.install.committed => " PgUp/PgDn scroll",
-        Route::Install => " Esc cancel  PgUp/PgDn scroll",
-    };
+    let footer = route_footer_chips(state);
     Screen {
         title,
         subtitle,
@@ -1478,6 +2459,7 @@ impl Default for InstallerTuiProps {
                 last_countdown: Instant::now(),
                 last_animation: Instant::now(),
                 last_visual_pulse: Instant::now(),
+                last_map_sun_minute: None,
                 terminal_size: terminal_size(),
             })),
             wake_rx,
@@ -1510,6 +2492,28 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
                 );
                 revision.set(revision.get().wrapping_add(1));
                 true
+            }
+            TerminalEvent::FullscreenMouse(mouse) => {
+                let kind = match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => Some(MouseKind::LeftDown),
+                    MouseEventKind::ScrollUp => Some(MouseKind::ScrollUp),
+                    MouseEventKind::ScrollDown => Some(MouseKind::ScrollDown),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    dispatch(
+                        &mut controller,
+                        Message::Mouse {
+                            column: mouse.column,
+                            row: mouse.row,
+                            kind,
+                        },
+                    );
+                    revision.set(revision.get().wrapping_add(1));
+                    true
+                } else {
+                    false
+                }
             }
             TerminalEvent::Resize(width, height) => {
                 controller.terminal_size = (width, height);
@@ -1572,7 +2576,7 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
                         title: "Installer unavailable".to_string(),
                         subtitle: "ERROR",
                         content: text_row("Installer state unavailable".to_string(), Weight::Bold),
-                        footer: "",
+                        footer: Vec::new(),
                         modal: None,
                     },
                     80,
@@ -1594,13 +2598,18 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
     if should_exit {
         system_context.exit();
     }
+    render_screen(screen_view, terminal_width, terminal_height)
+}
+
+fn render_screen(screen: Screen, terminal_width: u16, terminal_height: u16) -> AnyElement<'static> {
     let Screen {
         title,
         subtitle,
         content,
         footer,
         modal,
-    } = screen_view;
+    } = screen;
+    let footer = footer_element(&footer, terminal_width);
     element! {
         View(
             width: terminal_width,
@@ -1629,12 +2638,11 @@ fn InstallerTui(props: &InstallerTuiProps, mut hooks: Hooks) -> impl Into<AnyEle
                     #(content)
                 }
             }
-            View(width: 100pct, height: 1, padding_left: 1, background_color: theme::PANEL) {
-                Text(content: footer, color: theme::ACCENT, weight: Weight::Light, wrap: TextWrap::NoWrap)
-            }
+            #(footer)
             #(modal)
         }
     }
+    .into_any()
 }
 
 impl Installer {
@@ -1650,16 +2658,19 @@ impl Installer {
             last_countdown: Instant::now(),
             last_animation: Instant::now(),
             last_visual_pulse: Instant::now(),
+            last_map_sun_minute: None,
             terminal_size: terminal_size(),
         }));
         if let Ok(mut state) = controller.lock() {
             prepare_state(&mut state);
         }
-        let _ = smol::block_on(
-            element!(InstallerTui(controller: controller.clone(), wake_rx))
-                .fullscreen()
-                .disable_mouse_capture(),
-        );
+        let mouse = mouse_capture_enabled();
+        let mut element = element!(InstallerTui(controller: controller.clone(), wake_rx));
+        let _ = smol::block_on(if mouse {
+            element.fullscreen().enable_mouse_capture()
+        } else {
+            element.fullscreen().disable_mouse_capture()
+        });
         let mut controller = controller
             .lock()
             .unwrap_or_else(|_| panic!("installer state lock poisoned"));

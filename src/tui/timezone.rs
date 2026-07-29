@@ -5,6 +5,8 @@
 
 use std::sync::OnceLock;
 use std::time::Duration;
+#[cfg(not(test))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use iocraft::prelude::*;
@@ -41,20 +43,93 @@ const SHADES: [(char, f64, f64); 7] = [
 ];
 const ZONE_TAB: &str = include_str!("zone1970.tab");
 const WORLD_MASK: &[u8] = include_bytes!("world_mask.bin");
+/// Solar elevation (degrees) above which a cell is fully day.
+const DAY_ELEVATION_DEG: f64 = 0.0;
+/// Half-width of the twilight band drawn along the terminator.
+const TWILIGHT_HALF_WIDTH_DEG: f64 = 4.0;
+/// Snapshot-stable solar clock: 2024-06-21 12:00:00 UTC (northern summer noon).
+#[cfg(test)]
+const SNAPSHOT_UNIX_SECS: u64 = 1_718_971_200;
+/// Minimum map size for city labels (marker + short name).
+const CITY_LABEL_MIN_WIDTH: usize = 40;
+const CITY_LABEL_MIN_HEIGHT: usize = 12;
+/// Minimum map size for the bottom-left legend strip.
+const LEGEND_MIN_WIDTH: usize = 28;
+const LEGEND_MIN_HEIGHT: usize = 8;
+/// Curated major cities used as optional map annotations.
+/// Short ASCII labels keep the overlay readable on narrow terminals.
+const CITY_LABELS: &[(&str, f64, f64)] = &[
+    ("Anchorage", 61.2181, -149.9003),
+    ("Honolulu", 21.3069, -157.8583),
+    ("LA", 34.0522, -118.2428),
+    ("Denver", 39.7392, -104.9842),
+    ("Chicago", 41.8500, -87.6500),
+    ("NYC", 40.7142, -74.0064),
+    ("Toronto", 43.6500, -79.3833),
+    ("Mexico", 19.4000, -99.1500),
+    ("SaoPaulo", -23.5333, -46.6167),
+    ("BsAs", -34.6000, -58.4500),
+    ("London", 51.5083, -0.1253),
+    ("Paris", 48.8667, 2.3333),
+    ("Madrid", 40.4000, -3.6833),
+    ("Berlin", 52.5000, 13.3667),
+    ("Rome", 41.9000, 12.4833),
+    ("Helsinki", 60.1667, 24.9667),
+    ("Istanbul", 41.0167, 28.9667),
+    ("Moscow", 55.7558, 37.6178),
+    ("Cairo", 30.0500, 31.2500),
+    ("Lagos", 6.4500, 3.4000),
+    ("Joburg", -26.2500, 28.0000),
+    ("Dubai", 25.3000, 55.3000),
+    ("Kolkata", 22.5333, 88.3667),
+    ("Bangkok", 13.7500, 100.5167),
+    ("SGP", 1.2833, 103.8500),
+    ("Jakarta", -6.1667, 106.8000),
+    ("HK", 22.2833, 114.1500),
+    ("Shanghai", 31.2333, 121.4667),
+    ("Seoul", 37.5500, 126.9667),
+    ("Tokyo", 35.6544, 139.7447),
+    ("Sydney", -33.8667, 151.2167),
+    ("Auckland", -36.8667, 174.7667),
+];
 
 #[derive(Clone, Debug)]
 pub(crate) struct Zone {
     pub(crate) name: String,
     search_name: String,
+    countries: String,
+    comment: String,
     lat: f64,
     lon: f64,
     has_coord: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct MapPoint {
     lat: f64,
     lon: f64,
+    /// Short label drawn beside the selection pin when space allows.
+    label: String,
+}
+
+/// One visible timezone list entry with optional search-match span.
+#[derive(Clone, Debug)]
+pub(crate) struct VisibleZone {
+    pub(crate) name: &'static str,
+    pub(crate) selected: bool,
+    /// Inclusive-exclusive character range of the first filter match, if any.
+    pub(crate) match_range: Option<(usize, usize)>,
+}
+
+/// Details for the currently selected timezone.
+#[derive(Clone, Debug)]
+pub(crate) struct ZoneDetails {
+    pub(crate) name: String,
+    pub(crate) countries: String,
+    pub(crate) comment: String,
+    pub(crate) coords: Option<(f64, f64)>,
+    pub(crate) match_index: usize,
+    pub(crate) match_total: usize,
 }
 
 fn parse_zone_line(line: &str) -> Option<Zone> {
@@ -63,15 +138,18 @@ fn parse_zone_line(line: &str) -> Option<Zone> {
         return None;
     }
     let mut columns = line.split('\t');
-    let _codes = columns.next()?;
+    let countries = columns.next()?.to_string();
     let coord = columns.next()?;
     let name = columns.next()?.to_string();
+    let comment = columns.next().unwrap_or("").to_string();
     let search_name = name.to_ascii_lowercase();
     let coord =
         iso6709parse::parse_string_representation::<iso6709parse::ISO6709Coord>(coord).ok()?;
     Some(Zone {
         name,
         search_name,
+        countries,
+        comment,
         lat: coord.lat,
         lon: coord.lon,
         has_coord: true,
@@ -88,6 +166,8 @@ fn zones() -> &'static [Zone] {
             Zone {
                 name: "UTC".to_string(),
                 search_name: "utc".to_string(),
+                countries: String::new(),
+                comment: "Coordinated Universal Time".to_string(),
                 lat: 0.0,
                 lon: 0.0,
                 has_coord: false,
@@ -103,6 +183,103 @@ fn wrap_lon(lon: f64) -> f64 {
 
 fn lon_delta(from: f64, to: f64) -> f64 {
     wrap_lon(to - from)
+}
+
+/// Current unix seconds, pinned in tests for snapshot stability.
+#[cfg(test)]
+fn map_unix_secs() -> u64 {
+    SNAPSHOT_UNIX_SECS
+}
+
+#[cfg(not(test))]
+fn map_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+/// Unix minute used for the day/night terminator (stable within a minute).
+pub(crate) fn map_sun_minute() -> u64 {
+    map_unix_secs() / 60
+}
+
+/// Subsolar latitude (declination) and longitude for the given unix time.
+///
+/// Approximate geometric model: mean solar longitude from day fraction, and
+/// a simple sinusoidal declination. Accurate enough for a terminal-map
+/// terminator and free of extra dependencies.
+fn subsolar_point(unix_secs: u64) -> (f64, f64) {
+    let day = unix_secs as f64 / 86_400.0;
+    // Day-of-year in [0, 365).
+    let day_of_year = day.rem_euclid(365.2425);
+    // Approximate solar declination (degrees). Peak near June 21 (day ~172).
+    let declination = -23.44 * ((360.0 / 365.0) * (day_of_year + 10.0)).to_radians().cos();
+    // Subsolar longitude: sun is overhead at local solar noon.
+    let day_fraction = (unix_secs % 86_400) as f64 / 86_400.0;
+    let longitude = wrap_lon(180.0 - 360.0 * day_fraction);
+    (declination, longitude)
+}
+
+/// Sine of the solar elevation angle at (lat, lon) for a given subsolar point.
+fn solar_elevation_sin(lat: f64, lon: f64, sun_lat: f64, sun_lon: f64) -> f64 {
+    let lat_r = lat.to_radians();
+    let sun_lat_r = sun_lat.to_radians();
+    let hour_angle = lon_delta(sun_lon, lon).to_radians();
+    lat_r.sin() * sun_lat_r.sin() + lat_r.cos() * sun_lat_r.cos() * hour_angle.cos()
+}
+
+/// Day/night lighting class for a map cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lighting {
+    Day,
+    Twilight,
+    Night,
+}
+
+fn lighting_at(lat: f64, lon: f64, sun_lat: f64, sun_lon: f64) -> Lighting {
+    let elevation = solar_elevation_sin(lat, lon, sun_lat, sun_lon)
+        .asin()
+        .to_degrees();
+    if elevation >= DAY_ELEVATION_DEG + TWILIGHT_HALF_WIDTH_DEG {
+        Lighting::Day
+    } else if elevation >= DAY_ELEVATION_DEG - TWILIGHT_HALF_WIDTH_DEG {
+        Lighting::Twilight
+    } else {
+        Lighting::Night
+    }
+}
+
+fn night_color(color: Color) -> Color {
+    if color == theme::LAND {
+        theme::LAND_NIGHT
+    } else if color == theme::COAST {
+        theme::COAST_NIGHT
+    } else {
+        // Guides, graticule accents, and empty sea glyphs all dim the same way.
+        theme::GUIDE_NIGHT
+    }
+}
+
+fn sea_background(y: usize, night: bool) -> Color {
+    if night {
+        if y % 8 < 2 {
+            theme::SEA_NIGHT_SHIMMER
+        } else {
+            theme::SEA_NIGHT
+        }
+    } else if y % 8 < 2 {
+        theme::SEA_SHIMMER
+    } else {
+        theme::SEA
+    }
+}
+
+fn light_glyph_color(base: Color, lighting: Lighting) -> Color {
+    match lighting {
+        Lighting::Day => base,
+        Lighting::Twilight => theme::TERMINATOR,
+        Lighting::Night => night_color(base),
+    }
 }
 
 struct MapView {
@@ -316,6 +493,33 @@ pub(crate) fn update_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
     Vec::new()
 }
 
+/// Select a filtered zone by absolute list index (not visible-row index).
+pub(crate) fn select_index(state: &mut AppState, index: usize) {
+    if index >= state.timezone.filtered.len() {
+        return;
+    }
+    let mut pick = reconstruct_pick(state);
+    let mut view = reconstruct_view(state);
+    pick.selected = index;
+    pick.ensure_visible();
+    if let Some(zone) = pick.selected() {
+        view.follow(zone);
+    }
+    store(state, &pick, &view);
+}
+
+/// Nudge or page-pan the world map from mouse input.
+pub(crate) fn pan_map(state: &mut AppState, direction: f64, page: bool) {
+    let pick = reconstruct_pick(state);
+    let mut view = reconstruct_view(state);
+    if page {
+        view.page_pan(direction);
+    } else {
+        view.nudge(direction);
+    }
+    store(state, &pick, &view);
+}
+
 pub(crate) fn tick(state: &mut AppState, elapsed: Duration) -> bool {
     let mut view = reconstruct_view(state);
     view.tick(elapsed);
@@ -327,7 +531,26 @@ pub(crate) fn tick(state: &mut AppState, elapsed: Duration) -> bool {
     true
 }
 
-pub(crate) fn visible_names(state: &AppState) -> Vec<(&'static str, bool)> {
+fn first_match_range(name: &str, filter: &str) -> Option<(usize, usize)> {
+    if filter.is_empty() {
+        return None;
+    }
+    let needle = filter.to_ascii_lowercase().chars().collect::<Vec<_>>();
+    let haystack = name.to_ascii_lowercase().chars().collect::<Vec<_>>();
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    let limit = haystack.len() - needle.len();
+    for start in 0..=limit {
+        if haystack[start..start + needle.len()] == needle[..] {
+            return Some((start, start + needle.len()));
+        }
+    }
+    None
+}
+
+pub(crate) fn visible_zones(state: &AppState) -> Vec<VisibleZone> {
+    let filter = state.timezone.filter.as_str();
     state
         .timezone
         .filtered
@@ -336,12 +559,31 @@ pub(crate) fn visible_names(state: &AppState) -> Vec<(&'static str, bool)> {
         .take(VISIBLE_ZONE_ROWS)
         .enumerate()
         .map(|(row, &index)| {
-            (
-                zones()[index].name.as_str(),
-                state.timezone.top + row == state.timezone.selected,
-            )
+            let name = zones()[index].name.as_str();
+            VisibleZone {
+                name,
+                selected: state.timezone.top + row == state.timezone.selected,
+                match_range: first_match_range(name, filter),
+            }
         })
         .collect()
+}
+
+pub(crate) fn selected_details(state: &AppState) -> Option<ZoneDetails> {
+    let total = state.timezone.filtered.len();
+    if total == 0 {
+        return None;
+    }
+    let index = *state.timezone.filtered.get(state.timezone.selected)?;
+    let zone = zones().get(index)?;
+    Some(ZoneDetails {
+        name: zone.name.clone(),
+        countries: zone.countries.clone(),
+        comment: zone.comment.clone(),
+        coords: zone.has_coord.then_some((zone.lat, zone.lon)),
+        match_index: state.timezone.selected + 1,
+        match_total: total,
+    })
 }
 
 pub(crate) fn selected_zone(state: &AppState) -> Option<MapPoint> {
@@ -354,7 +596,15 @@ pub(crate) fn selected_zone(state: &AppState) -> Option<MapPoint> {
         .map(|zone| MapPoint {
             lat: zone.lat,
             lon: zone.lon,
+            label: city_short_label(&zone.name),
         })
+}
+
+/// Prefer the city portion of a zone id ("Europe/Helsinki" -> "Helsinki").
+fn city_short_label(zone_name: &str) -> String {
+    let city = zone_name.rsplit('/').next().unwrap_or(zone_name);
+    // Underscores are common in zone city names; keep labels ASCII-friendly.
+    city.replace('_', " ")
 }
 
 struct LandIntegral {
@@ -462,10 +712,12 @@ struct MapCache {
     start_column: i32,
     width: usize,
     height: usize,
+    /// Unix minute used when the day/night terminator was baked in.
+    sun_minute: u64,
     rows: Vec<MapRow>,
 }
 
-fn build_map_cache(start_column: i32, width: usize, height: usize) -> MapCache {
+fn build_map_cache(start_column: i32, width: usize, height: usize, unix_secs: u64) -> MapCache {
     let start_x = f64::from(start_column);
     let cell_width = VIEW_LON_SPAN * LON_SCALE / width as f64;
     let row_span = LAT_MAX - LAT_MIN;
@@ -473,12 +725,15 @@ fn build_map_cache(start_column: i32, width: usize, height: usize) -> MapCache {
     let start_y = (90.0 - LAT_MAX) * LAT_SCALE;
     let lon_tolerance = VIEW_LON_SPAN / width as f64 * 0.4;
     let lat_tolerance = row_span / height as f64 * 0.18;
+    let (sun_lat, sun_lon) = subsolar_point(unix_secs);
     let mut rows = Vec::with_capacity(height);
 
     for y in 0..height {
         let top = start_y + (y * 2) as f64 * half_height;
         let lat = LAT_MAX - (y as f64 + 0.5) / height as f64 * row_span;
         let on_parallel = near_grid(lat, 30.0, lat_tolerance);
+        // Sample lighting at the row centre; sea background follows the row majority.
+        let mut night_cells = 0_usize;
         let mut runs = Vec::new();
         let mut run_text = String::with_capacity(width * 3);
         let mut run_color = None;
@@ -486,6 +741,11 @@ fn build_map_cache(start_column: i32, width: usize, height: usize) -> MapCache {
 
         for x in 0..width {
             let left = start_x + x as f64 * cell_width;
+            let lon = wrap_lon((left + cell_width * 0.5) / LON_SCALE - 180.0);
+            let lighting = lighting_at(lat, lon, sun_lat, sun_lon);
+            if lighting == Lighting::Night {
+                night_cells += 1;
+            }
             let top_fraction =
                 land_fraction(left, top, left + cell_width, top + half_height).clamp(0.0, 1.0);
             let bottom_fraction = land_fraction(
@@ -496,8 +756,7 @@ fn build_map_cache(start_column: i32, width: usize, height: usize) -> MapCache {
             )
             .clamp(0.0, 1.0);
             let coverage = (top_fraction + bottom_fraction) * 0.5;
-            let (glyph, color) = if coverage <= 0.01 {
-                let lon = wrap_lon((left + cell_width * 0.5) / LON_SCALE - 180.0);
+            let (mut glyph, base_color) = if coverage <= 0.01 {
                 let on_meridian = near_grid(lon, 30.0, lon_tolerance);
                 if on_parallel && on_meridian {
                     ('+', theme::ACCENT)
@@ -513,6 +772,11 @@ fn build_map_cache(start_column: i32, width: usize, height: usize) -> MapCache {
             } else {
                 (pick_glyph(top_fraction, bottom_fraction), theme::COAST)
             };
+            // Open ocean is blank; force a mid-dot so the terminator stays visible.
+            if lighting == Lighting::Twilight && glyph == ' ' {
+                glyph = '·';
+            }
+            let color = light_glyph_color(base_color, lighting);
 
             if run_color.is_some_and(|current| current != color) {
                 runs.push(MapRun {
@@ -532,12 +796,9 @@ fn build_map_cache(start_column: i32, width: usize, height: usize) -> MapCache {
                 color: run_color.unwrap_or(theme::GUIDE),
             });
         }
+        let night_row = night_cells * 2 >= width;
         rows.push(MapRow {
-            background: if y % 8 < 2 {
-                theme::SEA_SHIMMER
-            } else {
-                theme::SEA
-            },
+            background: sea_background(y, night_row),
             runs,
         });
     }
@@ -546,6 +807,7 @@ fn build_map_cache(start_column: i32, width: usize, height: usize) -> MapCache {
         start_column,
         width,
         height,
+        sun_minute: unix_secs / 60,
         rows,
     }
 }
@@ -570,7 +832,7 @@ impl Component for WorldMap {
     fn new(props: &Self::Props<'_>) -> Self {
         Self {
             center_lon: f64::from(props.center_lon_milli) / 1000.0,
-            selected_zone: props.selected_zone,
+            selected_zone: props.selected_zone.clone(),
             cache: None,
         }
     }
@@ -582,7 +844,7 @@ impl Component for WorldMap {
         updater: &mut ComponentUpdater,
     ) {
         self.center_lon = f64::from(props.center_lon_milli) / 1000.0;
-        self.selected_zone = props.selected_zone;
+        self.selected_zone.clone_from(&props.selected_zone);
         updater.set_layout_style(props.layout_style().into());
     }
 
@@ -593,14 +855,19 @@ impl Component for WorldMap {
         }
         let width = usize::from(size.width);
         let height = usize::from(size.height);
+        let unix_secs = map_unix_secs();
+        let sun_minute = unix_secs / 60;
         let start_column =
             ((wrap_lon(self.center_lon - VIEW_LON_SPAN / 2.0) + 180.0) * LON_SCALE).round() as i32;
         let start_column = start_column.rem_euclid(MAP_W as i32);
         let cache_matches = self.cache.as_ref().is_some_and(|cache| {
-            cache.start_column == start_column && cache.width == width && cache.height == height
+            cache.start_column == start_column
+                && cache.width == width
+                && cache.height == height
+                && cache.sun_minute == sun_minute
         });
         if !cache_matches {
-            self.cache = Some(build_map_cache(start_column, width, height));
+            self.cache = Some(build_map_cache(start_column, width, height, unix_secs));
         }
 
         let mut canvas = drawer.canvas();
@@ -618,22 +885,163 @@ impl Component for WorldMap {
             }
         }
 
-        let row_span = LAT_MAX - LAT_MIN;
-        if let Some(zone) = self
-            .selected_zone
-            .filter(|zone| (LAT_MIN..=LAT_MAX).contains(&zone.lat))
-        {
-            let x = ((lon_delta(self.center_lon, zone.lon) + VIEW_LON_SPAN / 2.0) / VIEW_LON_SPAN
-                * width as f64)
-                .floor() as isize;
-            let y = ((LAT_MAX - zone.lat) / row_span * height as f64).floor() as usize;
-            let y = y.min(height.saturating_sub(1)) as isize;
-            if x >= 0 && x < width as isize {
+        draw_map_overlays(
+            &mut canvas,
+            self.center_lon,
+            width,
+            height,
+            self.selected_zone.as_ref(),
+        );
+    }
+}
+
+/// Project a geographic point into map cell coordinates for the current view.
+fn project_map_point(
+    center_lon: f64,
+    lat: f64,
+    lon: f64,
+    width: usize,
+    height: usize,
+) -> Option<(isize, isize)> {
+    if !(LAT_MIN..=LAT_MAX).contains(&lat) {
+        return None;
+    }
+    let x = ((lon_delta(center_lon, lon) + VIEW_LON_SPAN / 2.0) / VIEW_LON_SPAN * width as f64)
+        .floor() as isize;
+    let y = ((LAT_MAX - lat) / (LAT_MAX - LAT_MIN) * height as f64).floor() as usize;
+    let y = y.min(height.saturating_sub(1)) as isize;
+    if x < 0 || x >= width as isize {
+        return None;
+    }
+    Some((x, y))
+}
+
+/// Axis-aligned occupancy used to avoid stacking city labels on top of each other.
+#[derive(Clone, Copy)]
+struct OccupiedRect {
+    x0: isize,
+    y0: isize,
+    x1: isize,
+    y1: isize,
+}
+
+impl OccupiedRect {
+    fn new(x: isize, y: isize, width: usize, height: usize) -> Self {
+        Self {
+            x0: x,
+            y0: y,
+            x1: x + width as isize,
+            y1: y + height as isize,
+        }
+    }
+
+    fn intersects(self, other: Self) -> bool {
+        self.x0 < other.x1 && other.x0 < self.x1 && self.y0 < other.y1 && other.y0 < self.y1
+    }
+}
+
+fn draw_map_overlays(
+    canvas: &mut CanvasSubviewMut<'_>,
+    center_lon: f64,
+    width: usize,
+    height: usize,
+    selected_zone: Option<&MapPoint>,
+) {
+    let mut occupied = Vec::new();
+
+    // Reserve the selected pin first so city labels defer to it.
+    let selected_cell = selected_zone
+        .and_then(|zone| project_map_point(center_lon, zone.lat, zone.lon, width, height));
+    if let Some((x, y)) = selected_cell {
+        occupied.push(OccupiedRect::new(x, y, 1, 1));
+        // Also reserve room for the pin's trailing label when present.
+        if let Some(zone) = selected_zone {
+            if !zone.label.is_empty() {
+                // Leading space separates the pin from the city name.
+                let label_width = zone.label.chars().count().saturating_add(1);
+                if x + 1 < width as isize {
+                    let avail = (width as isize - (x + 1)) as usize;
+                    let take = label_width.min(avail);
+                    if take > 0 {
+                        occupied.push(OccupiedRect::new(x + 1, y, take, 1));
+                    }
+                }
+            }
+        }
+    }
+
+    // Legend occupies the bottom-left strip when the map is large enough.
+    let show_legend = width >= LEGEND_MIN_WIDTH && height >= LEGEND_MIN_HEIGHT;
+    if show_legend {
+        // Glyph key matching the overlays painted above the basemap.
+        let legend = "X pin  * city  · dusk";
+        let legend_width = legend.chars().count();
+        if legend_width <= width {
+            let y = height as isize - 1;
+            occupied.push(OccupiedRect::new(0, y, legend_width, 1));
+            canvas.set_text(
+                0,
+                y,
+                legend,
+                map_text_style(theme::MUTED, Weight::Normal, false),
+            );
+        }
+    }
+
+    let show_cities = width >= CITY_LABEL_MIN_WIDTH && height >= CITY_LABEL_MIN_HEIGHT;
+    if show_cities {
+        // Density scales with map width so compact views stay sparse.
+        let min_gap = if width >= 70 { 5 } else { 7 };
+        for &(label, lat, lon) in CITY_LABELS {
+            let Some((x, y)) = project_map_point(center_lon, lat, lon, width, height) else {
+                continue;
+            };
+            // Require room for marker + full short name; skip rather than paint a bare "*".
+            let text = format!("*{label}");
+            let text_width = text.chars().count();
+            if x + text_width as isize > width as isize {
+                continue;
+            }
+            let rect = OccupiedRect::new(x, y, text_width, 1);
+            // Keep a soft gap around already-placed labels.
+            let padded = OccupiedRect {
+                x0: rect.x0 - min_gap as isize / 2,
+                y0: rect.y0 - 1,
+                x1: rect.x1 + min_gap as isize / 2,
+                y1: rect.y1 + 1,
+            };
+            if occupied.iter().any(|other| other.intersects(padded)) {
+                continue;
+            }
+            occupied.push(rect);
+            canvas.set_text(
+                x,
+                y,
+                &text,
+                map_text_style(theme::ACCENT, Weight::Normal, false),
+            );
+        }
+    }
+
+    // Selection pin is painted last so it always wins over city labels.
+    if let (Some(zone), Some((x, y))) = (selected_zone, selected_cell) {
+        canvas.set_text(
+            x,
+            y,
+            "X",
+            map_text_style(theme::WARNING, Weight::Bold, true),
+        );
+        if !zone.label.is_empty() && x + 1 < width as isize {
+            let avail = (width as isize - (x + 1)) as usize;
+            // Leading space keeps "X Helsinki" readable on the basemap.
+            let mut label = String::from(" ");
+            label.extend(zone.label.chars().take(avail.saturating_sub(1)));
+            if label.chars().count() > 1 {
                 canvas.set_text(
-                    x,
+                    x + 1,
                     y,
-                    "X",
-                    map_text_style(theme::WARNING, Weight::Bold, true),
+                    &label,
+                    map_text_style(theme::WARNING, Weight::Bold, false),
                 );
             }
         }

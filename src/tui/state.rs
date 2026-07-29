@@ -16,6 +16,8 @@ pub(crate) struct IdentityDraft {
     pub(crate) repeated_password: String,
     pub(crate) shell_index: usize,
     pub(crate) field_index: usize,
+    /// Cursor position within the focused text field, in Unicode scalar values.
+    pub(crate) cursor: usize,
     pub(crate) reveal_password: bool,
 }
 
