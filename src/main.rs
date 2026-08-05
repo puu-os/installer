@@ -16,7 +16,7 @@ use std::process::Command;
 use anyhow::{Context as _, Result, bail};
 use argh::FromArgs;
 
-use crate::engine::config::Config;
+use crate::engine::config::{Config, K3sRole};
 use crate::engine::pipeline::Context;
 use crate::tui::app::Installer;
 
@@ -46,15 +46,14 @@ fn read_first_line(path: &std::path::Path) -> Result<String> {
 }
 
 fn main() -> Result<()> {
+    tui::logging::init()?;
+    tracing::info!(target: engine::INSTALLATION_LOG_TARGET, "installer started");
+
     let args: Args = argh::from_env();
 
     if !engine::util::running_as_root() {
-        eprintln!("puu-installer must be run as root.");
-        std::process::exit(1);
+        bail!("puu-installer must be run as root.");
     }
-
-    tui::logging::init()?;
-    tracing::info!(target: engine::INSTALLATION_LOG_TARGET, "installer started");
 
     engine::pipeline::enter_private_mount_namespace()?;
 
@@ -62,18 +61,14 @@ fn main() -> Result<()> {
         .config_path
         .or_else(|| std::env::var_os("PUU_INSTALLER_CONFIG").map(PathBuf::from))
     else {
-        eprintln!(
-            "configuration file path must be provided via --config-path or PUU_INSTALLER_CONFIG environment variable."
-        );
-        std::process::exit(1);
+        bail!("configuration file path must be provided via --config-path or PUU_INSTALLER_CONFIG environment variable.");
     };
     let mut cfg = Config::load(&config_path)?;
 
-    if let Some(role) = args.k3s_role {
-        if role != "server" && role != "agent" {
-            eprintln!("--k3s-role must be \"server\" or \"agent\", got \"{role}\".");
-            std::process::exit(1);
-        }
+    if let Some(role_str) = args.k3s_role {
+        let Ok(role) = role_str.parse::<K3sRole>() else {
+            bail!("--k3s-role must be \"server\" or \"agent\", got \"{role_str}\".");
+        };
         cfg.k3s.role = role;
     }
 
@@ -83,12 +78,11 @@ fn main() -> Result<()> {
     };
 
     if source_image.is_none() && !engine::image::running_in_container() {
-        eprintln!(
+        bail!(
             "no local bootc source image found; expected \
              /dev/disk/by-label/{} or --source-image.",
             cfg.image.source_label
         );
-        std::process::exit(1);
     }
 
     let k3s_token = match &args.k3s_token_file {
@@ -96,9 +90,8 @@ fn main() -> Result<()> {
         None => String::new(),
     };
 
-    if cfg.k3s.role == "agent" && (cfg.k3s.server_url.is_empty() || k3s_token.is_empty()) {
-        eprintln!("--k3s-role agent requires k3s.serverUrl and --k3s-token-file.");
-        std::process::exit(1);
+    if cfg.k3s.role == K3sRole::Agent && (cfg.k3s.server_url.is_empty() || k3s_token.is_empty()) {
+        bail!("--k3s-role agent requires k3s.serverUrl and --k3s-token-file.");
     }
 
     let target_imgref = engine::image::load_target_imgref(source_image.as_deref(), &cfg);

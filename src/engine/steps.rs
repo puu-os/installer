@@ -501,7 +501,7 @@ fn step_firstboot(r: &mut Runner) -> Result<()> {
 }
 
 fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
-    if r.ctx.config.k3s.role == "server" && r.ctx.config.k3s.node_name.is_empty() {
+    if r.ctx.config.k3s.role == crate::engine::config::K3sRole::Server && r.ctx.config.k3s.node_name.is_empty() {
         tracing::info!(
             target: crate::engine::INSTALLATION_LOG_TARGET,
             "k3s cluster: using image default server configuration"
@@ -512,7 +512,7 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
     let mut argv: Vec<String> = vec![
         r.ctx.config.k3s.helper.clone(),
         "--role".into(),
-        r.ctx.config.k3s.role.clone(),
+        r.ctx.config.k3s.role.to_string(),
     ];
     if !r.ctx.config.k3s.server_url.is_empty() {
         argv.push("--server-url".into());

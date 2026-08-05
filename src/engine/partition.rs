@@ -9,6 +9,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use anyhow::{Context, Result, bail};
 
 use crate::engine::util::random_bytes;
+use crate::engine::config::PartitionSize;
 
 const PART_SIZE_UNITS: &[(&str, u64)] = &[
     ("K", 1024),
@@ -50,9 +51,13 @@ const PART_TYPE_LINUX: [u8; 16] = [
 ///
 /// Layout mirrors the previous `sgdisk` calls: EFI (`efi_size`) at the front,
 /// home (`home_size`) pinned to the end of the disk, and root filling the gap.
-pub fn partition_drive(drive: &str, efi_size: &str, home_size: &str) -> Result<PartitionLayout> {
-    let efi_bytes = part_size_bytes(efi_size)?;
-    let home_bytes = part_size_bytes(home_size)?;
+pub fn partition_drive(
+    drive: &str,
+    efi_size: &PartitionSize,
+    home_size: &PartitionSize,
+) -> Result<PartitionLayout> {
+    let efi_bytes = efi_size.bytes();
+    let home_bytes = home_size.bytes();
 
     let mut file = std::fs::OpenOptions::new()
         .read(true)
@@ -172,17 +177,15 @@ pub fn load_partition_layout(drive: &str) -> Result<PartitionLayout> {
 
 /// Return the minimum target disk size required by the configured partition sizes.
 pub fn min_target_size_bytes(config: &crate::engine::config::Config) -> Result<u64> {
-    let efi = format!("+{}", config.partitions.efi);
-    let root = format!("+{}", config.partitions.root_min);
-    let home = format!("+{}", config.partitions.home);
-    let sizes = [efi.as_str(), root.as_str(), home.as_str(), "+1G"];
-
-    sizes.iter().try_fold(0u64, |total, size| {
-        let bytes = part_size_bytes(size)?;
-        total
-            .checked_add(bytes)
-            .ok_or_else(|| anyhow::anyhow!("minimum target size is too large"))
-    })
+    let padding = part_size_bytes("1G")?;
+    config
+        .partitions
+        .efi
+        .bytes()
+        .checked_add(config.partitions.root_min.bytes())
+        .and_then(|total| total.checked_add(config.partitions.home.bytes()))
+        .and_then(|total| total.checked_add(padding))
+        .ok_or_else(|| anyhow::anyhow!("minimum target size is too large"))
 }
 
 pub fn derive_partitions(drive: &str) -> DerivedPartitions {
@@ -199,7 +202,7 @@ pub fn derive_partitions(drive: &str) -> DerivedPartitions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PartitionInfo {
     pub number: u32,
     pub unique_guid: [u8; 16],
@@ -218,7 +221,7 @@ impl PartitionInfo {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PartitionLayout {
     pub efi: PartitionInfo,
 }

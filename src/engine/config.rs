@@ -4,8 +4,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use std::fmt;
+use std::str::FromStr;
+
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -37,17 +40,17 @@ impl Default for Branding {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Partitions {
-    pub efi: String,
-    pub root_min: String,
-    pub home: String,
+    pub efi: PartitionSize,
+    pub root_min: PartitionSize,
+    pub home: PartitionSize,
 }
 
 impl Default for Partitions {
     fn default() -> Self {
         Self {
-            efi: "512M".into(),
-            root_min: "64G".into(),
-            home: "256G".into(),
+            efi: "512M".parse().expect("valid efi size"),
+            root_min: "64G".parse().expect("valid root_min size"),
+            home: "256G".parse().expect("valid home size"),
         }
     }
 }
@@ -128,11 +131,109 @@ impl Default for Flatpak {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum K3sRole {
+    #[default]
+    Server,
+    Agent,
+}
+
+impl K3sRole {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Server => "server",
+            Self::Agent => "agent",
+        }
+    }
+}
+
+
+impl fmt::Display for K3sRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl AsRef<str> for K3sRole {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for K3sRole {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "server" => Ok(Self::Server),
+            "agent" => Ok(Self::Agent),
+            _ => anyhow::bail!("k3s.role must be \"server\" or \"agent\", got {s:?}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PartitionSize {
+    raw: String,
+    bytes: u64,
+}
+
+impl PartitionSize {
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+}
+
+impl FromStr for PartitionSize {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = crate::engine::partition::part_size_bytes(s)?;
+        if bytes == 0 {
+            anyhow::bail!("partition size must be greater than zero");
+        }
+        Ok(Self {
+            raw: s.strip_prefix('+').unwrap_or(s).to_string(),
+            bytes,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for PartitionSize {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+impl fmt::Display for PartitionSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl AsRef<str> for PartitionSize {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct K3s {
     pub helper: String,
-    pub role: String,
+    pub role: K3sRole,
     pub server_url: String,
     pub node_name: String,
 }
@@ -141,7 +242,7 @@ impl Default for K3s {
     fn default() -> Self {
         Self {
             helper: "/usr/libexec/puu/configure-k3s-cluster".into(),
-            role: "server".into(),
+            role: K3sRole::Server,
             server_url: String::new(),
             node_name: String::new(),
         }
@@ -218,13 +319,7 @@ impl Config {
                 "branding.name {name:?} must contain only Basic Multilingual Plane characters"
             );
         }
-        validate_partition_size("partitions.efi", &self.partitions.efi)?;
-        validate_partition_size("partitions.rootMin", &self.partitions.root_min)?;
-        validate_partition_size("partitions.home", &self.partitions.home)?;
         validate_digest(&self.image.expected_digest)?;
-        if !matches!(self.k3s.role.as_str(), "server" | "agent") {
-            anyhow::bail!("k3s.role must be \"server\" or \"agent\"");
-        }
         validate_single_line("identity.keymap", &self.identity.keymap)?;
         validate_single_line("identity.locale", &self.identity.locale)?;
         validate_label("labels.root", &self.labels.root, XFS_LABEL_MAX)?;
@@ -246,14 +341,6 @@ fn validate_label(field: &str, value: &str, max: usize) -> Result<()> {
     Ok(())
 }
 
-fn validate_partition_size(field: &str, value: &str) -> Result<()> {
-    let bytes = crate::engine::partition::part_size_bytes(value)
-        .with_context(|| format!("invalid {field}"))?;
-    if bytes == 0 {
-        anyhow::bail!("{field} must be greater than zero");
-    }
-    Ok(())
-}
 
 fn validate_digest(value: &str) -> Result<()> {
     if value.is_empty() {
