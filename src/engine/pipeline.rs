@@ -74,8 +74,8 @@ pub fn path_is_mount(path: impl AsRef<Path>) -> bool {
         return false;
     };
     mountinfo.lines().any(|line| {
-        crate::engine::util::parse_mountinfo_line(line)
-            .is_some_and(|(mountpoint, _, _)| mountpoint == normalized)
+        line.parse::<crate::engine::util::MountInfo>()
+            .is_ok_and(|info| info.mountpoint == normalized)
     })
 }
 
@@ -254,14 +254,14 @@ fn mounted_target_points() -> Vec<String> {
     };
 
     for line in mountinfo.lines() {
-        let Some((mount_point, _, _)) = crate::engine::util::parse_mountinfo_line(line) else {
+        let Ok(info) = line.parse::<crate::engine::util::MountInfo>() else {
             continue;
         };
-        if mount_point == TARGET_MOUNT
-            || mount_point.starts_with(&format!("{TARGET_MOUNT}/"))
-            || mount_point == BOOTC_VAR_TMP
+        if info.mountpoint == TARGET_MOUNT
+            || info.mountpoint.starts_with(&format!("{TARGET_MOUNT}/"))
+            || info.mountpoint == BOOTC_VAR_TMP
         {
-            points.push(mount_point);
+            points.push(info.mountpoint);
         }
     }
 

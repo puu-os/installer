@@ -119,28 +119,37 @@ pub(crate) fn decode_mountinfo_path(path: &str) -> String {
 
     out
 }
-/// Parse one `/proc/self/mountinfo` record into decoded mount point, source,
-/// and filesystem type fields.
-pub(crate) fn parse_mountinfo_line(line: &str) -> Option<(String, String, String)> {
-    let mut fields = line.split_whitespace();
-    fields.next()?; // mount ID
-    fields.next()?; // parent ID
-    fields.next()?; // major:minor
-    fields.next()?; // root
-    let mountpoint = fields.next()?;
-    fields.next()?; // mount options
-    loop {
-        if fields.next()? == "-" {
-            break;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MountInfo {
+    pub mountpoint: String,
+    pub source: String,
+    pub fstype: String,
+}
+
+impl std::str::FromStr for MountInfo {
+    type Err = ();
+
+    fn from_str(line: &str) -> Result<Self, Self::Err> {
+        let mut fields = line.split_whitespace();
+        fields.next().ok_or(())?;
+        fields.next().ok_or(())?;
+        fields.next().ok_or(())?;
+        fields.next().ok_or(())?;
+        let mountpoint = fields.next().ok_or(())?;
+        fields.next().ok_or(())?;
+        loop {
+            if fields.next().ok_or(())? == "-" {
+                break;
+            }
         }
+        let fstype = fields.next().ok_or(())?;
+        let source = fields.next().ok_or(())?;
+        Ok(Self {
+            mountpoint: decode_mountinfo_path(mountpoint),
+            source: decode_mountinfo_path(source),
+            fstype: fstype.to_string(),
+        })
     }
-    let fstype = fields.next()?;
-    let source = fields.next()?;
-    Some((
-        decode_mountinfo_path(mountpoint),
-        decode_mountinfo_path(source),
-        fstype.to_string(),
-    ))
 }
 
 

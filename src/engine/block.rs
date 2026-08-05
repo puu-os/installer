@@ -52,12 +52,11 @@ fn mounted_sources() -> HashMap<String, String> {
         return map;
     };
     for line in content.lines() {
-        let Some((mountpoint, source, _fstype)) = crate::engine::util::parse_mountinfo_line(line)
-        else {
+        let Ok(info) = line.parse::<crate::engine::util::MountInfo>() else {
             continue;
         };
-        if source.starts_with("/dev/") {
-            map.entry(source).or_insert(mountpoint);
+        if info.source.starts_with("/dev/") {
+            map.entry(info.source).or_insert(info.mountpoint);
         }
     }
     map
