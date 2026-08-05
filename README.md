@@ -10,9 +10,9 @@ Standalone installer for bootc-based OSs.
 ## Configuration
 
 The installer reads a YAML configuration file. Its path is taken from
-`--config`, or from the `PUU_INSTALLER_CONFIG` environment variable when
-`--config` is not given. `--config` takes precedence over the environment
-variable.
+`--config-path`, or from the `PUU_INSTALLER_CONFIG` environment variable when
+`--config-path` is not given. `--config-path` takes precedence over the environment
+variable. Either `--config-path` or `PUU_INSTALLER_CONFIG` must be provided.
 
 The k3s cluster token is the only k3s setting passed on the command line, via
 `--k3s-token-file` (the file's first line is used). All other k3s settings live

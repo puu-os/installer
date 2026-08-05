@@ -25,7 +25,7 @@ use crate::tui::app::Installer;
 struct Args {
     /// read installer configuration from this YAML file
     #[argh(option)]
-    config: Option<PathBuf>,
+    config_path: Option<PathBuf>,
     /// override install source with a bootc image dir layout or oci-archive path
     #[argh(option)]
     source_image: Option<PathBuf>,
@@ -58,12 +58,15 @@ fn main() -> Result<()> {
 
     engine::pipeline::enter_private_mount_namespace()?;
 
-    let config_path = args.config.unwrap_or_else(|| {
-        std::env::var_os("PUU_INSTALLER_CONFIG").map_or_else(
-            || PathBuf::from("/usr/share/puu/machine.yaml"),
-            PathBuf::from,
-        )
-    });
+    let Some(config_path) = args
+        .config_path
+        .or_else(|| std::env::var_os("PUU_INSTALLER_CONFIG").map(PathBuf::from))
+    else {
+        eprintln!(
+            "configuration file path must be provided via --config-path or PUU_INSTALLER_CONFIG environment variable."
+        );
+        std::process::exit(1);
+    };
     let mut cfg = Config::load(&config_path)?;
 
     if let Some(role) = args.k3s_role {
