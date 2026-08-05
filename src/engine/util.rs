@@ -119,7 +119,6 @@ pub(crate) fn decode_mountinfo_path(path: &str) -> String {
 
     out
 }
-
 /// Parse one `/proc/self/mountinfo` record into decoded mount point, source,
 /// and filesystem type fields.
 pub(crate) fn parse_mountinfo_line(line: &str) -> Option<(String, String, String)> {
@@ -144,6 +143,7 @@ pub(crate) fn parse_mountinfo_line(line: &str) -> Option<(String, String, String
     ))
 }
 
+
 /// Check whether a command exists in `$PATH`, by searching `$PATH` directly
 /// instead of shelling out to `sh -c 'command -v'`.
 pub fn which_exists(cmd: &str) -> bool {
@@ -153,3 +153,4 @@ pub fn which_exists(cmd: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| is_executable(&dir.join(cmd))))
 }
+

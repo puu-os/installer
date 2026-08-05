@@ -32,6 +32,7 @@ const PROGRESS_MARKER: &str = "PUU_PROGRESS";
 /// the step began, relative to an expected total. Follows large writes such as
 /// the bootc image deployment, whose container pull and ostree checkout both
 /// land on the target filesystem.
+#[derive(Debug)]
 pub struct DiskWriteProgress {
     path: PathBuf,
     start_avail: u64,
@@ -69,7 +70,7 @@ impl ProgressSource for DiskWriteProgress {
 /// Completion parsed from a helper that prints [`PROGRESS_MARKER`] `<done>/<total>`
 /// lines as it works, such as the Flatpak pre-seed. Until such a line appears
 /// the bar is left untouched, so a non-cooperating helper behaves as before.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct MarkerProgress {
     fraction: Option<f64>,
 }
@@ -109,3 +110,4 @@ fn available_bytes(path: &Path) -> Result<u64> {
         .map_err(|e| anyhow::anyhow!("failed to statvfs {}: {e}", path.display()))?;
     Ok(stat.blocks_available().saturating_mul(stat.fragment_size()))
 }
+

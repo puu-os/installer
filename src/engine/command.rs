@@ -153,12 +153,11 @@ impl<'a> Command<'a> {
         self.tracker = Some((source, emit));
         self
     }
-
     /// Run the command, emitting merged stdout+stderr line-by-line as tracing
     /// events, and raise an error if the exit code is non-zero. The child
     /// chroots into `chroot_dir` before exec when it is set.
     pub fn run(mut self) -> Result<()> {
-        let command_line = format_argv(&self.argv);
+        let command_line = self.to_string();
         tracing::info!(target: crate::engine::INSTALLATION_LOG_TARGET, "$ {command_line}");
 
         let reader = build_expression(&self.argv, self.env, self.chroot_dir)
@@ -238,5 +237,11 @@ impl<'a> Command<'a> {
             bail!("command failed (exit {rc}): {command_line}");
         }
         Ok(())
+    }
+}
+
+impl std::fmt::Display for Command<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format_argv(&self.argv))
     }
 }

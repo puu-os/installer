@@ -6,10 +6,17 @@ use std::path::{Path, PathBuf};
 const EFI_GLOBAL_VARIABLE: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
 const EFIVARS: &str = "/sys/firmware/efi/efivars";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupModeStatus {
     pub setup_mode: Option<bool>,
     pub secure_boot: Option<bool>,
     pub reason: String,
+}
+
+impl std::fmt::Display for SetupModeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.reason)
+    }
 }
 
 fn efi_variable_path(name: &str, root: &Path) -> Option<PathBuf> {

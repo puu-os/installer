@@ -166,6 +166,12 @@ impl CleanupStack {
     }
 }
 
+impl Default for CleanupStack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for CleanupStack {
     fn drop(&mut self) {
         for f in self.0.drain(..).rev() {

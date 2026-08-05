@@ -263,7 +263,7 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
         );
     }
 
-    let mut cleanups = pipeline::CleanupStack::new();
+    let mut cleanups = pipeline::CleanupStack::default();
 
     if !Path::new(BOOTC_STORAGE_MOUNT).exists() {
         std::fs::create_dir_all(BOOTC_STORAGE_MOUNT)?;
@@ -519,7 +519,7 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
         argv.push(r.ctx.config.k3s.server_url.clone());
     }
 
-    let mut cleanups = pipeline::CleanupStack::new();
+    let mut cleanups = pipeline::CleanupStack::default();
     if !r.ctx.k3s_token.is_empty() {
         let token_path = Path::new(TARGET_MOUNT).join("etc/rancher/k3s/puu-token");
         let parent = token_path

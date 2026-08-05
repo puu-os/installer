@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Device {
     pub path: String,
     pub model: String,
@@ -14,8 +15,18 @@ pub struct Device {
     pub busy_reason: Option<BusyReason>,
 }
 
+impl std::fmt::Display for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.model.is_empty() {
+            write!(f, "{} ({})", self.path, self.size)
+        } else {
+            write!(f, "{} ({}, {})", self.path, self.size, self.model)
+        }
+    }
+}
+
 /// Why a disk is unavailable as an install target.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BusyReason {
     Mounted { ident: String, mountpoint: String },
     Mapping { kind: String, ident: String },
