@@ -149,7 +149,6 @@ impl K3sRole {
     }
 }
 
-
 impl fmt::Display for K3sRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -340,7 +339,6 @@ fn validate_label(field: &str, value: &str, max: usize) -> Result<()> {
     }
     Ok(())
 }
-
 
 fn validate_digest(value: &str) -> Result<()> {
     if value.is_empty() {

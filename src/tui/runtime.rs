@@ -1366,8 +1366,9 @@ fn draw_panel(frame: &mut Frame, rect: Rect, title: &str) {
         let label = render::rendered_width(title);
         let width = label.min(rect.width.saturating_sub(2));
         frame.render_widget(
-            Paragraph::new(title.to_string())
-                .style(bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND))),
+            Paragraph::new(title.to_string()).style(bold(
+                Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND),
+            )),
             Rect::new(rect.x + 1, rect.y + 1, width, 1),
         );
     }
@@ -1385,10 +1386,7 @@ fn draw_selected_row(frame: &mut Frame, x: u16, y: u16, width: u16, content: &st
     let style = row_style(selected);
     let marker = if selected { ">" } else { " " };
     let text = format!(" {marker} {content}");
-    frame.render_widget(
-        Paragraph::new(text).style(style),
-        Rect::new(x, y, width, 1),
-    );
+    frame.render_widget(Paragraph::new(text).style(style), Rect::new(x, y, width, 1));
 }
 
 fn draw_text_row(
@@ -1405,7 +1403,10 @@ fn draw_text_row(
         Weight::Light => dim(Style::default().fg(color).bg(theme::BACKGROUND)),
         Weight::Normal => Style::default().fg(color).bg(theme::BACKGROUND),
     };
-    frame.render_widget(Paragraph::new(content.to_string()).style(style), Rect::new(x, y, width, 1));
+    frame.render_widget(
+        Paragraph::new(content.to_string()).style(style),
+        Rect::new(x, y, width, 1),
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1433,7 +1434,10 @@ fn draw_choice_row(
 }
 
 #[allow(clippy::too_many_lines)]
-#[expect(clippy::too_many_arguments, reason = "row painter mirrors the field row arguments")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "row painter mirrors the field row arguments"
+)]
 fn draw_text_input(
     frame: &mut Frame,
     x: u16,
@@ -1505,18 +1509,19 @@ fn draw_text_input(
 }
 
 fn draw_filter_input(frame: &mut Frame, x: u16, y: u16, width: u16, value: &str) {
-    let mut spans = vec![
-        Span::styled(
-            "  Filter  ",
-            bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND)),
-        ),
-    ];
+    let mut spans = vec![Span::styled(
+        "  Filter  ",
+        bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND)),
+    )];
     if value.is_empty() {
         spans.push(Span::styled(
             " ",
-            bold(Style::default().fg(theme::ON_SELECTED).bg(theme::BACKGROUND).add_modifier(
-                Modifier::REVERSE,
-            )),
+            bold(
+                Style::default()
+                    .fg(theme::ON_SELECTED)
+                    .bg(theme::BACKGROUND)
+                    .add_modifier(Modifier::REVERSE),
+            ),
         ));
         spans.push(Span::styled(
             " Type to filter...",
@@ -1529,9 +1534,12 @@ fn draw_filter_input(frame: &mut Frame, x: u16, y: u16, width: u16, value: &str)
         ));
         spans.push(Span::styled(
             " ",
-            bold(Style::default().fg(theme::ON_SELECTED).bg(theme::BACKGROUND).add_modifier(
-                Modifier::REVERSE,
-            )),
+            bold(
+                Style::default()
+                    .fg(theme::ON_SELECTED)
+                    .bg(theme::BACKGROUND)
+                    .add_modifier(Modifier::REVERSE),
+            ),
         ));
     }
     frame.render_widget(
@@ -1574,7 +1582,10 @@ fn draw_zone_row(frame: &mut Frame, x: u16, y: u16, width: u16, zone: &timezone:
             spans.push(Span::styled(before, base));
         }
         if !matched.is_empty() {
-            spans.push(Span::styled(matched, bold(Style::default().fg(match_color).bg(bg))));
+            spans.push(Span::styled(
+                matched,
+                bold(Style::default().fg(match_color).bg(bg)),
+            ));
         }
         if !after.is_empty() {
             spans.push(Span::styled(after, base));
@@ -1736,12 +1747,7 @@ fn welcome_content(frame: &mut Frame, rect: Rect, state: &AppState) {
     }
 }
 
-fn target_content(
-    frame: &mut Frame,
-    rect: Rect,
-    controller: &UiController,
-    layout: LayoutMode,
-) {
+fn target_content(frame: &mut Frame, rect: Rect, controller: &UiController, layout: LayoutMode) {
     let state = &controller.state;
     draw_panel(frame, rect, "Target disks");
     let body = panel_body(rect);
@@ -1815,7 +1821,10 @@ fn target_content(
     }
 }
 
-#[expect(clippy::too_many_lines, reason = "one painter per identity field keeps layout local")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one painter per identity field keeps layout local"
+)]
 fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
     draw_panel(frame, rect, "User account");
     let body = panel_body(rect);
@@ -1844,9 +1853,21 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
     let language = LANGUAGES
         .get(draft.language_index)
         .map_or("?", |(label, _)| *label);
-    let shell = if draft.shell_index == 0 { "bash" } else { "zsh" };
+    let shell = if draft.shell_index == 0 {
+        "bash"
+    } else {
+        "zsh"
+    };
     let mut row = body.y;
-    draw_choice_row(frame, body.x, row, body.width, "Language", language, draft.field_index == 0);
+    draw_choice_row(
+        frame,
+        body.x,
+        row,
+        body.width,
+        "Language",
+        language,
+        draft.field_index == 0,
+    );
     row = row.saturating_add(1);
     draw_text_input(
         frame,
@@ -1896,7 +1917,15 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
         "required",
     );
     row = row.saturating_add(1);
-    draw_choice_row(frame, body.x, row, body.width, "Shell", shell, draft.field_index == 5);
+    draw_choice_row(
+        frame,
+        body.x,
+        row,
+        body.width,
+        "Shell",
+        shell,
+        draft.field_index == 5,
+    );
     row = row.saturating_add(1);
     if draft.reveal_password {
         draw_text_row(
@@ -1969,13 +1998,7 @@ fn draw_timezone_list_panel(frame: &mut Frame, rect: Rect, state: &AppState) {
         );
     } else {
         for (i, zone) in zones.iter().enumerate() {
-            draw_zone_row(
-                frame,
-                body.x,
-                body.y + 1 + i as u16,
-                body.width,
-                zone,
-            );
+            draw_zone_row(frame, body.x, body.y + 1 + i as u16, body.width, zone);
         }
     }
     if let Some(details) = timezone::selected_details(state) {
@@ -1997,7 +2020,12 @@ fn timezone_content(
     layout: LayoutMode,
     map_cache: &mut Option<timezone::MapCache>,
 ) {
-    let (cx0, cy0, cx1, cy1) = (content.x, content.y, content.x + content.width, content.y + content.height);
+    let (cx0, cy0, cx1, cy1) = (
+        content.x,
+        content.y,
+        content.x + content.width,
+        content.y + content.height,
+    );
     if layout == LayoutMode::Compact {
         let split = cy0 + (cy1 - cy0) * 2 / 5;
         let map_rect = Rect::new(cx0, cy0, content.width, split - cy0);
@@ -2154,7 +2182,14 @@ fn review_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
         Weight::Normal,
     );
     row = row.saturating_add(2);
-    draw_selected_row(frame, body.x, row, body.width, "[ Back ]", state.selection.review == 0);
+    draw_selected_row(
+        frame,
+        body.x,
+        row,
+        body.width,
+        "[ Back ]",
+        state.selection.review == 0,
+    );
     row = row.saturating_add(1);
     draw_selected_row(
         frame,
@@ -2224,7 +2259,9 @@ fn draw_install_log(frame: &mut Frame, rect: Rect, logs: &str, scroll: usize) {
     if rect.width > 2 && rect.height > 1 {
         let width = render::rendered_width(&title).min(rect.width.saturating_sub(2));
         frame.render_widget(
-            Paragraph::new(title).style(bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND))),
+            Paragraph::new(title).style(bold(
+                Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND),
+            )),
             Rect::new(rect.x + 1, rect.y + 1, width, 1),
         );
     }
@@ -2236,7 +2273,10 @@ fn draw_install_log(frame: &mut Frame, rect: Rect, logs: &str, scroll: usize) {
     );
 }
 
-#[expect(clippy::too_many_lines, reason = "install overview + split panels laid out together")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "install overview + split panels laid out together"
+)]
 fn install_content(
     frame: &mut Frame,
     content: Rect,
@@ -2460,7 +2500,10 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
         dialog_width.saturating_sub(2),
         dialog_height.saturating_sub(2),
     );
-    frame.render_widget(Border::color(modal_color), Rect::new(left, top, dialog_width, dialog_height));
+    frame.render_widget(
+        Border::color(modal_color),
+        Rect::new(left, top, dialog_width, dialog_height),
+    );
     if inner.width > 0 {
         frame.render_widget(
             Block::default().style(Style::default().bg(theme::BACKGROUND)),
@@ -2469,13 +2512,16 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
     }
     if inner.width > 0 {
         frame.render_widget(
-            Paragraph::new(title).style(bold(Style::default().fg(modal_color).bg(theme::BACKGROUND))),
+            Paragraph::new(title)
+                .style(bold(Style::default().fg(modal_color).bg(theme::BACKGROUND))),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
     }
     if inner.height > 2 && inner.width > 0 {
         frame.render_widget(
-            Paragraph::new(body).style(bold(Style::default().fg(theme::FOREGROUND).bg(theme::BACKGROUND))),
+            Paragraph::new(body).style(bold(
+                Style::default().fg(theme::FOREGROUND).bg(theme::BACKGROUND),
+            )),
             Rect::new(inner.x, inner.y + 1, inner.width, 1),
         );
     }
@@ -2488,7 +2534,9 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
         let w = render::rendered_width(buttons).min(inner.width);
         let bx = inner.x + (inner.width.saturating_sub(w)) / 2;
         frame.render_widget(
-            Paragraph::new(buttons).style(bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND))),
+            Paragraph::new(buttons).style(bold(
+                Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND),
+            )),
             Rect::new(bx, inner.y + inner.height.saturating_sub(1), w, 1),
         );
     }
@@ -2685,13 +2733,15 @@ fn render_screen(
 
     // Title + subtitle bars.
     frame.render_widget(
-        Paragraph::new(screen_title(controller))
-            .style(bold(Style::default().fg(theme::FOREGROUND).bg(theme::TITLE))),
+        Paragraph::new(screen_title(controller)).style(bold(
+            Style::default().fg(theme::FOREGROUND).bg(theme::TITLE),
+        )),
         Rect::new(0, 0, width, 1),
     );
     frame.render_widget(
-        Paragraph::new(screen_subtitle(state.route))
-            .style(bold(Style::default().fg(theme::ACCENT).bg(theme::TITLE_DETAIL))),
+        Paragraph::new(screen_subtitle(state.route)).style(bold(
+            Style::default().fg(theme::ACCENT).bg(theme::TITLE_DETAIL),
+        )),
         Rect::new(0, 1, width, 1),
     );
 
@@ -2701,12 +2751,7 @@ fn render_screen(
 
     // Content panel area (matches hit-testing geometry in content_frame).
     let (cx0, cy0, cx1, cy1) = content_frame(width, height);
-    let content = Rect::new(
-        cx0,
-        cy0,
-        cx1.saturating_sub(cx0),
-        cy1.saturating_sub(cy0),
-    );
+    let content = Rect::new(cx0, cy0, cx1.saturating_sub(cx0), cy1.saturating_sub(cy0));
     let layout = layout_mode((width, height));
     match state.route {
         Route::Welcome => welcome_content(frame, content, state),

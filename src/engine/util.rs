@@ -152,7 +152,6 @@ impl std::str::FromStr for MountInfo {
     }
 }
 
-
 /// Check whether a command exists in `$PATH`, by searching `$PATH` directly
 /// instead of shelling out to `sh -c 'command -v'`.
 pub fn which_exists(cmd: &str) -> bool {
@@ -162,4 +161,3 @@ pub fn which_exists(cmd: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| is_executable(&dir.join(cmd))))
 }
-

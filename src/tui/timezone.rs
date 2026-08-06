@@ -15,8 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::tui::render::{Color, Frame, Modifier, Rect, Style};
 use crate::tui::message::Effect;
+use crate::tui::render::{Color, Frame, Modifier, Rect, Style};
 use crate::tui::state::{AppState, Route};
 use crate::tui::theme;
 
@@ -849,7 +849,15 @@ pub(crate) fn paint_world_map(
         return;
     };
     paint_map_rows(frame, rect, &cached.rows);
-    draw_map_overlays(frame, rect, center_lon, width, height, selected_zone, &cached.rows);
+    draw_map_overlays(
+        frame,
+        rect,
+        center_lon,
+        width,
+        height,
+        selected_zone,
+        &cached.rows,
+    );
 }
 
 fn paint_map_rows(frame: &mut Frame, rect: Rect, rows: &[MapRow]) {
@@ -914,15 +922,7 @@ impl OccupiedRect {
     }
 }
 
-fn put_text(
-    frame: &mut Frame,
-    x: u16,
-    y: u16,
-    text: &str,
-    fg: Color,
-    bg: Color,
-    bold: bool,
-) {
+fn put_text(frame: &mut Frame, x: u16, y: u16, text: &str, fg: Color, bg: Color, bold: bool) {
     let mut buffer = frame.buffer_mut();
     let mut cursor_x = x;
     for ch in text.chars() {

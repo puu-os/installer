@@ -8,8 +8,8 @@ use std::os::unix::fs::OpenOptionsExt;
 
 use anyhow::{Context, Result, bail};
 
-use crate::engine::util::random_bytes;
 use crate::engine::config::PartitionSize;
+use crate::engine::util::random_bytes;
 
 const PART_SIZE_UNITS: &[(&str, u64)] = &[
     ("K", 1024),

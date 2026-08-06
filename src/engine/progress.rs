@@ -110,4 +110,3 @@ fn available_bytes(path: &Path) -> Result<u64> {
         .map_err(|e| anyhow::anyhow!("failed to statvfs {}: {e}", path.display()))?;
     Ok(stat.blocks_available().saturating_mul(stat.fragment_size()))
 }
-

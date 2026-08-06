@@ -61,7 +61,9 @@ fn main() -> Result<()> {
         .config_path
         .or_else(|| std::env::var_os("PUU_INSTALLER_CONFIG").map(PathBuf::from))
     else {
-        bail!("configuration file path must be provided via --config-path or PUU_INSTALLER_CONFIG environment variable.");
+        bail!(
+            "configuration file path must be provided via --config-path or PUU_INSTALLER_CONFIG environment variable."
+        );
     };
     let mut cfg = Config::load(&config_path)?;
 

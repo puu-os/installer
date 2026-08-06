@@ -195,7 +195,10 @@ impl Rect {
         }
     }
 
-    #[allow(dead_code, reason = "part of the Rect API retained by the offscreen renderer")]
+    #[allow(
+        dead_code,
+        reason = "part of the Rect API retained by the offscreen renderer"
+    )]
     pub(crate) const fn area(self) -> Size {
         Size {
             width: self.width,
@@ -353,13 +356,19 @@ impl Cell {
         self
     }
 
-    #[allow(dead_code, reason = "part of the Cell API retained by the offscreen renderer")]
+    #[allow(
+        dead_code,
+        reason = "part of the Cell API retained by the offscreen renderer"
+    )]
     pub(crate) fn set_fg(&mut self, color: Color) -> &mut Self {
         self.style.fg = Some(color);
         self
     }
 
-    #[allow(dead_code, reason = "part of the Cell API retained by the offscreen renderer")]
+    #[allow(
+        dead_code,
+        reason = "part of the Cell API retained by the offscreen renderer"
+    )]
     pub(crate) fn set_bg(&mut self, color: Color) -> &mut Self {
         self.style.bg = Some(color);
         self
@@ -449,7 +458,10 @@ impl Frame {
         }
     }
 
-    #[allow(dead_code, reason = "cursor placement is available to screens that need it")]
+    #[allow(
+        dead_code,
+        reason = "cursor placement is available to screens that need it"
+    )]
     pub(crate) fn set_cursor_position(&mut self, pos: (u16, u16)) {
         let (x, y) = pos;
         if x < self.area.width && y < self.area.height {
@@ -457,7 +469,10 @@ impl Frame {
         }
     }
 
-    #[allow(dead_code, reason = "cursor shape is available to screens that need it")]
+    #[allow(
+        dead_code,
+        reason = "cursor shape is available to screens that need it"
+    )]
     pub(crate) fn set_cursor_style(&mut self, style: CursorStyle) {
         self.cursor_style = style;
     }
@@ -1121,7 +1136,7 @@ pub(crate) fn mouse_kind(kind: MouseEventKind) -> Option<crate::tui::message::Mo
 mod tests {
     use std::io::{self, Write};
 
-    use super::{Color, CURSOR_DEFAULT, Modifier, rendered_width, restore_terminal, Style};
+    use super::{CURSOR_DEFAULT, Color, Modifier, Style, rendered_width, restore_terminal};
 
     struct FailingWriter {
         writes: usize,
