@@ -4,6 +4,7 @@
 pub(crate) mod app;
 pub(crate) mod logging;
 pub(crate) mod message;
+pub(crate) mod render;
 pub(crate) mod runtime;
 pub(crate) mod state;
 pub(crate) mod theme;
