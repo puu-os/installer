@@ -36,10 +36,8 @@ strum = { version = "0.26", features = ["derive"] }
 tar = "0.4"
 udev = "0.9"
 uuid = { version = "1", features = ["v4"] }
-iocraft = "0.8.4"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-smol = "2"
 
 [dev-dependencies]
 insta = "1"
