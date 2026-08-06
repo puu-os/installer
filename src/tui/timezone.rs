@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-//! Timezone selection and the iocraft world-map widget.
+//! Timezone selection and the world-map framebuffer painter.
+//!
+//! The map renders into the offscreen [`Frame`] cell buffer rather than a
+//! widget tree: one cached row of glyph runs per visible line is painted
+//! directly into the framebuffer the terminal blit diffs against. That keeps
+//! panning a per-frame cost of microseconds, with nothing laid out or measured.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -9,8 +14,8 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use iocraft::prelude::*;
 
+use crate::tui::render::{Color, Frame, Modifier, Rect, Style};
 use crate::tui::message::Effect;
 use crate::tui::state::{AppState, Route};
 use crate::tui::theme;
@@ -25,7 +30,7 @@ const PAN_SNAP: f64 = 0.02;
 const PAN_KEY_STEP: f64 = 10.0;
 const PAN_MAX_LEAD: f64 = 20.0;
 const MAX_FRAME_DT: f64 = 0.05;
-const VISIBLE_ZONE_ROWS: usize = 6;
+pub(crate) const VISIBLE_ZONE_ROWS: usize = 6;
 const MAP_W: usize = 720;
 const MAP_H: usize = 360;
 const ROW_BYTES: usize = MAP_W / 8;
@@ -674,14 +679,6 @@ fn land_fraction(left: f64, top: f64, right: f64, bottom: f64) -> f64 {
     land_integral().wrapped_rectangle(left, top, right, bottom) / area
 }
 
-fn map_text_style(color: Color, weight: Weight, invert: bool) -> CanvasTextStyle {
-    let mut style = CanvasTextStyle::default();
-    style.color = Some(color);
-    style.weight = weight;
-    style.invert = invert;
-    style
-}
-
 fn pick_glyph(top: f64, bottom: f64) -> char {
     SHADES
         .into_iter()
@@ -708,7 +705,12 @@ struct MapRow {
     runs: Vec<MapRun>,
 }
 
-struct MapCache {
+/// Cached projection of one map view: a row of glyph runs per visible line.
+///
+/// Rebuilt only when the viewport geometry or the solar minute changes; reused
+/// across frames while the map is static, so a redraw costs only the framebuffer
+/// paint, not the geographic sampling.
+pub(crate) struct MapCache {
     start_column: i32,
     width: usize,
     height: usize,
@@ -812,86 +814,58 @@ fn build_map_cache(start_column: i32, width: usize, height: usize, unix_secs: u6
     }
 }
 
-#[with_layout_style_props]
-#[derive(Default, Props)]
-pub(crate) struct WorldMapProps {
-    pub(crate) center_lon_milli: i32,
-    pub(crate) selected_zone: Option<MapPoint>,
-}
-
-#[derive(Default)]
-pub(crate) struct WorldMap {
+/// Paint the world map into `rect` of the offscreen frame.
+///
+/// The projection is cached in `cache` and only rebuilt when the viewport
+/// geometry or the solar minute changes, so panning costs a framebuffer blit
+/// plus an occasional geographic resample rather than a full widget layout.
+pub(crate) fn paint_world_map(
+    frame: &mut Frame,
+    rect: Rect,
+    cache: &mut Option<MapCache>,
     center_lon: f64,
-    selected_zone: Option<MapPoint>,
-    cache: Option<MapCache>,
+    selected_zone: Option<&MapPoint>,
+) {
+    let width = usize::from(rect.width);
+    let height = usize::from(rect.height);
+    if width == 0 || height == 0 {
+        return;
+    }
+    let unix_secs = map_unix_secs();
+    let sun_minute = unix_secs / 60;
+    let start_column =
+        ((wrap_lon(center_lon - VIEW_LON_SPAN / 2.0) + 180.0) * LON_SCALE).round() as i32;
+    let start_column = start_column.rem_euclid(MAP_W as i32);
+    let cache_matches = cache.as_ref().is_some_and(|cached| {
+        cached.start_column == start_column
+            && cached.width == width
+            && cached.height == height
+            && cached.sun_minute == sun_minute
+    });
+    if !cache_matches {
+        *cache = Some(build_map_cache(start_column, width, height, unix_secs));
+    }
+    let Some(cached) = cache.as_ref() else {
+        return;
+    };
+    paint_map_rows(frame, rect, &cached.rows);
+    draw_map_overlays(frame, rect, center_lon, width, height, selected_zone, &cached.rows);
 }
 
-impl Component for WorldMap {
-    type Props<'a> = WorldMapProps;
-
-    fn new(props: &Self::Props<'_>) -> Self {
-        Self {
-            center_lon: f64::from(props.center_lon_milli) / 1000.0,
-            selected_zone: props.selected_zone.clone(),
-            cache: None,
-        }
-    }
-
-    fn update(
-        &mut self,
-        props: &mut Self::Props<'_>,
-        _hooks: Hooks,
-        updater: &mut ComponentUpdater,
-    ) {
-        self.center_lon = f64::from(props.center_lon_milli) / 1000.0;
-        self.selected_zone.clone_from(&props.selected_zone);
-        updater.set_layout_style(props.layout_style().into());
-    }
-
-    fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
-        let size = drawer.size();
-        if size.width == 0 || size.height == 0 {
-            return;
-        }
-        let width = usize::from(size.width);
-        let height = usize::from(size.height);
-        let unix_secs = map_unix_secs();
-        let sun_minute = unix_secs / 60;
-        let start_column =
-            ((wrap_lon(self.center_lon - VIEW_LON_SPAN / 2.0) + 180.0) * LON_SCALE).round() as i32;
-        let start_column = start_column.rem_euclid(MAP_W as i32);
-        let cache_matches = self.cache.as_ref().is_some_and(|cache| {
-            cache.start_column == start_column
-                && cache.width == width
-                && cache.height == height
-                && cache.sun_minute == sun_minute
-        });
-        if !cache_matches {
-            self.cache = Some(build_map_cache(start_column, width, height, unix_secs));
-        }
-
-        let mut canvas = drawer.canvas();
-        if let Some(cache) = self.cache.as_ref() {
-            for (y, row) in cache.rows.iter().enumerate() {
-                canvas.set_background_color(0, y as isize, width, 1, row.background);
-                for run in &row.runs {
-                    canvas.set_text(
-                        run.x,
-                        y as isize,
-                        &run.text,
-                        map_text_style(run.color, Weight::Normal, false),
-                    );
+fn paint_map_rows(frame: &mut Frame, rect: Rect, rows: &[MapRow]) {
+    let mut buffer = frame.buffer_mut();
+    for (y, row) in rows.iter().enumerate() {
+        let abs_y = rect.y.saturating_add(u16::try_from(y).unwrap_or(u16::MAX));
+        for run in &row.runs {
+            for (offset, ch) in run.text.chars().enumerate() {
+                let local_x = u16::try_from(run.x.saturating_add(offset as isize)).unwrap_or(0);
+                let abs_x = rect.x.saturating_add(local_x);
+                if let Some(cell) = buffer.cell_mut((abs_x, abs_y)) {
+                    cell.set_char(ch)
+                        .set_style(Style::default().fg(run.color).bg(row.background));
                 }
             }
         }
-
-        draw_map_overlays(
-            &mut canvas,
-            self.center_lon,
-            width,
-            height,
-            self.selected_zone.as_ref(),
-        );
     }
 }
 
@@ -940,12 +914,38 @@ impl OccupiedRect {
     }
 }
 
+fn put_text(
+    frame: &mut Frame,
+    x: u16,
+    y: u16,
+    text: &str,
+    fg: Color,
+    bg: Color,
+    bold: bool,
+) {
+    let mut buffer = frame.buffer_mut();
+    let mut cursor_x = x;
+    for ch in text.chars() {
+        if let Some(cell) = buffer.cell_mut((cursor_x, y)) {
+            let mut style = Style::default().fg(fg).bg(bg);
+            if bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            cell.set_char(ch).set_style(style);
+        }
+        cursor_x = cursor_x.saturating_add(1);
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 fn draw_map_overlays(
-    canvas: &mut CanvasSubviewMut<'_>,
+    frame: &mut Frame,
+    rect: Rect,
     center_lon: f64,
     width: usize,
     height: usize,
     selected_zone: Option<&MapPoint>,
+    rows: &[MapRow],
 ) {
     let mut occupied = Vec::new();
 
@@ -954,17 +954,16 @@ fn draw_map_overlays(
         .and_then(|zone| project_map_point(center_lon, zone.lat, zone.lon, width, height));
     if let Some((x, y)) = selected_cell {
         occupied.push(OccupiedRect::new(x, y, 1, 1));
-        // Also reserve room for the pin's trailing label when present.
-        if let Some(zone) = selected_zone {
-            if !zone.label.is_empty() {
-                // Leading space separates the pin from the city name.
-                let label_width = zone.label.chars().count().saturating_add(1);
-                if x + 1 < width as isize {
-                    let avail = (width as isize - (x + 1)) as usize;
-                    let take = label_width.min(avail);
-                    if take > 0 {
-                        occupied.push(OccupiedRect::new(x + 1, y, take, 1));
-                    }
+        if let Some(zone) = selected_zone
+            && !zone.label.is_empty()
+        {
+            // Leading space separates the pin from the city name.
+            let label_width = zone.label.chars().count().saturating_add(1);
+            if x + 1 < width as isize {
+                let avail = (width as isize - (x + 1)) as usize;
+                let take = label_width.min(avail);
+                if take > 0 {
+                    occupied.push(OccupiedRect::new(x + 1, y, take, 1));
                 }
             }
         }
@@ -977,13 +976,17 @@ fn draw_map_overlays(
         let legend = "X pin  * city  · dusk";
         let legend_width = legend.chars().count();
         if legend_width <= width {
-            let y = height as isize - 1;
+            let y = y_local(height, height as isize - 1);
             occupied.push(OccupiedRect::new(0, y, legend_width, 1));
-            canvas.set_text(
-                0,
-                y,
+            let bg = rows[y as usize].background;
+            put_text(
+                frame,
+                rect.x,
+                rect.y.saturating_add(y as u16),
                 legend,
-                map_text_style(theme::MUTED, Weight::Normal, false),
+                theme::MUTED,
+                bg,
+                false,
             );
         }
     }
@@ -998,38 +1001,48 @@ fn draw_map_overlays(
             };
             // Require room for marker + full short name; skip rather than paint a bare "*".
             let text = format!("*{label}");
-            let text_width = text.chars().count();
-            if x + text_width as isize > width as isize {
+            let text_width = text.chars().count() as isize;
+            if x + text_width > width as isize {
                 continue;
             }
-            let rect = OccupiedRect::new(x, y, text_width, 1);
+            let placed = OccupiedRect::new(x, y, text_width as usize, 1);
             // Keep a soft gap around already-placed labels.
             let padded = OccupiedRect {
-                x0: rect.x0 - min_gap as isize / 2,
-                y0: rect.y0 - 1,
-                x1: rect.x1 + min_gap as isize / 2,
-                y1: rect.y1 + 1,
+                x0: placed.x0 - min_gap as isize / 2,
+                y0: placed.y0 - 1,
+                x1: placed.x1 + min_gap as isize / 2,
+                y1: placed.y1 + 1,
             };
             if occupied.iter().any(|other| other.intersects(padded)) {
                 continue;
             }
-            occupied.push(rect);
-            canvas.set_text(
-                x,
-                y,
+            occupied.push(placed);
+            let bg = rows[y as usize].background;
+            put_text(
+                frame,
+                rect.x.saturating_add(x as u16),
+                rect.y.saturating_add(y as u16),
                 &text,
-                map_text_style(theme::ACCENT, Weight::Normal, false),
+                theme::ACCENT,
+                bg,
+                false,
             );
         }
     }
 
     // Selection pin is painted last so it always wins over city labels.
     if let (Some(zone), Some((x, y))) = (selected_zone, selected_cell) {
-        canvas.set_text(
-            x,
-            y,
+        let bg = rows[y as usize].background;
+        // Inverted highlight: the prior sea background becomes the glyph colour,
+        // the warning colour fills the cell, the pin always stands out.
+        put_text(
+            frame,
+            rect.x.saturating_add(x as u16),
+            rect.y.saturating_add(y as u16),
             "X",
-            map_text_style(theme::WARNING, Weight::Bold, true),
+            bg,
+            theme::WARNING,
+            true,
         );
         if !zone.label.is_empty() && x + 1 < width as isize {
             let avail = (width as isize - (x + 1)) as usize;
@@ -1037,13 +1050,21 @@ fn draw_map_overlays(
             let mut label = String::from(" ");
             label.extend(zone.label.chars().take(avail.saturating_sub(1)));
             if label.chars().count() > 1 {
-                canvas.set_text(
-                    x + 1,
-                    y,
+                put_text(
+                    frame,
+                    rect.x.saturating_add((x + 1) as u16),
+                    rect.y.saturating_add(y as u16),
                     &label,
-                    map_text_style(theme::WARNING, Weight::Bold, false),
+                    theme::WARNING,
+                    bg,
+                    true,
                 );
             }
         }
     }
+}
+
+/// Clamp a local y coordinate into the visible map band.
+fn y_local(height: usize, value: isize) -> isize {
+    value.clamp(0, height as isize - 1)
 }

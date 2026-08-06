@@ -150,6 +150,6 @@ impl Installer {
     }
 
     pub fn run(&mut self) -> Trap {
-        self.run_iocraft()
+        self.run_screen()
     }
 }
