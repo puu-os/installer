@@ -9,9 +9,7 @@
 //! panning a per-frame cost of microseconds, with nothing laid out or measured.
 
 use std::sync::OnceLock;
-use std::time::Duration;
-#[cfg(not(test))]
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -52,9 +50,6 @@ const WORLD_MASK: &[u8] = include_bytes!("world_mask.bin");
 const DAY_ELEVATION_DEG: f64 = 0.0;
 /// Half-width of the twilight band drawn along the terminator.
 const TWILIGHT_HALF_WIDTH_DEG: f64 = 4.0;
-/// Snapshot-stable solar clock: 2024-06-21 12:00:00 UTC (northern summer noon).
-#[cfg(test)]
-const SNAPSHOT_UNIX_SECS: u64 = 1_718_971_200;
 /// Minimum map size for city labels (marker + short name).
 const CITY_LABEL_MIN_WIDTH: usize = 40;
 const CITY_LABEL_MIN_HEIGHT: usize = 12;
@@ -190,13 +185,7 @@ fn lon_delta(from: f64, to: f64) -> f64 {
     wrap_lon(to - from)
 }
 
-/// Current unix seconds, pinned in tests for snapshot stability.
-#[cfg(test)]
-fn map_unix_secs() -> u64 {
-    SNAPSHOT_UNIX_SECS
-}
-
-#[cfg(not(test))]
+/// Current Unix time used for map lighting.
 fn map_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
