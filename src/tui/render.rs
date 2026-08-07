@@ -71,6 +71,8 @@ const SGR_NO_REVERSE: &[u8] = b"\x1b[27m";
 const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
 const CURSOR_SHOW: &[u8] = b"\x1b[?25h";
 const CURSOR_HIDE: &[u8] = b"\x1b[?25l";
+const SYNC_UPDATE_BEGIN: &[u8] = b"\x1b[?2026h";
+const SYNC_UPDATE_END: &[u8] = b"\x1b[?2026l";
 const CURSOR_BLINKING_BLOCK: &[u8] = b"\x1b[1 q";
 const CURSOR_STEADY_BLOCK: &[u8] = b"\x1b[2 q";
 const CURSOR_BLINKING_UNDERLINE: &[u8] = b"\x1b[3 q";
@@ -755,6 +757,11 @@ impl<W: Write> Terminal<W> {
             .write_all(&self.bytes)
             .and_then(|()| self.out.flush())
         {
+            // A partial write may have entered synchronized-output mode without
+            // reaching its terminator. Best-effort cleanup prevents a supporting
+            // terminal from holding subsequent output until its safety timeout.
+            let _ = self.out.write_all(SYNC_UPDATE_END);
+            let _ = self.out.flush();
             self.reset_wire_state();
             return Err(error);
         }
@@ -781,6 +788,11 @@ impl<W: Write> Terminal<W> {
         } = self;
 
         bytes.clear();
+        // DEC private mode 2026 makes each framebuffer diff visible as one
+        // presentation. Without it, animated map and log updates can expose a
+        // partly painted frame as the terminal consumes this byte stream.
+        bytes.extend_from_slice(SYNC_UPDATE_BEGIN);
+        let payload_start = bytes.len();
 
         if *full_repaint {
             bytes.extend_from_slice(SGR_RESET);
@@ -844,6 +856,12 @@ impl<W: Write> Terminal<W> {
                     *cursor_shown = false;
                 }
             }
+        }
+
+        if bytes.len() == payload_start {
+            bytes.clear();
+        } else {
+            bytes.extend_from_slice(SYNC_UPDATE_END);
         }
     }
 }
