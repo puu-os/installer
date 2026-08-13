@@ -1967,10 +1967,6 @@ fn draw_world_map_panel(
         rect.width.saturating_sub(2),
         rect.height.saturating_sub(2),
     );
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme::SEA)),
-        inner,
-    );
     let center_lon = f64::from(controller.state.timezone.map_center_lon_milli) / 1000.0;
     let selected = timezone::selected_zone(&controller.state);
     timezone::paint_world_map(frame, inner, map_cache, center_lon, selected.as_ref());

@@ -254,17 +254,11 @@ fn night_color(color: Color) -> Color {
     }
 }
 
-fn sea_background(y: usize, night: bool) -> Color {
-    if night {
-        if y % 8 < 2 {
-            theme::SEA_NIGHT_SHIMMER
-        } else {
-            theme::SEA_NIGHT
-        }
-    } else if y % 8 < 2 {
-        theme::SEA_SHIMMER
-    } else {
-        theme::SEA
+fn sea_background(lighting: Lighting) -> Color {
+    match lighting {
+        Lighting::Day => theme::SEA,
+        Lighting::Twilight => theme::SEA_SHIMMER,
+        Lighting::Night => theme::SEA_NIGHT,
     }
 }
 
@@ -687,10 +681,10 @@ struct MapRun {
     x: isize,
     text: String,
     color: Color,
+    background: Color,
 }
 
 struct MapRow {
-    background: Color,
     runs: Vec<MapRun>,
 }
 
@@ -723,20 +717,15 @@ fn build_map_cache(start_column: i32, width: usize, height: usize, unix_secs: u6
         let top = start_y + (y * 2) as f64 * half_height;
         let lat = LAT_MAX - (y as f64 + 0.5) / height as f64 * row_span;
         let on_parallel = near_grid(lat, 30.0, lat_tolerance);
-        // Sample lighting at the row centre; sea background follows the row majority.
-        let mut night_cells = 0_usize;
         let mut runs = Vec::new();
         let mut run_text = String::with_capacity(width * 3);
-        let mut run_color = None;
+        let mut run_style = None;
         let mut run_start = 0;
 
         for x in 0..width {
             let left = start_x + x as f64 * cell_width;
             let lon = wrap_lon((left + cell_width * 0.5) / LON_SCALE - 180.0);
             let lighting = lighting_at(lat, lon, sun_lat, sun_lon);
-            if lighting == Lighting::Night {
-                night_cells += 1;
-            }
             let top_fraction =
                 land_fraction(left, top, left + cell_width, top + half_height).clamp(0.0, 1.0);
             let bottom_fraction = land_fraction(
@@ -768,30 +757,33 @@ fn build_map_cache(start_column: i32, width: usize, height: usize, unix_secs: u6
                 glyph = '·';
             }
             let color = light_glyph_color(base_color, lighting);
+            let background = sea_background(lighting);
 
-            if run_color.is_some_and(|current| current != color) {
-                runs.push(MapRun {
-                    x: run_start as isize,
-                    text: std::mem::take(&mut run_text),
-                    color: run_color.unwrap_or(theme::GUIDE),
-                });
+            if run_style.is_some_and(|(fg, bg)| fg != color || bg != background) {
+                if let Some((fg, bg)) = run_style {
+                    runs.push(MapRun {
+                        x: run_start as isize,
+                        text: std::mem::take(&mut run_text),
+                        color: fg,
+                        background: bg,
+                    });
+                }
                 run_start = x;
             }
-            run_color = Some(color);
+            run_style = Some((color, background));
             run_text.push(glyph);
         }
-        if !run_text.is_empty() {
+        if !run_text.is_empty()
+            && let Some((fg, bg)) = run_style
+        {
             runs.push(MapRun {
                 x: run_start as isize,
                 text: run_text,
-                color: run_color.unwrap_or(theme::GUIDE),
+                color: fg,
+                background: bg,
             });
         }
-        let night_row = night_cells * 2 >= width;
-        rows.push(MapRow {
-            background: sea_background(y, night_row),
-            runs,
-        });
+        rows.push(MapRow { runs });
     }
 
     MapCache {
@@ -859,7 +851,7 @@ fn paint_map_rows(frame: &mut Frame, rect: Rect, rows: &[MapRow]) {
                 let abs_x = rect.x.saturating_add(local_x);
                 if let Some(cell) = buffer.cell_mut((abs_x, abs_y)) {
                     cell.set_char(ch)
-                        .set_style(Style::default().fg(run.color).bg(row.background));
+                        .set_style(Style::default().fg(run.color).bg(run.background));
                 }
             }
         }
@@ -911,18 +903,53 @@ impl OccupiedRect {
     }
 }
 
-fn put_text(frame: &mut Frame, x: u16, y: u16, text: &str, fg: Color, bg: Color, bold: bool) {
+fn cell_background(rows: &[MapRow], x: isize, y: isize) -> Color {
+    let Some(row) = usize::try_from(y).ok().and_then(|y| rows.get(y)) else {
+        return theme::SEA;
+    };
+    for run in &row.runs {
+        let start = run.x;
+        let end = start.saturating_add(run.text.chars().count() as isize);
+        if x >= start && x < end {
+            return run.background;
+        }
+    }
+    theme::SEA
+}
+
+fn put_text(
+    frame: &mut Frame,
+    rows: &[MapRow],
+    rect: Rect,
+    pos: (isize, isize),
+    text: &str,
+    fg: Color,
+    invert: bool,
+) {
+    let (x, y) = pos;
+    let Ok(row) = u16::try_from(y) else {
+        return;
+    };
+    let abs_y = rect.y.saturating_add(row);
     let mut buffer = frame.buffer_mut();
-    let mut cursor_x = x;
-    for ch in text.chars() {
-        if let Some(cell) = buffer.cell_mut((cursor_x, y)) {
-            let mut style = Style::default().fg(fg).bg(bg);
-            if bold {
-                style = style.add_modifier(Modifier::BOLD);
-            }
+    for (offset, ch) in text.chars().enumerate() {
+        let local_x = x.saturating_add(offset as isize);
+        let Ok(col) = u16::try_from(local_x) else {
+            continue;
+        };
+        let abs_x = rect.x.saturating_add(col);
+        if let Some(cell) = buffer.cell_mut((abs_x, abs_y)) {
+            let cell_bg = cell_background(rows, local_x, y);
+            let style = if invert {
+                Style::default()
+                    .fg(cell_bg)
+                    .bg(fg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(fg).bg(cell_bg)
+            };
             cell.set_char(ch).set_style(style);
         }
-        cursor_x = cursor_x.saturating_add(1);
     }
 }
 
@@ -967,16 +994,7 @@ fn draw_map_overlays(
         if legend_width <= width {
             let y = y_local(height, height as isize - 1);
             occupied.push(OccupiedRect::new(0, y, legend_width, 1));
-            let bg = rows[y as usize].background;
-            put_text(
-                frame,
-                rect.x,
-                rect.y.saturating_add(y as u16),
-                legend,
-                theme::MUTED,
-                bg,
-                false,
-            );
+            put_text(frame, rows, rect, (0, y), legend, theme::MUTED, false);
         }
     }
 
@@ -1006,48 +1024,19 @@ fn draw_map_overlays(
                 continue;
             }
             occupied.push(placed);
-            let bg = rows[y as usize].background;
-            put_text(
-                frame,
-                rect.x.saturating_add(x as u16),
-                rect.y.saturating_add(y as u16),
-                &text,
-                theme::ACCENT,
-                bg,
-                false,
-            );
+            put_text(frame, rows, rect, (x, y), &text, theme::ACCENT, false);
         }
     }
 
     // Selection pin is painted last so it always wins over city labels.
     if let (Some(zone), Some((x, y))) = (selected_zone, selected_cell) {
-        let bg = rows[y as usize].background;
-        // Inverted highlight: the prior sea background becomes the glyph colour,
-        // the warning colour fills the cell, the pin always stands out.
-        put_text(
-            frame,
-            rect.x.saturating_add(x as u16),
-            rect.y.saturating_add(y as u16),
-            "X",
-            bg,
-            theme::WARNING,
-            true,
-        );
+        put_text(frame, rows, rect, (x, y), "X", theme::WARNING, true);
         if !zone.label.is_empty() && x + 1 < width as isize {
             let avail = (width as isize - (x + 1)) as usize;
-            // Leading space keeps "X Helsinki" readable on the basemap.
             let mut label = String::from(" ");
             label.extend(zone.label.chars().take(avail.saturating_sub(1)));
             if label.chars().count() > 1 {
-                put_text(
-                    frame,
-                    rect.x.saturating_add((x + 1) as u16),
-                    rect.y.saturating_add(y as u16),
-                    &label,
-                    theme::WARNING,
-                    bg,
-                    true,
-                );
+                put_text(frame, rows, rect, (x + 1, y), &label, theme::WARNING, false);
             }
         }
     }

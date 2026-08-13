@@ -33,7 +33,6 @@ pub(crate) const GUIDE: Color = idx(6); // cyan
 pub(crate) const LAND_NIGHT: Color = idx(8); // dark grey
 pub(crate) const COAST_NIGHT: Color = idx(7); // grey
 pub(crate) const SEA_NIGHT: Color = idx(0); // black
-pub(crate) const SEA_NIGHT_SHIMMER: Color = idx(8); // dark grey
 pub(crate) const GUIDE_NIGHT: Color = idx(8); // dark grey
 /// Thin twilight band along the day/night terminator.
 pub(crate) const TERMINATOR: Color = idx(13); // bright magenta
