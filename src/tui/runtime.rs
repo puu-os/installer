@@ -1416,19 +1416,25 @@ fn draw_panel(frame: &mut Frame, rect: Rect, title: &str) {
     }
 }
 
-fn row_style(selected: bool) -> Style {
-    if selected {
-        bold(Style::default().fg(theme::ON_SELECTED).bg(theme::SELECTED))
-    } else {
-        Style::default().fg(theme::FOREGROUND).bg(theme::BACKGROUND)
-    }
-}
-
 fn draw_selected_row(frame: &mut Frame, x: u16, y: u16, width: u16, content: &str, selected: bool) {
-    let style = row_style(selected);
     let marker = if selected { ">" } else { " " };
-    let text = format!(" {marker} {content}");
-    frame.render_widget(Paragraph::new(text).style(style), Rect::new(x, y, width, 1));
+    let marker_style = if selected {
+        bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND))
+    } else {
+        Style::default().fg(theme::MUTED).bg(theme::BACKGROUND)
+    };
+    let text_style = if selected {
+        bold(Style::default().fg(theme::FOREGROUND).bg(theme::BACKGROUND))
+    } else {
+        Style::default().fg(theme::MUTED).bg(theme::BACKGROUND)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::new(vec![
+            Span::styled(format!(" {marker} "), marker_style),
+            Span::styled(content.to_string(), text_style),
+        ])),
+        Rect::new(x, y, width, 1),
+    );
 }
 
 fn draw_text_row(
@@ -1598,28 +1604,19 @@ fn draw_filter_input(frame: &mut Frame, x: u16, y: u16, width: u16, value: &str,
 
 fn draw_zone_row(frame: &mut Frame, x: u16, y: u16, width: u16, zone: &timezone::VisibleZone) {
     let marker = if zone.selected { ">" } else { " " };
-    let bg = if zone.selected {
-        theme::SELECTED
+    let marker_style = if zone.selected {
+        bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND))
     } else {
-        theme::BACKGROUND
-    };
-    let color = if zone.selected {
-        theme::ON_SELECTED
-    } else {
-        theme::FOREGROUND
-    };
-    let match_color = if zone.selected {
-        theme::WARNING
-    } else {
-        theme::ACCENT
+        Style::default().fg(theme::MUTED).bg(theme::BACKGROUND)
     };
     let base = if zone.selected {
-        bold(Style::default().fg(color).bg(bg))
+        bold(Style::default().fg(theme::FOREGROUND).bg(theme::BACKGROUND))
     } else {
-        Style::default().fg(color).bg(bg)
+        Style::default().fg(theme::MUTED).bg(theme::BACKGROUND)
     };
+    let match_style = bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND));
     let chars = zone.name.chars().collect::<Vec<_>>();
-    let mut spans = vec![Span::styled(format!(" {marker} "), base)];
+    let mut spans = vec![Span::styled(format!(" {marker} "), marker_style)];
     if let Some((start, end)) = zone.match_range {
         let start = start.min(chars.len());
         let end = end.min(chars.len()).max(start);
@@ -1630,10 +1627,7 @@ fn draw_zone_row(frame: &mut Frame, x: u16, y: u16, width: u16, zone: &timezone:
             spans.push(Span::styled(before, base));
         }
         if !matched.is_empty() {
-            spans.push(Span::styled(
-                matched,
-                bold(Style::default().fg(match_color).bg(bg)),
-            ));
+            spans.push(Span::styled(matched, match_style));
         }
         if !after.is_empty() {
             spans.push(Span::styled(after, base));
@@ -1641,10 +1635,7 @@ fn draw_zone_row(frame: &mut Frame, x: u16, y: u16, width: u16, zone: &timezone:
     } else {
         spans.push(Span::styled(zone.name.to_string(), base));
     }
-    frame.render_widget(
-        Paragraph::new(Line::new(spans)).style(Style::default().bg(bg)),
-        Rect::new(x, y, width, 1),
-    );
+    frame.render_widget(Paragraph::new(Line::new(spans)), Rect::new(x, y, width, 1));
 }
 
 fn draw_progress(
