@@ -460,10 +460,6 @@ impl Frame {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "cursor placement is available to screens that need it"
-    )]
     pub(crate) fn set_cursor_position(&mut self, pos: (u16, u16)) {
         let (x, y) = pos;
         if x < self.area.width && y < self.area.height {
@@ -471,10 +467,6 @@ impl Frame {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "cursor shape is available to screens that need it"
-    )]
     pub(crate) fn set_cursor_style(&mut self, style: CursorStyle) {
         self.cursor_style = style;
     }

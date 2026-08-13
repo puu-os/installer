@@ -20,8 +20,8 @@ use crate::tui::message::{
     DriveInfo, Effect, FieldId, FormId, Message, MouseKind, ToggleId, sanitize_text,
 };
 use crate::tui::render::{
-    self, Block, Border, Color, Frame, Input, Line, Modifier, Paragraph, Rect, Span, Style,
-    Terminal, install_panic_hook, mouse_kind, tui_or_exit,
+    self, Block, Border, Color, CursorStyle, Frame, Input, Line, Modifier, Paragraph, Rect, Span,
+    Style, Terminal, install_panic_hook, mouse_kind, tui_or_exit,
 };
 use crate::tui::state::{AppState, IdentityDraft, InstallStepState, Modal, Route};
 use crate::tui::theme;
@@ -1475,7 +1475,59 @@ fn draw_choice_row(
     draw_selected_row(frame, x, y, width, &body, selected);
 }
 
-#[allow(clippy::too_many_lines)]
+fn draw_value_well(
+    frame: &mut Frame,
+    well: Rect,
+    value: &str,
+    cursor: usize,
+    focused: bool,
+    placeholder: &str,
+) {
+    if well.width == 0 {
+        return;
+    }
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::PANEL)),
+        well,
+    );
+    let cols = usize::from(well.width);
+    let cursor = cursor.min(value.chars().count());
+    let usable = if focused {
+        cols.saturating_sub(1).max(1)
+    } else {
+        cols
+    };
+    let scroll = if focused {
+        cursor.saturating_sub(usable)
+    } else {
+        0
+    };
+    let visible: String = value.chars().skip(scroll).take(usable).collect();
+    if visible.is_empty() {
+        if focused && !placeholder.is_empty() {
+            frame.render_widget(
+                Paragraph::new(placeholder)
+                    .style(dim(Style::default().fg(theme::MUTED).bg(theme::PANEL))),
+                well,
+            );
+        }
+    } else {
+        let style = if focused {
+            bold(Style::default().fg(theme::FOREGROUND).bg(theme::PANEL))
+        } else {
+            Style::default().fg(theme::FOREGROUND).bg(theme::PANEL)
+        };
+        frame.render_widget(Paragraph::new(visible).style(style), well);
+    }
+    if focused && let Ok(col) = u16::try_from(cursor.saturating_sub(scroll)) {
+        let cursor_x = well.x.saturating_add(col);
+        if cursor_x < well.x.saturating_add(well.width) {
+            frame.set_cursor_position((cursor_x, well.y));
+            frame.set_cursor_style(CursorStyle::SteadyBar);
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "row painter mirrors the field row arguments"
@@ -1492,102 +1544,56 @@ fn draw_text_input(
     empty_hint: &str,
 ) {
     let marker = if selected { ">" } else { " " };
-    let bg = if selected {
-        theme::SELECTED
+    let prefix = format!(" {marker} {label:<14}");
+    let prefix_cols = render::rendered_width(&prefix);
+    let prefix_style = if selected {
+        bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND))
     } else {
-        theme::BACKGROUND
+        Style::default().fg(theme::MUTED).bg(theme::BACKGROUND)
     };
-    let color = if selected {
-        theme::ON_SELECTED
-    } else {
-        theme::FOREGROUND
-    };
-    if selected {
-        let chars = value.chars().collect::<Vec<_>>();
-        let cursor = cursor.min(chars.len());
-        let before = chars[..cursor].iter().collect::<String>();
-        let at = chars.get(cursor).copied().unwrap_or(' ');
-        let after = if cursor < chars.len() {
-            chars[cursor + 1..].iter().collect::<String>()
-        } else {
-            String::new()
-        };
-        let hint = if value.is_empty() { empty_hint } else { "" };
-        let base = bold(Style::default().fg(color).bg(bg));
-        let mut spans = vec![Span::styled(format!(" {marker} {label:<14}"), base)];
-        spans.push(Span::styled(before, base));
-        // Inverted cursor cell: the field background becomes the glyph colour.
-        spans.push(Span::styled(
-            at.to_string(),
-            bold(Style::default().fg(theme::SELECTED).bg(color)),
-        ));
-        spans.push(Span::styled(after, base));
-        if !hint.is_empty() {
-            spans.push(Span::styled(
-                format!(" {hint}"),
-                Style::default().fg(theme::MUTED).bg(bg),
-            ));
-        }
+    let prefix_width = prefix_cols.min(width);
+    if prefix_width > 0 {
         frame.render_widget(
-            Paragraph::new(Line::new(spans)).style(Style::default().bg(bg)),
-            Rect::new(x, y, width, 1),
+            Paragraph::new(prefix).style(prefix_style),
+            Rect::new(x, y, prefix_width, 1),
         );
-    } else {
-        let body = if value.is_empty() {
-            format!(" {marker} {label:<14}{empty_hint}")
-        } else {
-            format!(" {marker} {label:<14}{value}")
-        };
-        let body_color = if value.is_empty() {
-            theme::MUTED
-        } else {
-            color
-        };
-        frame.render_widget(
-            Paragraph::new(body).style(Style::default().fg(body_color).bg(bg)),
-            Rect::new(x, y, width, 1),
+    }
+    let well_width = width.saturating_sub(prefix_cols).min(32);
+    if well_width > 0 {
+        draw_value_well(
+            frame,
+            Rect::new(x.saturating_add(prefix_cols), y, well_width, 1),
+            value,
+            cursor,
+            selected,
+            empty_hint,
         );
     }
 }
 
-fn draw_filter_input(frame: &mut Frame, x: u16, y: u16, width: u16, value: &str) {
-    let mut spans = vec![Span::styled(
-        "  Filter  ",
-        bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND)),
-    )];
-    if value.is_empty() {
-        spans.push(Span::styled(
-            " ",
-            bold(
-                Style::default()
-                    .fg(theme::ON_SELECTED)
-                    .bg(theme::BACKGROUND)
-                    .add_modifier(Modifier::REVERSE),
-            ),
-        ));
-        spans.push(Span::styled(
-            " Type to filter...",
-            Style::default().fg(theme::MUTED).bg(theme::BACKGROUND),
-        ));
-    } else {
-        spans.push(Span::styled(
-            value.to_string(),
-            bold(Style::default().fg(theme::FOREGROUND).bg(theme::BACKGROUND)),
-        ));
-        spans.push(Span::styled(
-            " ",
-            bold(
-                Style::default()
-                    .fg(theme::ON_SELECTED)
-                    .bg(theme::BACKGROUND)
-                    .add_modifier(Modifier::REVERSE),
-            ),
-        ));
+fn draw_filter_input(frame: &mut Frame, x: u16, y: u16, width: u16, value: &str, focused: bool) {
+    let prefix = "  Filter  ";
+    let prefix_cols = render::rendered_width(prefix);
+    let prefix_width = prefix_cols.min(width);
+    if prefix_width > 0 {
+        frame.render_widget(
+            Paragraph::new(prefix).style(bold(
+                Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND),
+            )),
+            Rect::new(x, y, prefix_width, 1),
+        );
     }
-    frame.render_widget(
-        Paragraph::new(Line::new(spans)).style(Style::default().bg(theme::BACKGROUND)),
-        Rect::new(x, y, width, 1),
-    );
+    let well_width = width.saturating_sub(prefix_cols).min(32);
+    if well_width > 0 {
+        draw_value_well(
+            frame,
+            Rect::new(x.saturating_add(prefix_cols), y, well_width, 1),
+            value,
+            value.chars().count(),
+            focused,
+            "Type to filter...",
+        );
+    }
 }
 
 fn draw_zone_row(frame: &mut Frame, x: u16, y: u16, width: u16, zone: &timezone::VisibleZone) {
@@ -1918,7 +1924,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
         body.width,
         "Hostname",
         &draft.hostname,
-        draft.field_index == 1,
+        draft.field_index == 1 && state.active_modal().is_none(),
         draft.cursor,
         "required",
     );
@@ -1930,7 +1936,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
         body.width,
         "Username",
         &draft.username,
-        draft.field_index == 2,
+        draft.field_index == 2 && state.active_modal().is_none(),
         draft.cursor,
         "required",
     );
@@ -1942,7 +1948,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
         body.width,
         "Password",
         &password,
-        draft.field_index == 3,
+        draft.field_index == 3 && state.active_modal().is_none(),
         draft.cursor,
         "required",
     );
@@ -1954,7 +1960,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
         body.width,
         "Repeat",
         &repeated,
-        draft.field_index == 4,
+        draft.field_index == 4 && state.active_modal().is_none(),
         draft.cursor,
         "required",
     );
@@ -2017,7 +2023,14 @@ fn draw_world_map_panel(
 fn draw_timezone_list_panel(frame: &mut Frame, rect: Rect, state: &AppState) {
     draw_panel(frame, rect, "Time zones");
     let body = panel_body(rect);
-    draw_filter_input(frame, body.x, body.y, body.width, &state.timezone.filter);
+    draw_filter_input(
+        frame,
+        body.x,
+        body.y,
+        body.width,
+        &state.timezone.filter,
+        state.active_modal().is_none(),
+    );
     let zones = timezone::visible_zones(state);
     if zones.is_empty() {
         let message = if state.timezone.filter.is_empty() {
