@@ -167,34 +167,76 @@ fn secure_boot_choice_count(state: &AppState) -> usize {
     }
 }
 
-fn modal_hit_targets(width: u16, height: u16) -> Vec<HitTarget> {
+fn modal_dialog_rect(width: u16, height: u16) -> Rect {
     let max_dialog_width = width.saturating_sub(2).max(1);
     let dialog_width = width
         .saturating_mul(2)
         .saturating_div(3)
         .max(36)
         .min(max_dialog_width);
-    let dialog_height = 9_u16.min(height.saturating_sub(2).max(1));
+    let dialog_height = 11_u16.min(height.saturating_sub(2).max(1));
     let left = width.saturating_sub(dialog_width) / 2;
     let top = height.saturating_sub(dialog_height) / 2;
-    let button_y = top.saturating_add(dialog_height.saturating_sub(2));
-    let mid = left.saturating_add(dialog_width / 2);
-    vec![
-        HitTarget {
-            x0: left,
-            y0: button_y,
-            x1: mid,
-            y1: button_y.saturating_add(1),
-            action: HitAction::ModalSelect(0),
-        },
-        HitTarget {
-            x0: mid,
-            y0: button_y,
-            x1: left.saturating_add(dialog_width),
-            y1: button_y.saturating_add(1),
-            action: HitAction::ModalSelect(1),
-        },
+    Rect::new(left, top, dialog_width, dialog_height)
+}
+
+fn modal_button_rects(dialog: Rect) -> [Rect; 2] {
+    let inner = Rect::new(
+        dialog.x.saturating_add(2),
+        dialog.y.saturating_add(1),
+        dialog.width.saturating_sub(4),
+        dialog.height.saturating_sub(2),
+    );
+    let y = inner.y.saturating_add(inner.height.saturating_sub(1));
+    let well = 8_u16.min(inner.width.saturating_div(2).saturating_sub(1).max(1));
+    let gap = 2_u16.min(inner.width.saturating_sub(well.saturating_mul(2)));
+    let total = well.saturating_mul(2).saturating_add(gap);
+    let start = inner
+        .x
+        .saturating_add(inner.width.saturating_sub(total) / 2);
+    [
+        Rect::new(start, y, well, 1),
+        Rect::new(start.saturating_add(well).saturating_add(gap), y, well, 1),
     ]
+}
+
+fn wrap_dialog_text(text: &str, width: u16) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let limit = usize::from(width);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let used = usize::from(render::rendered_width(&current));
+        let word_width = usize::from(render::rendered_width(word));
+        if !current.is_empty() && used.saturating_add(1).saturating_add(word_width) > limit {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn modal_hit_targets(width: u16, height: u16) -> Vec<HitTarget> {
+    let buttons = modal_button_rects(modal_dialog_rect(width, height));
+    buttons
+        .into_iter()
+        .enumerate()
+        .map(|(index, rect)| HitTarget {
+            x0: rect.x,
+            y0: rect.y,
+            x1: rect.x.saturating_add(rect.width),
+            y1: rect.y.saturating_add(1),
+            action: HitAction::ModalSelect(index),
+        })
+        .collect()
 }
 
 fn timezone_hit_targets(
@@ -2454,15 +2496,15 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
     }
     let (title, body) = match modal {
         Modal::WipeConfirmation => (
-            "Wipe target disk?".to_string(),
+            "Wipe target disk?",
             "All data on this disk will be destroyed.".to_string(),
         ),
         Modal::RebootConfirmation => (
-            "Reboot now?".to_string(),
+            "Reboot now?",
             "The machine will reboot immediately.".to_string(),
         ),
         Modal::Failure => (
-            "Installation failed".to_string(),
+            "Installation failed",
             state
                 .install
                 .failure
@@ -2470,7 +2512,7 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
                 .unwrap_or_else(|| "Unknown error".to_string()),
         ),
         Modal::Cancellation => (
-            "Cancel installation?".to_string(),
+            "Cancel installation?",
             "The installer will stop and clean up mounts.".to_string(),
         ),
         Modal::None => return,
@@ -2480,61 +2522,67 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
     } else {
         theme::WARNING
     };
-    let max_dialog_width = width.saturating_sub(2).max(1);
-    let dialog_width = width
-        .saturating_mul(2)
-        .saturating_div(3)
-        .max(36)
-        .min(max_dialog_width);
-    let dialog_height = 9_u16.min(height.saturating_sub(2).max(1));
-    let left = width.saturating_sub(dialog_width) / 2;
-    let top = height.saturating_sub(dialog_height) / 2;
-
-    let inner = Rect::new(
-        left + 1,
-        top + 1,
-        dialog_width.saturating_sub(2),
-        dialog_height.saturating_sub(2),
+    let dialog = modal_dialog_rect(width, height);
+    if dialog.width < 2 || dialog.height < 2 {
+        return;
+    }
+    frame.render_widget(Border::color(modal_color), dialog);
+    let fill = Rect::new(
+        dialog.x.saturating_add(1),
+        dialog.y.saturating_add(1),
+        dialog.width.saturating_sub(2),
+        dialog.height.saturating_sub(2),
     );
+    if fill.width == 0 || fill.height == 0 {
+        return;
+    }
     frame.render_widget(
-        Border::color(modal_color),
-        Rect::new(left, top, dialog_width, dialog_height),
+        Block::default().style(Style::default().bg(theme::PANEL)),
+        fill,
     );
-    if inner.width > 0 {
-        frame.render_widget(
-            Block::default().style(Style::default().bg(theme::BACKGROUND)),
-            inner,
-        );
+    let inner = Rect::new(
+        fill.x.saturating_add(1),
+        fill.y,
+        fill.width.saturating_sub(2),
+        fill.height,
+    );
+    if inner.width == 0 {
+        return;
     }
-    if inner.width > 0 {
-        frame.render_widget(
-            Paragraph::new(title)
-                .style(bold(Style::default().fg(modal_color).bg(theme::BACKGROUND))),
-            Rect::new(inner.x, inner.y, inner.width, 1),
-        );
+    frame.render_widget(
+        Paragraph::new(title).style(bold(Style::default().fg(modal_color).bg(theme::PANEL))),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    if inner.height > 3 {
+        let wrapped = wrap_dialog_text(&body, inner.width);
+        let body_height = inner.height.saturating_sub(3);
+        let shown = wrapped
+            .into_iter()
+            .take(usize::from(body_height))
+            .collect::<Vec<_>>();
+        if !shown.is_empty() {
+            frame.render_widget(
+                Paragraph::new(shown.join("\n"))
+                    .style(Style::default().fg(theme::FOREGROUND).bg(theme::PANEL)),
+                Rect::new(inner.x, inner.y.saturating_add(2), inner.width, body_height),
+            );
+        }
     }
-    if inner.height > 2 && inner.width > 0 {
-        frame.render_widget(
-            Paragraph::new(body).style(bold(
-                Style::default().fg(theme::FOREGROUND).bg(theme::BACKGROUND),
-            )),
-            Rect::new(inner.x, inner.y + 1, inner.width, 1),
-        );
-    }
-    let buttons = if state.selection.modal == 0 {
-        "[ No ]     Yes"
-    } else {
-        "No     [ Yes ]"
-    };
-    if inner.height > 3 && inner.width > 0 {
-        let w = render::rendered_width(buttons).min(inner.width);
-        let bx = inner.x + (inner.width.saturating_sub(w)) / 2;
-        frame.render_widget(
-            Paragraph::new(buttons).style(bold(
-                Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND),
-            )),
-            Rect::new(bx, inner.y + inner.height.saturating_sub(1), w, 1),
-        );
+    let buttons = modal_button_rects(dialog);
+    let labels = ["No", "Yes"];
+    for (index, (rect, label)) in buttons.into_iter().zip(labels).enumerate() {
+        if rect.width == 0 {
+            continue;
+        }
+        let focused = state.selection.modal == index;
+        let style = if focused {
+            bold(Style::default().fg(theme::BACKGROUND).bg(theme::ACCENT))
+        } else {
+            Style::default().fg(theme::MUTED).bg(theme::PANEL)
+        };
+        let pad = rect.width.saturating_sub(render::rendered_width(label)) / 2;
+        let text = format!("{:>width$}{label}", "", width = usize::from(pad));
+        frame.render_widget(Paragraph::new(text).style(style), rect);
     }
 }
 
