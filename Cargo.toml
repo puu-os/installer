@@ -31,7 +31,6 @@ ostree = "0.20"
 serde_json = "1"
 serde_norway = "0.9"
 serde = { version = "1", features = ["derive"] }
-strum = { version = "0.26", features = ["derive"] }
 tar = "0.4"
 udev = "0.9"
 uuid = { version = "1", features = ["v4"] }
