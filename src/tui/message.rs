@@ -54,7 +54,7 @@ const fn is_console_glyph(ch: char) -> bool {
 }
 
 /// Fold one source character into a single narrow console-safe glyph.
-fn sanitize_char(ch: char) -> char {
+pub(crate) fn sanitize_char(ch: char) -> char {
     match ch {
         ' ' | '\t' | '\n' | '\r' => ' ',
         c if c.is_ascii_graphic() => c,
@@ -67,7 +67,7 @@ fn sanitize_char(ch: char) -> char {
 }
 
 /// Characters that fold to more than one cell.
-fn expand_char(ch: char) -> Option<&'static str> {
+pub(crate) fn expand_char(ch: char) -> Option<&'static str> {
     match ch {
         '\u{2192}' => Some("->"),
         '\u{2190}' => Some("<-"),

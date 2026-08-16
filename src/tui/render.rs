@@ -18,6 +18,8 @@ use crossterm::{
     },
 };
 
+use crate::tui::message::{expand_char, sanitize_char};
+
 /// The 16-colour ANSI palette, as the two SGR runs that carry it: 30-37 and
 /// 90-97 for the foreground, 40-47 and 100-107 for the background.
 ///
@@ -1027,61 +1029,6 @@ fn clip_rect(rect: Rect, area: Rect) -> Rect {
     let width = rect.width.min(area.width.saturating_sub(x));
     let height = rect.height.min(area.height.saturating_sub(y));
     Rect::new(x, y, width, height)
-}
-
-/// The non-ASCII glyphs a cell is allowed to hold.
-///
-/// Every one of these is a CP437 glyph, so it exists in the VGA and Linux
-/// console fonts as well as in every terminal-emulator font. Quadrant blocks
-/// (U+2596..U+259F) and Braille (U+2800..) are deliberately absent: they are
-/// not in the console fonts, and the installer's primary target is a Linux VT.
-const fn is_console_glyph(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{00b0}'      // degree sign
-        | '\u{00b7}'    // middle dot
-        | '\u{2500}'    // box drawings light horizontal
-        | '\u{2502}'    // box drawings light vertical
-        | '\u{250c}' | '\u{2510}' | '\u{2514}' | '\u{2518}'  // light corners
-        | '\u{251c}' | '\u{2524}' | '\u{252c}' | '\u{2534}'  // light tees
-        | '\u{253c}'    // box drawings light vertical and horizontal
-        | '\u{2580}'    // upper half block
-        | '\u{2584}'    // lower half block
-        | '\u{2588}'    // full block
-        | '\u{258c}' | '\u{2590}'   // left half block, right half block
-        | '\u{2591}' | '\u{2592}' | '\u{2593}'  // light, medium, dark shade
-        | '\u{25a0}' // black square
-    )
-}
-
-/// Fold one source character into the single narrow glyph a cell can hold.
-///
-/// Anything wide, combining, control or simply absent from the console font
-/// becomes `?`, so no string — a disk model name, a timezone, a subprocess log
-/// line — can ever break the cell grid.
-fn sanitize_char(ch: char) -> char {
-    match ch {
-        ' ' | '\t' | '\n' | '\r' => ' ',
-        c if c.is_ascii_graphic() => c,
-        '\u{2014}' | '\u{2013}' | '\u{2212}' => '-', // em dash, en dash, minus
-        '\u{2018}' | '\u{2019}' => '\'',             // curly single quotes
-        '\u{201c}' | '\u{201d}' => '"',              // curly double quotes
-        c if is_console_glyph(c) => c,
-        _ => '?',
-    }
-}
-
-/// Characters that fold to *more than one* cell. Kept separate from
-/// `sanitize_char`, which is per-cell and cannot widen.
-fn expand_char(ch: char) -> Option<&'static str> {
-    match ch {
-        '\u{2192}' => Some("->"),
-        '\u{2190}' => Some("<-"),
-        '\u{2265}' => Some(">="),
-        '\u{2264}' => Some("<="),
-        '\u{2026}' => Some("..."),
-        _ => None,
-    }
 }
 
 pub(crate) fn screen_size() -> io::Result<Size> {
