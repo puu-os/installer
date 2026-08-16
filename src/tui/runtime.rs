@@ -1091,9 +1091,16 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
             let status = firmware::detect_setup_mode();
             Some(Message::FirmwareReady {
                 status: crate::tui::message::FirmwareStatus {
-                    setup_mode: status.setup_mode,
-                    secure_boot: status.secure_boot,
-                    reason: sanitize_text(&status.reason),
+                    setup_mode: match &status {
+                        firmware::SetupMode::On { .. } => Some(true),
+                        firmware::SetupMode::Off => Some(false),
+                        firmware::SetupMode::Unknown { .. } => None,
+                    },
+                    secure_boot: match &status {
+                        firmware::SetupMode::On { secure_boot } => *secure_boot,
+                        _ => None,
+                    },
+                    reason: sanitize_text(status.reason().unwrap_or("")),
                 },
             })
         }

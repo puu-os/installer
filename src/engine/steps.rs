@@ -14,6 +14,7 @@ use efivar::boot::{
 use udev::AsRaw;
 
 use crate::engine::command::Command;
+use crate::engine::firmware::SetupMode;
 use crate::engine::image;
 use crate::engine::partition;
 use crate::engine::pipeline::{
@@ -52,39 +53,41 @@ fn step_setup_mode(r: &mut Runner) -> Result<()> {
         );
         return Ok(());
     }
-    let status = crate::engine::firmware::detect_setup_mode();
-    if status.setup_mode.is_none() {
-        r.ctx.secure_boot = false;
-        tracing::info!(
-            target: crate::engine::INSTALLATION_LOG_TARGET,
-            "Secure Boot Setup Mode could not be detected; \
-             continuing without Secure Boot"
-        );
-        if !status.reason.is_empty() {
+    match crate::engine::firmware::detect_setup_mode() {
+        SetupMode::Unknown { reason } => {
+            r.ctx.secure_boot = false;
             tracing::info!(
                 target: crate::engine::INSTALLATION_LOG_TARGET,
-                "  reason: {}",
-                status.reason
+                "Secure Boot Setup Mode could not be detected; \
+                 continuing without Secure Boot"
+            );
+            if !reason.is_empty() {
+                tracing::info!(
+                    target: crate::engine::INSTALLATION_LOG_TARGET,
+                    "  reason: {reason}"
+                );
+            }
+            Ok(())
+        }
+        SetupMode::Off => {
+            bail!(
+                "Secure Boot Setup Mode is off. Reboot to firmware setup or \
+                 continue without Secure Boot."
             );
         }
-        return Ok(());
+        SetupMode::On { secure_boot } => {
+            let state = if secure_boot == Some(true) {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            tracing::info!(
+                target: crate::engine::INSTALLATION_LOG_TARGET,
+                "firmware reports Setup Mode on; Secure Boot is {state}"
+            );
+            Ok(())
+        }
     }
-    if status.setup_mode == Some(false) {
-        bail!(
-            "Secure Boot Setup Mode is off. Reboot to firmware setup or \
-             continue without Secure Boot."
-        );
-    }
-    let state = if status.secure_boot == Some(true) {
-        "enabled"
-    } else {
-        "disabled"
-    };
-    tracing::info!(
-        target: crate::engine::INSTALLATION_LOG_TARGET,
-        "firmware reports Setup Mode on; Secure Boot is {state}"
-    );
-    Ok(())
 }
 
 fn step_cleanup(_r: &mut Runner) -> Result<()> {
@@ -890,7 +893,7 @@ fn step_secureboot(_r: &mut Runner) -> Result<()> {
         }
         Err(e) => {
             // If the firmware already left Setup Mode, keys are likely enrolled.
-            if crate::engine::firmware::detect_setup_mode().setup_mode == Some(false) {
+            if matches!(crate::engine::firmware::detect_setup_mode(), SetupMode::Off) {
                 tracing::info!(
                     target: crate::engine::INSTALLATION_LOG_TARGET,
                     "Secure Boot keys appear to be enrolled already"

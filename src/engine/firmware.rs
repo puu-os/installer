@@ -7,15 +7,22 @@ const EFI_GLOBAL_VARIABLE: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
 const EFIVARS: &str = "/sys/firmware/efi/efivars";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SetupModeStatus {
-    pub setup_mode: Option<bool>,
-    pub secure_boot: Option<bool>,
-    pub reason: String,
+pub enum SetupMode {
+    On { secure_boot: Option<bool> },
+    Off,
+    Unknown { reason: String },
 }
 
-impl std::fmt::Display for SetupModeStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.reason)
+impl SetupMode {
+    pub const fn is_on(&self) -> bool {
+        matches!(self, Self::On { .. })
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Unknown { reason } if !reason.is_empty() => Some(reason.as_str()),
+            _ => None,
+        }
     }
 }
 
@@ -51,39 +58,28 @@ fn efi_bool(name: &str, root: &Path) -> Option<bool> {
     Some(value != 0)
 }
 
-pub fn detect_setup_mode() -> SetupModeStatus {
+pub fn detect_setup_mode() -> SetupMode {
     let efi_sys = Path::new("/sys/firmware/efi");
     if !efi_sys.exists() {
-        return SetupModeStatus {
-            setup_mode: None,
-            secure_boot: None,
+        return SetupMode::Unknown {
             reason: "UEFI firmware variables are unavailable".into(),
         };
     }
 
     let root = Path::new(EFIVARS);
     if !root.exists() {
-        return SetupModeStatus {
-            setup_mode: None,
-            secure_boot: None,
+        return SetupMode::Unknown {
             reason: "efivarfs is not mounted".into(),
         };
     }
 
-    let setup_mode = efi_bool("SetupMode", root);
-    let secure_boot = efi_bool("SecureBoot", root);
-
-    if setup_mode.is_none() {
-        return SetupModeStatus {
-            setup_mode: None,
-            secure_boot,
+    match efi_bool("SetupMode", root) {
+        None => SetupMode::Unknown {
             reason: "SetupMode EFI variable is missing".into(),
-        };
-    }
-
-    SetupModeStatus {
-        setup_mode,
-        secure_boot,
-        reason: String::new(),
+        },
+        Some(true) => SetupMode::On {
+            secure_boot: efi_bool("SecureBoot", root),
+        },
+        Some(false) => SetupMode::Off,
     }
 }
