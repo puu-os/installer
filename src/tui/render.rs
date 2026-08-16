@@ -75,11 +75,7 @@ const CURSOR_SHOW: &[u8] = b"\x1b[?25h";
 const CURSOR_HIDE: &[u8] = b"\x1b[?25l";
 const SYNC_UPDATE_BEGIN: &[u8] = b"\x1b[?2026h";
 const SYNC_UPDATE_END: &[u8] = b"\x1b[?2026l";
-const CURSOR_BLINKING_BLOCK: &[u8] = b"\x1b[1 q";
 const CURSOR_STEADY_BLOCK: &[u8] = b"\x1b[2 q";
-const CURSOR_BLINKING_UNDERLINE: &[u8] = b"\x1b[3 q";
-const CURSOR_STEADY_UNDERLINE: &[u8] = b"\x1b[4 q";
-const CURSOR_BLINKING_BAR: &[u8] = b"\x1b[5 q";
 const CURSOR_STEADY_BAR: &[u8] = b"\x1b[6 q";
 const CURSOR_DEFAULT: &[u8] = b"\x1b[0 q";
 
@@ -87,25 +83,16 @@ static PANIC_HOOK_INIT: Once = Once::new();
 static TUI_THREAD: Mutex<Option<ThreadId>> = Mutex::new(None);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[allow(dead_code, reason = "complete set of DECSCUSR cursor shapes")]
 pub(crate) enum CursorStyle {
     #[default]
     SteadyBlock,
-    BlinkingBlock,
-    SteadyUnderline,
-    BlinkingUnderline,
     SteadyBar,
-    BlinkingBar,
 }
 
 impl CursorStyle {
     const fn seq(self) -> &'static [u8] {
         match self {
-            CursorStyle::BlinkingBlock => CURSOR_BLINKING_BLOCK,
             CursorStyle::SteadyBlock => CURSOR_STEADY_BLOCK,
-            CursorStyle::BlinkingUnderline => CURSOR_BLINKING_UNDERLINE,
-            CursorStyle::SteadyUnderline => CURSOR_STEADY_UNDERLINE,
-            CursorStyle::BlinkingBar => CURSOR_BLINKING_BAR,
             CursorStyle::SteadyBar => CURSOR_STEADY_BAR,
         }
     }
@@ -196,17 +183,6 @@ impl Rect {
             y,
             width,
             height,
-        }
-    }
-
-    #[allow(
-        dead_code,
-        reason = "part of the Rect API retained by the offscreen renderer"
-    )]
-    pub(crate) const fn area(self) -> Size {
-        Size {
-            width: self.width,
-            height: self.height,
         }
     }
 }
@@ -357,24 +333,6 @@ impl Default for Cell {
 impl Cell {
     pub(crate) fn set_char(&mut self, ch: char) -> &mut Self {
         self.ch = sanitize_char(ch);
-        self
-    }
-
-    #[allow(
-        dead_code,
-        reason = "part of the Cell API retained by the offscreen renderer"
-    )]
-    pub(crate) fn set_fg(&mut self, color: Color) -> &mut Self {
-        self.style.fg = Some(color);
-        self
-    }
-
-    #[allow(
-        dead_code,
-        reason = "part of the Cell API retained by the offscreen renderer"
-    )]
-    pub(crate) fn set_bg(&mut self, color: Color) -> &mut Self {
-        self.style.bg = Some(color);
         self
     }
 
@@ -666,15 +624,6 @@ impl<W: Write> Terminal<W> {
             full_repaint: true,
         }
     }
-
-    #[allow(
-        clippy::unused_self,
-        reason = "reads stdin via the free fn; self is vestigial after TestBackend removal"
-    )]
-    pub(crate) fn poll_input(&mut self, timeout: Duration) -> Option<Input> {
-        poll_input(timeout)
-    }
-
     /// Forget everything we believe about the terminal's escape state. Called
     /// whenever something else may have written to the terminal behind our back,
     /// so the next frame re-establishes it.
@@ -685,13 +634,6 @@ impl<W: Write> Terminal<W> {
         self.cursor_shown = false;
         self.full_repaint = true;
         self.front.blank();
-    }
-
-    /// Discard the retained terminal state after an external terminal event.
-    /// The next draw clears and repaints the complete screen.
-    #[allow(dead_code, reason = "available for external-terminal repaint recovery")]
-    pub(crate) fn force_repaint(&mut self) {
-        self.reset_wire_state();
     }
 
     pub(crate) fn activate(&mut self) -> io::Result<()> {
@@ -1067,16 +1009,12 @@ fn to_input(event: &Event) -> Option<Input> {
     }
 }
 
-pub(crate) fn read_input() -> Option<Input> {
-    let event = tui_or_exit(event::read(), "event::read");
-    to_input(&event)
-}
-
 pub(crate) fn poll_input(timeout: Duration) -> Option<Input> {
     if !tui_or_exit(event::poll(timeout), "event::poll") {
         return None;
     }
-    read_input()
+    let event = tui_or_exit(event::read(), "event::read");
+    to_input(&event)
 }
 
 /// Translate a crossterm mouse event into the subset the installer acts on.

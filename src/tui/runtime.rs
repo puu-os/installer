@@ -22,7 +22,7 @@ use crate::tui::message::{
 };
 use crate::tui::render::{
     self, Block, Border, Color, CursorStyle, Frame, Input, Line, Modifier, Paragraph, Rect, Span,
-    Style, Terminal, install_panic_hook, mouse_kind, tui_or_exit,
+    Style, Terminal, install_panic_hook, mouse_kind, poll_input, tui_or_exit,
 };
 use crate::tui::state::{AppState, IdentityDraft, InstallStepState, Modal, Route};
 use crate::tui::theme;
@@ -2864,7 +2864,7 @@ impl Installer {
             }
             let timeout = poll_interval(&controller);
             let mut dirty = false;
-            match terminal.poll_input(timeout) {
+            match poll_input(timeout) {
                 Some(Input::Key(key)) => {
                     dispatch(&mut controller, Message::Key(key));
                     dirty = true;
