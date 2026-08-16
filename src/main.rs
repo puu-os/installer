@@ -99,12 +99,14 @@ fn main() -> Result<()> {
     let target_imgref = engine::image::load_target_imgref(source_image.as_deref(), &cfg);
     let image_version = engine::image::load_image_version(source_image.as_deref());
 
-    let mut ctx = Context::default();
-    ctx.config = cfg;
-    ctx.source_image = source_image;
-    ctx.target_imgref = target_imgref;
-    ctx.image_version = image_version;
-    ctx.k3s_token = k3s_token;
+    let ctx = Context {
+        config: cfg,
+        source_image,
+        target_imgref,
+        image_version,
+        k3s_token: k3s_token.into(),
+        ..Context::default()
+    };
 
     let mut app = Installer::new(ctx);
     loop {

@@ -2,7 +2,6 @@
 // Copyright (C) Opinsys Oy 2026
 
 use anyhow::Result;
-use zeroize::Zeroize;
 
 /// Fill an `N`-byte array with cryptographically secure random bytes.
 pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N]> {
@@ -14,11 +13,6 @@ pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N]> {
 /// Flush all filesystem buffers to stable storage.
 pub(crate) fn sync_all() {
     unsafe { libc::sync() };
-}
-
-/// Overwrite a secret string before releasing its contents.
-pub(crate) fn clear_secret(secret: &mut String) {
-    secret.zeroize();
 }
 
 /// Whether the current process has superuser privileges.

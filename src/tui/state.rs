@@ -5,6 +5,8 @@
 
 use std::time::Instant;
 
+use zeroize::Zeroizing;
+
 use crate::tui::message::{DriveInfo, FirmwareStatus};
 
 #[derive(Default)]
@@ -12,20 +14,13 @@ pub(crate) struct IdentityDraft {
     pub(crate) language_index: usize,
     pub(crate) hostname: String,
     pub(crate) username: String,
-    pub(crate) password: String,
-    pub(crate) repeated_password: String,
+    pub(crate) password: Zeroizing<String>,
+    pub(crate) repeated_password: Zeroizing<String>,
     pub(crate) shell_index: usize,
     pub(crate) field_index: usize,
     /// Cursor position within the focused text field, in Unicode scalar values.
     pub(crate) cursor: usize,
     pub(crate) reveal_password: bool,
-}
-
-impl Drop for IdentityDraft {
-    fn drop(&mut self) {
-        crate::engine::util::clear_secret(&mut self.password);
-        crate::engine::util::clear_secret(&mut self.repeated_password);
-    }
 }
 
 /// Persistent state for the filterable timezone picker.

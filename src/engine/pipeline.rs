@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use nix::mount::MsFlags;
 use nix::sched::{CloneFlags, unshare};
+use zeroize::Zeroizing;
 
 use crate::engine::command;
 use crate::engine::config::UserShell;
@@ -105,10 +106,10 @@ pub struct Context {
     pub drive: String,
     pub drive_label: String,
     pub username: String,
-    pub user_password: String,
+    pub user_password: Zeroizing<String>,
     pub user_shell: UserShell,
     pub secure_boot: SecureBootMode,
-    pub k3s_token: String,
+    pub k3s_token: Zeroizing<String>,
     pub parts: DerivedPartitions,
 }
 
@@ -122,19 +123,12 @@ impl Default for Context {
             drive: String::new(),
             drive_label: String::new(),
             username: String::new(),
-            user_password: String::new(),
+            user_password: Zeroizing::new(String::new()),
             user_shell: UserShell::default(),
             secure_boot: SecureBootMode::default(),
-            k3s_token: String::new(),
+            k3s_token: Zeroizing::new(String::new()),
             parts: DerivedPartitions::default(),
         }
-    }
-}
-
-impl Drop for Context {
-    fn drop(&mut self) {
-        crate::engine::util::clear_secret(&mut self.user_password);
-        crate::engine::util::clear_secret(&mut self.k3s_token);
     }
 }
 

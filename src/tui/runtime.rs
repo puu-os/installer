@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use zeroize::Zeroize;
 
 use crate::engine::{block, firmware, pipeline};
 use crate::tui::app::{InstallTask, Installer, Trap};
@@ -587,8 +588,8 @@ fn identity_field_mut(draft: &mut IdentityDraft) -> Option<&mut String> {
     match draft.field_index {
         1 => Some(&mut draft.hostname),
         2 => Some(&mut draft.username),
-        3 => Some(&mut draft.password),
-        4 => Some(&mut draft.repeated_password),
+        3 => Some(&mut *draft.password),
+        4 => Some(&mut *draft.repeated_password),
         _ => None,
     }
 }
@@ -896,8 +897,8 @@ pub(crate) fn update(state: &mut AppState, message: Message) -> Vec<Effect> {
                     FieldId::Hostname => draft.hostname = sanitize_text(&value),
                     FieldId::Username => draft.username = sanitize_text(&value),
                     // Passwords may contain any printable bytes; never rewrite them.
-                    FieldId::Password => draft.password = value,
-                    FieldId::RepeatedPassword => draft.repeated_password = value,
+                    FieldId::Password => draft.password = value.into(),
+                    FieldId::RepeatedPassword => draft.repeated_password = value.into(),
                     _ => {}
                 }
                 clamp_identity_cursor(draft);
@@ -1157,11 +1158,11 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
         Effect::StartInstall => {
             controller.state.install.started = Some(Instant::now());
             controller.task = Some(InstallTask::start(&controller.ctx));
-            crate::engine::util::clear_secret(&mut controller.ctx.user_password);
-            crate::engine::util::clear_secret(&mut controller.ctx.k3s_token);
+            controller.ctx.user_password.zeroize();
+            controller.ctx.k3s_token.zeroize();
             if let Some(draft) = controller.state.identity.as_mut() {
-                crate::engine::util::clear_secret(&mut draft.password);
-                crate::engine::util::clear_secret(&mut draft.repeated_password);
+                draft.password.zeroize();
+                draft.repeated_password.zeroize();
                 draft.reveal_password = false;
             }
             None

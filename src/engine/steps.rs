@@ -10,6 +10,7 @@ use anyhow::{Context as _, Result, bail};
 use efivar::boot::{
     BootEntry, BootEntryAttributes, EFIHardDrive, EFIHardDriveType, FilePath, FilePathList,
 };
+use zeroize::Zeroize;
 
 use udev::AsRaw;
 
@@ -559,7 +560,7 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
     }
     Command::new(&argv).chroot(TARGET_MOUNT).run()?;
     drop(cleanups);
-    crate::engine::util::clear_secret(&mut r.ctx.k3s_token);
+    r.ctx.k3s_token.zeroize();
 
     tracing::info!(
         target: crate::engine::INSTALLATION_LOG_TARGET,
@@ -582,7 +583,7 @@ fn step_stage_homed_identity(r: &mut Runner) -> Result<()> {
 
     let identity = serde_json::json!({
         "userName": name,
-        "secret": { "password": [&r.ctx.user_password] },
+        "secret": { "password": [r.ctx.user_password.as_str()] },
         "realName": name,
         "shell": r.ctx.user_shell.path(),
         "memberOf": r.ctx.config.homed.groups.as_slice(),
@@ -623,7 +624,7 @@ fn step_stage_homed_identity(r: &mut Runner) -> Result<()> {
     identity_file.write_all(b"\n")?;
     identity_file.sync_all()?;
     drop(identity);
-    crate::engine::util::clear_secret(&mut r.ctx.user_password);
+    r.ctx.user_password.zeroize();
     tracing::info!(
         target: crate::engine::INSTALLATION_LOG_TARGET,
         "staged homed identity for {name} at /var/lib/puu/identity.json"
