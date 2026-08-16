@@ -584,7 +584,7 @@ fn step_stage_homed_identity(r: &mut Runner) -> Result<()> {
         "userName": name,
         "secret": { "password": [&r.ctx.user_password] },
         "realName": name,
-        "shell": r.ctx.user_shell,
+        "shell": r.ctx.user_shell.path(),
         "memberOf": r.ctx.config.homed.groups.as_slice(),
         "homeDirectory": format!("/var/home/{name}"),
         "imagePath": format!("/var/home/{name}.homedir"),

@@ -115,6 +115,36 @@ impl Default for Identity {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UserShell {
+    #[default]
+    Bash,
+    Zsh,
+}
+
+impl UserShell {
+    pub const fn toggle(self) -> Self {
+        match self {
+            Self::Bash => Self::Zsh,
+            Self::Zsh => Self::Bash,
+        }
+    }
+
+    pub const fn path(self) -> &'static str {
+        match self {
+            Self::Bash => "/bin/bash",
+            Self::Zsh => "/bin/zsh",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Bash => "bash",
+            Self::Zsh => "zsh",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Flatpak {

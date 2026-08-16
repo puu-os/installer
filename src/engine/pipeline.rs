@@ -9,6 +9,7 @@ use nix::mount::MsFlags;
 use nix::sched::{CloneFlags, unshare};
 
 use crate::engine::command;
+use crate::engine::config::UserShell;
 use crate::engine::firmware::SecureBootMode;
 use crate::engine::partition::DerivedPartitions;
 
@@ -105,7 +106,7 @@ pub struct Context {
     pub drive_label: String,
     pub username: String,
     pub user_password: String,
-    pub user_shell: String,
+    pub user_shell: UserShell,
     pub secure_boot: SecureBootMode,
     pub k3s_token: String,
     pub parts: DerivedPartitions,
@@ -122,7 +123,7 @@ impl Default for Context {
             drive_label: String::new(),
             username: String::new(),
             user_password: String::new(),
-            user_shell: "/bin/bash".to_string(),
+            user_shell: UserShell::default(),
             secure_boot: SecureBootMode::default(),
             k3s_token: String::new(),
             parts: DerivedPartitions::default(),

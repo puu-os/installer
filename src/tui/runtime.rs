@@ -1143,9 +1143,9 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
                 controller.ctx.username = draft.username.trim().to_string();
                 controller.ctx.user_password.clone_from(&draft.password);
                 controller.ctx.user_shell = if draft.shell_index == 0 {
-                    "/bin/bash".to_string()
+                    crate::engine::config::UserShell::Bash
                 } else {
-                    "/bin/zsh".to_string()
+                    crate::engine::config::UserShell::Zsh
                 };
             }
             Some(Message::FormValidated {
@@ -1222,7 +1222,7 @@ fn prepare_state(controller: &mut UiController) {
             username: controller.ctx.username.clone(),
             password: controller.ctx.user_password.clone(),
             repeated_password: controller.ctx.user_password.clone(),
-            shell_index: usize::from(controller.ctx.user_shell == "/bin/zsh"),
+            shell_index: usize::from(controller.ctx.user_shell == crate::engine::config::UserShell::Zsh),
             field_index: 0,
             cursor: 0,
             reveal_password: false,
