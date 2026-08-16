@@ -393,6 +393,15 @@ fn step_configure_mounts(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 fn step_verify_image(r: &mut Runner) -> Result<()> {
     let Some(src) = r.ctx.source_image.clone() else {
         tracing::info!(
@@ -411,7 +420,7 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
         "expected image digest: {expected}"
     );
     let raw = image::raw_manifest(&src)?;
-    let actual = format!("sha256:{}", hex::encode(openssl::sha::sha256(&raw)));
+    let actual = format!("sha256:{}", hex_lower(&openssl::sha::sha256(&raw)));
     if !actual.eq_ignore_ascii_case(&expected) {
         bail!("image digest mismatch: expected {expected}, got {actual}");
     }

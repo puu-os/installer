@@ -1052,7 +1052,6 @@ dependencies = [
  "duct",
  "efivar",
  "gptman",
- "hex",
  "iana-time-zone",
  "iso6709parse",
  "libc",

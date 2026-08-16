@@ -21,7 +21,6 @@ crossterm = "0.29"
 duct = "1.1"
 efivar = "2"
 gptman = { version = "3", features = ["nix"] }
-hex = "0.4"
 iso6709parse = "1"
 zeroize = "1.8"
 iana-time-zone = "0.1.65"
