@@ -9,6 +9,7 @@ use nix::mount::MsFlags;
 use nix::sched::{CloneFlags, unshare};
 
 use crate::engine::command;
+use crate::engine::firmware::SecureBootMode;
 use crate::engine::partition::DerivedPartitions;
 
 pub use crate::engine::steps::STEPS;
@@ -107,7 +108,7 @@ pub struct Context {
     pub user_shell: String,
     pub keymap: String,
     pub locale: String,
-    pub secure_boot: bool,
+    pub secure_boot: SecureBootMode,
     pub k3s_token: String,
     pub parts: DerivedPartitions,
 }
@@ -126,7 +127,7 @@ impl Default for Context {
             user_shell: "/bin/bash".to_string(),
             keymap: String::new(),
             locale: String::new(),
-            secure_boot: true,
+            secure_boot: SecureBootMode::default(),
             k3s_token: String::new(),
             parts: DerivedPartitions::default(),
         }
@@ -215,7 +216,7 @@ impl Runner {
             if !committed && is_cancelled() {
                 return Ok(false);
             }
-            if step.requires_secure_boot && !self.ctx.secure_boot {
+            if step.requires_secure_boot && self.ctx.secure_boot == SecureBootMode::Skip {
                 (self.skipped)(i);
                 continue;
             }

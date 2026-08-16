@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 const EFI_GLOBAL_VARIABLE: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
 const EFIVARS: &str = "/sys/firmware/efi/efivars";
 
+/// Whether the install should enroll Secure Boot keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SecureBootMode {
+    #[default]
+    Enroll,
+    Skip,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetupMode {
     On { secure_boot: Option<bool> },

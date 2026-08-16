@@ -14,7 +14,7 @@ use efivar::boot::{
 use udev::AsRaw;
 
 use crate::engine::command::Command;
-use crate::engine::firmware::SetupMode;
+use crate::engine::firmware::{SecureBootMode, SetupMode};
 use crate::engine::image;
 use crate::engine::partition;
 use crate::engine::pipeline::{
@@ -46,7 +46,7 @@ fn step_dependencies(_r: &mut Runner) -> Result<()> {
 }
 
 fn step_setup_mode(r: &mut Runner) -> Result<()> {
-    if !r.ctx.secure_boot {
+    if r.ctx.secure_boot == SecureBootMode::Skip {
         tracing::info!(
             target: crate::engine::INSTALLATION_LOG_TARGET,
             "Secure Boot disabled; skipping firmware setup check"
@@ -55,7 +55,7 @@ fn step_setup_mode(r: &mut Runner) -> Result<()> {
     }
     match crate::engine::firmware::detect_setup_mode() {
         SetupMode::Unknown { reason } => {
-            r.ctx.secure_boot = false;
+            r.ctx.secure_boot = SecureBootMode::Skip;
             tracing::info!(
                 target: crate::engine::INSTALLATION_LOG_TARGET,
                 "Secure Boot Setup Mode could not be detected; \

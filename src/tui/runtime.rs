@@ -1121,7 +1121,11 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
             None
         }
         Effect::SetSecureBoot(enable) => {
-            controller.ctx.secure_boot = enable;
+            controller.ctx.secure_boot = if enable {
+                crate::engine::firmware::SecureBootMode::Enroll
+            } else {
+                crate::engine::firmware::SecureBootMode::Skip
+            };
             None
         }
         Effect::ValidateForm {
