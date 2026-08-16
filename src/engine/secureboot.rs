@@ -168,8 +168,13 @@ fn build_pkcs7(digest: &[u8], key: &PKeyRef<Private>, cert: &X509) -> Result<Vec
     let spc_digest = der_seq(&[algorithm_identifier(OID_SHA256), der_octet(digest)]);
     let spc = der_seq(&[spc_attr, spc_digest]);
 
-    // Signed attributes: content-type = SPC_INDIRECT_DATA, message-digest = SHA-256(spc).
-    let content_digest = sha256(&spc);
+    // Authenticode signs the SpcIndirectDataContent SEQUENCE contents, not
+    // its outer DER tag and length.
+    let (spc_tlv, spc_end) = der_read(&spc, 0)?;
+    if spc_tlv.tag != 0x30 || spc_end != spc.len() {
+        bail!("invalid SpcIndirectDataContent encoding");
+    }
+    let content_digest = sha256(spc_tlv.contents);
     let ct_attr = der_seq(&[
         der_oid(OID_CONTENT_TYPE),
         der_set(&[der_oid(OID_SPC_INDIRECT_DATA)]),
