@@ -15,16 +15,18 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use zeroize::Zeroize;
 
+use crate::engine::firmware::SecureBootMode;
 use crate::engine::{block, firmware, pipeline};
 use crate::tui::app::{InstallTask, Installer, Trap};
-use crate::tui::message::{
-    DriveInfo, Effect, FieldId, FormId, Message, MouseKind, ToggleId, sanitize_text,
-};
+use crate::tui::message::{DriveInfo, Effect, Message, MouseKind, sanitize_text};
 use crate::tui::render::{
     self, Block, Border, Color, CursorStyle, Frame, Input, Line, Modifier, Paragraph, Rect, Span,
     Style, Terminal, install_panic_hook, mouse_kind, poll_input, tui_or_exit,
 };
-use crate::tui::state::{AppState, IdentityDraft, InstallStepState, Modal, Route};
+use crate::tui::state::{
+    AppState, IdentityDraft, IdentityField, InstallStatus, InstallStepState, LocaleChoice, Modal,
+    ModalChoice, RebootChoice, ReviewChoice, Route, SecureBootChoice, WelcomeChoice,
+};
 use crate::tui::theme;
 use crate::tui::timezone;
 
@@ -35,19 +37,6 @@ const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Shared budget for install spinner + coalesced log/progress redraws.
 const INSTALL_RENDER_INTERVAL: Duration = Duration::from_millis(100);
-
-const LANGUAGES: &[(&str, &str)] = &[
-    ("English (US)", "en_US.UTF-8"),
-    ("English (UK)", "en_GB.UTF-8"),
-    ("Finnish", "fi_FI.UTF-8"),
-    ("Swedish", "sv_SE.UTF-8"),
-    ("Norwegian", "nb_NO.UTF-8"),
-    ("Danish", "da_DK.UTF-8"),
-    ("German", "de_DE.UTF-8"),
-    ("French", "fr_FR.UTF-8"),
-    ("Spanish", "es_ES.UTF-8"),
-    ("Italian", "it_IT.UTF-8"),
-];
 
 fn cycle(index: &mut usize, count: usize, backwards: bool) {
     if count == 0 {
@@ -98,13 +87,49 @@ fn mouse_capture_enabled() -> bool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MapPanDirection {
+    Left,
+    Right,
+}
+
+impl From<MapPanDirection> for f64 {
+    fn from(direction: MapPanDirection) -> Self {
+        match direction {
+            MapPanDirection::Left => -1.0,
+            MapPanDirection::Right => 1.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScrollDirection {
+    Up,
+    Down,
+}
+
+impl ScrollDirection {
+    const fn is_backwards(self) -> bool {
+        matches!(self, Self::Up)
+    }
+}
+
+impl From<ScrollDirection> for f64 {
+    fn from(direction: ScrollDirection) -> Self {
+        match direction {
+            ScrollDirection::Up => -1.0,
+            ScrollDirection::Down => 1.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HitAction {
     /// Select list/button index for the current route; second click activates.
     Select(usize),
     /// Modal No/Yes button.
-    ModalSelect(usize),
-    /// World-map horizontal pan direction (-1 left, +1 right).
-    MapPan(i8),
+    ModalSelect(ModalChoice),
+    /// World-map horizontal pan.
+    MapPan(MapPanDirection),
     /// Install log region (click re-enables follow mode).
     InstallFollow,
 }
@@ -160,12 +185,11 @@ fn list_row_targets(
         .collect()
 }
 
-fn secure_boot_choice_count(state: &AppState) -> usize {
-    if state.firmware.as_ref().and_then(|status| status.setup_mode) == Some(true) {
-        2
-    } else {
-        3
-    }
+fn secure_boot_setup_on(state: &AppState) -> bool {
+    state
+        .firmware
+        .as_ref()
+        .is_some_and(firmware::SetupMode::is_on)
 }
 
 fn modal_dialog_rect(width: u16, height: u16) -> Rect {
@@ -229,13 +253,13 @@ fn modal_hit_targets(width: u16, height: u16) -> Vec<HitTarget> {
     let buttons = modal_button_rects(modal_dialog_rect(width, height));
     buttons
         .into_iter()
-        .enumerate()
-        .map(|(index, rect)| HitTarget {
+        .zip([ModalChoice::No, ModalChoice::Yes])
+        .map(|(rect, choice)| HitTarget {
             x0: rect.x,
             y0: rect.y,
             x1: rect.x.saturating_add(rect.width),
             y1: rect.y.saturating_add(1),
-            action: HitAction::ModalSelect(index),
+            action: HitAction::ModalSelect(choice),
         })
         .collect()
 }
@@ -259,14 +283,14 @@ fn timezone_hit_targets(
             y0: cy0.saturating_add(1),
             x1: map_mid,
             y1: split,
-            action: HitAction::MapPan(-1),
+            action: HitAction::MapPan(MapPanDirection::Left),
         });
         targets.push(HitTarget {
             x0: map_mid,
             y0: cy0.saturating_add(1),
             x1: list_x1,
             y1: split,
-            action: HitAction::MapPan(1),
+            action: HitAction::MapPan(MapPanDirection::Right),
         });
         // Filter row + zone rows start under the list panel title.
         let zones_top = split.saturating_add(4);
@@ -286,14 +310,14 @@ fn timezone_hit_targets(
             y0: cy0.saturating_add(1),
             x1: map_mid,
             y1: cy1.saturating_sub(1),
-            action: HitAction::MapPan(-1),
+            action: HitAction::MapPan(MapPanDirection::Left),
         });
         targets.push(HitTarget {
             x0: map_mid,
             y0: cy0.saturating_add(1),
             x1: split.saturating_sub(1),
             y1: cy1.saturating_sub(1),
-            action: HitAction::MapPan(1),
+            action: HitAction::MapPan(MapPanDirection::Right),
         });
         let zones_left = split.saturating_add(2);
         let zones_top = cy0.saturating_add(4); // list panel title + filter row
@@ -316,10 +340,7 @@ fn build_hit_targets(state: &AppState, terminal_size: (u16, u16)) -> Vec<HitTarg
     }
 
     // Modal dialogs sit on top; only their buttons are clickable.
-    if let Some(modal) = state.active_modal() {
-        if modal == Modal::None {
-            return Vec::new();
-        }
+    if state.active_modal().is_some() {
         return modal_hit_targets(width, height);
     }
 
@@ -350,17 +371,18 @@ fn build_hit_targets(state: &AppState, terminal_size: (u16, u16)) -> Vec<HitTarg
             (list_x0, list_x1),
         ),
         Route::SecureBoot => {
-            let setup = state.firmware.as_ref().and_then(|status| status.setup_mode);
-            let (count, first) = if setup == Some(true) {
+            let setup_on = secure_boot_setup_on(state);
+            let count = SecureBootChoice::choices(setup_on).len();
+            let first = if setup_on {
                 // message, warning, then two buttons
-                (2_usize, rows_top.saturating_add(2))
+                rows_top.saturating_add(2)
             } else {
                 // message (+ optional reason), then three buttons
                 let reason = state
                     .firmware
                     .as_ref()
-                    .is_some_and(|status| !status.reason.is_empty());
-                (3_usize, rows_top.saturating_add(1 + u16::from(reason)))
+                    .and_then(firmware::SetupMode::reason);
+                rows_top.saturating_add(1 + u16::from(reason.is_some()))
             };
             list_row_targets(list_x0, list_x1, first, count, 0)
         }
@@ -397,10 +419,10 @@ fn activate_enter(state: &mut AppState) -> Vec<Effect> {
     update_key(state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
 }
 
-fn scroll_mouse(state: &mut AppState, direction: i8) {
+fn scroll_mouse(state: &mut AppState, direction: ScrollDirection) {
     match state.route {
         Route::Install => {
-            if direction < 0 {
+            if direction.is_backwards() {
                 state.scroll.install_log =
                     (state.scroll.install_log + 10).min(state.install.logs.len().saturating_sub(1));
                 state.install.follow_logs = false;
@@ -411,43 +433,56 @@ fn scroll_mouse(state: &mut AppState, direction: i8) {
         }
         Route::Timezone => {
             // Scroll pans the map; list selection uses clicks.
-            timezone::pan_map(state, f64::from(direction), true);
+            timezone::pan_map(state, direction.into(), true);
         }
-        Route::Welcome => cycle(&mut state.selection.welcome, 3, direction < 0),
+        Route::Welcome => {
+            state.selection.welcome = if direction.is_backwards() {
+                state.selection.welcome.previous()
+            } else {
+                state.selection.welcome.next()
+            };
+        }
         Route::Target => {
             if state.drives.is_empty() {
                 return;
             }
             let mut selected = state.selection.target.unwrap_or(0);
-            cycle(&mut selected, state.drives.len(), direction < 0);
+            cycle(&mut selected, state.drives.len(), direction.is_backwards());
             state.selection.target = Some(selected);
         }
         Route::Identity => {
             if let Some(draft) = state.identity.as_mut() {
-                let next = if direction < 0 {
-                    draft.field_index.saturating_sub(1)
+                let next = if direction.is_backwards() {
+                    if draft.field == IdentityField::Language {
+                        IdentityField::Language
+                    } else {
+                        draft.field.previous()
+                    }
                 } else {
-                    (draft.field_index + 1) % 6
+                    draft.field.next()
                 };
                 focus_identity_field(draft, next);
             }
         }
         Route::SecureBoot => {
-            let count = secure_boot_choice_count(state);
-            cycle(&mut state.selection.secure_boot, count, direction < 0);
+            state.selection.secure_boot = state
+                .selection
+                .secure_boot
+                .cycle(secure_boot_setup_on(state), direction.is_backwards());
         }
-        Route::Review => state.selection.review = 1 - state.selection.review.min(1),
-        Route::Reboot => state.selection.reboot = 1 - state.selection.reboot.min(1),
+        Route::Review => state.selection.review = state.selection.review.toggle(),
+        Route::Reboot => state.selection.reboot = state.selection.reboot.toggle(),
     }
 }
 
 fn click_select(state: &mut AppState, index: usize) -> Vec<Effect> {
     match state.route {
         Route::Welcome => {
-            if state.selection.welcome == index {
+            let choice = WelcomeChoice::from_hit_index(index);
+            if state.selection.welcome == choice {
                 return activate_enter(state);
             }
-            state.selection.welcome = index.min(2);
+            state.selection.welcome = choice;
         }
         Route::Target => {
             if state.drives.is_empty() || index >= state.drives.len() {
@@ -460,7 +495,7 @@ fn click_select(state: &mut AppState, index: usize) -> Vec<Effect> {
         }
         Route::Identity => {
             if let Some(draft) = state.identity.as_mut() {
-                focus_identity_field(draft, index.min(5));
+                focus_identity_field(draft, IdentityField::from_hit_index(index));
             }
         }
         Route::Timezone => {
@@ -476,32 +511,32 @@ fn click_select(state: &mut AppState, index: usize) -> Vec<Effect> {
             timezone::select_index(state, index);
         }
         Route::SecureBoot => {
-            let count = secure_boot_choice_count(state);
-            if index >= count {
+            let Some(choice) = SecureBootChoice::from_hit_index(index, secure_boot_setup_on(state))
+            else {
                 return Vec::new();
-            }
-            if state.selection.secure_boot == index {
+            };
+            if state.selection.secure_boot == choice {
                 return activate_enter(state);
             }
-            state.selection.secure_boot = index;
+            state.selection.secure_boot = choice;
         }
         Route::Review => {
-            if index > 1 {
+            let Some(choice) = ReviewChoice::from_hit_index(index) else {
                 return Vec::new();
-            }
-            if state.selection.review == index {
+            };
+            if state.selection.review == choice {
                 return activate_enter(state);
             }
-            state.selection.review = index;
+            state.selection.review = choice;
         }
         Route::Reboot => {
-            if index > 1 {
+            let Some(choice) = RebootChoice::from_hit_index(index) else {
                 return Vec::new();
-            }
-            if state.selection.reboot == index {
+            };
+            if state.selection.reboot == choice {
                 return activate_enter(state);
             }
-            state.selection.reboot = index;
+            state.selection.reboot = choice;
         }
         Route::Install => {}
     }
@@ -517,11 +552,11 @@ fn update_mouse(
 ) -> Vec<Effect> {
     match kind {
         MouseKind::ScrollUp => {
-            scroll_mouse(state, -1);
+            scroll_mouse(state, ScrollDirection::Up);
             return Vec::new();
         }
         MouseKind::ScrollDown => {
-            scroll_mouse(state, 1);
+            scroll_mouse(state, ScrollDirection::Down);
             return Vec::new();
         }
         MouseKind::LeftDown => {}
@@ -532,12 +567,12 @@ fn update_mouse(
         return Vec::new();
     };
     match action {
-        HitAction::ModalSelect(index) => {
-            state.selection.modal = index.min(1);
+        HitAction::ModalSelect(choice) => {
+            state.selection.modal = choice;
             activate_enter(state)
         }
         HitAction::MapPan(direction) => {
-            timezone::pan_map(state, f64::from(direction), false);
+            timezone::pan_map(state, direction.into(), false);
             Vec::new()
         }
         HitAction::InstallFollow => {
@@ -562,16 +597,16 @@ fn update_modal(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
     };
     match key.code {
         KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
-            state.selection.modal = 1 - state.selection.modal.min(1);
+            state.selection.modal = state.selection.modal.toggle();
         }
         KeyCode::Esc => {
             state.pop_modal();
-            state.selection.modal = 0;
+            state.selection.modal = ModalChoice::No;
         }
         KeyCode::Enter => {
-            let confirmed = state.selection.modal == 1;
+            let confirmed = state.selection.modal.is_yes();
             state.pop_modal();
-            state.selection.modal = 0;
+            state.selection.modal = ModalChoice::No;
             match (modal, confirmed) {
                 (Modal::WipeConfirmation, true) => state.route = Route::Identity,
                 (Modal::RebootConfirmation, true) => return vec![Effect::Reboot],
@@ -585,22 +620,22 @@ fn update_modal(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
 }
 
 fn identity_field_mut(draft: &mut IdentityDraft) -> Option<&mut String> {
-    match draft.field_index {
-        1 => Some(&mut draft.hostname),
-        2 => Some(&mut draft.username),
-        3 => Some(&mut *draft.password),
-        4 => Some(&mut *draft.repeated_password),
-        _ => None,
+    match draft.field {
+        IdentityField::Hostname => Some(&mut draft.hostname),
+        IdentityField::Username => Some(&mut draft.username),
+        IdentityField::Password => Some(&mut *draft.password),
+        IdentityField::RepeatedPassword => Some(&mut *draft.repeated_password),
+        IdentityField::Language | IdentityField::Shell => None,
     }
 }
 
 fn identity_field(draft: &IdentityDraft) -> Option<&str> {
-    match draft.field_index {
-        1 => Some(draft.hostname.as_str()),
-        2 => Some(draft.username.as_str()),
-        3 => Some(draft.password.as_str()),
-        4 => Some(draft.repeated_password.as_str()),
-        _ => None,
+    match draft.field {
+        IdentityField::Hostname => Some(draft.hostname.as_str()),
+        IdentityField::Username => Some(draft.username.as_str()),
+        IdentityField::Password => Some(draft.password.as_str()),
+        IdentityField::RepeatedPassword => Some(draft.repeated_password.as_str()),
+        IdentityField::Language | IdentityField::Shell => None,
     }
 }
 
@@ -612,8 +647,8 @@ fn clamp_identity_cursor(draft: &mut IdentityDraft) {
     draft.cursor = draft.cursor.min(identity_field_len(draft));
 }
 
-fn focus_identity_field(draft: &mut IdentityDraft, index: usize) {
-    draft.field_index = index;
+fn focus_identity_field(draft: &mut IdentityDraft, field: IdentityField) {
+    draft.field = field;
     draft.cursor = identity_field_len(draft);
 }
 
@@ -624,28 +659,23 @@ fn update_identity_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
     match key.code {
         KeyCode::Esc => state.route = Route::Target,
         KeyCode::Tab | KeyCode::Down => {
-            focus_identity_field(draft, (draft.field_index + 1) % 6);
+            focus_identity_field(draft, draft.field.next());
         }
         KeyCode::Up => {
-            let next = if draft.field_index == 0 {
-                5
-            } else {
-                draft.field_index - 1
-            };
-            focus_identity_field(draft, next);
+            focus_identity_field(draft, draft.field.previous());
         }
         KeyCode::Home if identity_field(draft).is_some() => draft.cursor = 0,
         KeyCode::End if identity_field(draft).is_some() => {
             draft.cursor = identity_field_len(draft);
         }
-        KeyCode::Left if draft.field_index == 0 => {
-            cycle(&mut draft.language_index, LANGUAGES.len(), true);
+        KeyCode::Left if draft.field == IdentityField::Language => {
+            draft.language = draft.language.cycle(true);
         }
-        KeyCode::Right if draft.field_index == 0 => {
-            cycle(&mut draft.language_index, LANGUAGES.len(), false);
+        KeyCode::Right if draft.field == IdentityField::Language => {
+            draft.language = draft.language.cycle(false);
         }
-        KeyCode::Left | KeyCode::Right if draft.field_index == 5 => {
-            draft.shell_index = 1 - draft.shell_index.min(1);
+        KeyCode::Left | KeyCode::Right if draft.field == IdentityField::Shell => {
+            draft.shell = draft.shell.toggle();
         }
         KeyCode::Left if identity_field(draft).is_some() => {
             draft.cursor = draft.cursor.saturating_sub(1);
@@ -689,9 +719,9 @@ fn update_identity_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
         KeyCode::Char(ch)
             if ch.is_ascii_graphic() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
         {
-            let max = match draft.field_index {
-                1 => 253,
-                2 => 32,
+            let max = match draft.field {
+                IdentityField::Hostname => 253,
+                IdentityField::Username => 32,
                 _ => usize::MAX,
             };
             let cursor = draft.cursor;
@@ -707,9 +737,7 @@ fn update_identity_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
             }
         }
         KeyCode::Enter => {
-            return vec![Effect::ValidateForm {
-                form: FormId::Identity,
-            }];
+            return vec![Effect::ValidateForm];
         }
         _ => {}
     }
@@ -726,7 +754,7 @@ fn update_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
         return update_modal(state, key);
     }
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        if state.route == Route::Install && !state.install.complete && !state.install.failed {
+        if state.route == Route::Install && state.install.status.is_running() {
             if !state.install.committed {
                 state.push_modal(Modal::Cancellation);
             }
@@ -736,20 +764,22 @@ fn update_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
     }
     match state.route {
         Route::Welcome => match key.code {
-            KeyCode::Up => cycle(&mut state.selection.welcome, 3, true),
-            KeyCode::Down | KeyCode::Tab => cycle(&mut state.selection.welcome, 3, false),
+            KeyCode::Up => {
+                state.selection.welcome = state.selection.welcome.previous();
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                state.selection.welcome = state.selection.welcome.next();
+            }
             KeyCode::Esc => return vec![Effect::Quit],
             KeyCode::Enter => match state.selection.welcome {
-                0 => {
+                WelcomeChoice::Install => {
                     state.reset_flow();
                     return vec![Effect::RefreshDrives];
                 }
-                1 => {
-                    return vec![Effect::RunShell {
-                        command: Vec::new(),
-                    }];
+                WelcomeChoice::Shell => {
+                    return vec![Effect::RunShell];
                 }
-                _ => state.push_modal(Modal::RebootConfirmation),
+                WelcomeChoice::Reboot => state.push_modal(Modal::RebootConfirmation),
             },
             _ => {}
         },
@@ -780,36 +810,44 @@ fn update_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
         Route::Identity => return update_identity_key(state, key),
         Route::Timezone => return timezone::update_key(state, key),
         Route::SecureBoot => {
-            let setup = state.firmware.as_ref().and_then(|status| status.setup_mode);
-            let count = if setup == Some(true) { 2 } else { 3 };
+            let setup_on = secure_boot_setup_on(state);
             match key.code {
                 KeyCode::Esc => state.route = Route::Timezone,
-                KeyCode::Left => cycle(&mut state.selection.secure_boot, count, true),
-                KeyCode::Right | KeyCode::Tab => {
-                    cycle(&mut state.selection.secure_boot, count, false);
+                KeyCode::Left => {
+                    state.selection.secure_boot = state.selection.secure_boot.cycle(setup_on, true);
                 }
-                KeyCode::Enter => match (setup, state.selection.secure_boot) {
-                    (_, 0) => state.route = Route::Timezone,
-                    (Some(true), 1) => {
-                        state.route = Route::Review;
-                        return vec![Effect::SetSecureBoot(true)];
+                KeyCode::Right | KeyCode::Tab => {
+                    state.selection.secure_boot =
+                        state.selection.secure_boot.cycle(setup_on, false);
+                }
+                KeyCode::Enter => {
+                    if !SecureBootChoice::choices(setup_on).contains(&state.selection.secure_boot) {
+                        return Vec::new();
                     }
-                    (_, 1) => {
-                        state.route = Route::Review;
-                        return vec![Effect::SetSecureBoot(false)];
+                    match state.selection.secure_boot {
+                        SecureBootChoice::Back => state.route = Route::Timezone,
+                        SecureBootChoice::Enroll => {
+                            state.route = Route::Review;
+                            return vec![Effect::SetSecureBoot(SecureBootMode::Enroll)];
+                        }
+                        SecureBootChoice::Continue => {
+                            state.route = Route::Review;
+                            return vec![Effect::SetSecureBoot(SecureBootMode::Skip)];
+                        }
+                        SecureBootChoice::Reboot => return vec![Effect::Reboot],
                     }
-                    (_, 2) => return vec![Effect::Reboot],
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
         Route::Review => match key.code {
             KeyCode::Esc => state.route = Route::SecureBoot,
             KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
-                state.selection.review = 1 - state.selection.review.min(1);
+                state.selection.review = state.selection.review.toggle();
             }
-            KeyCode::Enter if state.selection.review == 0 => state.route = Route::SecureBoot,
+            KeyCode::Enter if state.selection.review == ReviewChoice::Back => {
+                state.route = Route::SecureBoot;
+            }
             KeyCode::Enter => {
                 state.route = Route::Install;
                 state.install.step_states = vec![InstallStepState::Pending; pipeline::STEPS.len()];
@@ -818,7 +856,7 @@ fn update_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
             _ => {}
         },
         Route::Install => match key.code {
-            KeyCode::Esc if !state.install.committed && !state.install.complete => {
+            KeyCode::Esc if !state.install.committed && !state.install.status.is_succeeded() => {
                 state.push_modal(Modal::Cancellation);
             }
             KeyCode::PageUp => {
@@ -830,25 +868,22 @@ fn update_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
                 state.scroll.install_log = state.scroll.install_log.saturating_sub(10);
                 state.install.follow_logs = state.scroll.install_log == 0;
             }
-            KeyCode::Enter if state.install.complete => {
+            KeyCode::Enter if state.install.status.is_succeeded() => {
                 state.route = Route::Reboot;
                 state.reboot.remaining_seconds = Some(REBOOT_DELAY_SECONDS);
                 state.reboot.automatic = true;
             }
-            KeyCode::Enter if state.install.failed => state.route = Route::Welcome,
+            KeyCode::Enter if state.install.status.is_failed() => state.route = Route::Welcome,
             _ => {}
         },
         Route::Reboot => {
             state.reboot.automatic = false;
             match key.code {
                 KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
-                    state.selection.reboot = 1 - state.selection.reboot.min(1);
+                    state.selection.reboot = state.selection.reboot.toggle();
                 }
-                KeyCode::Enter if state.selection.reboot == 0 => {
-                    state.reboot.shell_active = true;
-                    return vec![Effect::RunShell {
-                        command: Vec::new(),
-                    }];
+                KeyCode::Enter if state.selection.reboot == RebootChoice::Shell => {
+                    return vec![Effect::RunShell];
                 }
                 KeyCode::Enter => return vec![Effect::Reboot],
                 _ => {}
@@ -858,10 +893,6 @@ fn update_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
     Vec::new()
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "message handling keeps state transitions in one dispatch function"
-)]
 pub(crate) fn update(state: &mut AppState, message: Message) -> Vec<Effect> {
     match message {
         Message::Key(key) => return update_key(state, key),
@@ -890,50 +921,14 @@ pub(crate) fn update(state: &mut AppState, message: Message) -> Vec<Effect> {
                 state.push_modal(Modal::WipeConfirmation);
             }
         }
-        Message::FieldEdit { field, value, .. } => {
-            if let Some(draft) = state.identity.as_mut() {
-                match field {
-                    // Hostnames and usernames are shown as-is; keep them VT-safe.
-                    FieldId::Hostname => draft.hostname = sanitize_text(&value),
-                    FieldId::Username => draft.username = sanitize_text(&value),
-                    // Passwords may contain any printable bytes; never rewrite them.
-                    FieldId::Password => draft.password = value.into(),
-                    FieldId::RepeatedPassword => draft.repeated_password = value.into(),
-                    _ => {}
-                }
-                clamp_identity_cursor(draft);
-            }
-        }
-        Message::FormValidated {
-            form: FormId::Identity,
-            error,
-        } => {
+        Message::FormValidated { error } => {
             state.validation_error = error.map(|text| sanitize_text(&text));
             if state.validation_error.is_none() {
                 state.route = Route::Timezone;
             }
         }
         // Mouse is handled in dispatch where terminal geometry is available.
-        Message::Mouse { .. }
-        | Message::Resized { .. }
-        | Message::Tick
-        | Message::Paste(_)
-        | Message::FieldFocused { .. }
-        | Message::FormValidated { .. } => {}
-        Message::Toggle { id } => match id {
-            ToggleId::RevealPassword => {
-                if let Some(draft) = state.identity.as_mut() {
-                    draft.reveal_password = !draft.reveal_password;
-                }
-            }
-            ToggleId::FollowLogs => state.install.follow_logs = !state.install.follow_logs,
-            _ => {}
-        },
-        Message::Submit => {
-            return update_key(state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        }
-        Message::Back => return update_key(state, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-        Message::CancelInstall => state.push_modal(Modal::Cancellation),
+        Message::Mouse { .. } => {}
         Message::Log(line) => {
             state.install.logs.push_back(line);
             if state.install.logs.len() > MAX_LOG_LINES {
@@ -969,34 +964,21 @@ pub(crate) fn update(state: &mut AppState, message: Message) -> Vec<Effect> {
         }
         Message::InstallFinished { at, elapsed, error } => {
             state.install.elapsed_seconds = elapsed.map(|duration| duration.as_secs());
-            state.install.failed = error.is_some();
-            state.install.complete = error.is_none();
-            state.install.failure = error;
+            state.install.status = match error {
+                Some(reason) => InstallStatus::Failed { reason },
+                None => InstallStatus::Succeeded,
+            };
             if let Some(step) = at.and_then(|index| state.install.step_states.get_mut(index)) {
                 *step = InstallStepState::Failed;
             }
-            if state.install.failed {
+            if state.install.status.is_failed() {
                 state.push_modal(Modal::Failure);
             }
         }
-        Message::ShellReturned { status } => {
-            state.reboot.shell_active = false;
-            if let Err(error) = status {
-                state.validation_error = Some(sanitize_text(&error));
-            }
-        }
         Message::FirmwareReady { status } => {
-            state.selection.secure_boot = 1;
+            state.selection.secure_boot = SecureBootChoice::default_for(status.is_on());
             state.firmware = Some(status);
         }
-        Message::EnrollFinished { error } => {
-            state.validation_error = error.map(|text| sanitize_text(&text));
-            if state.validation_error.is_none() {
-                state.route = Route::Review;
-            }
-        }
-        Message::Reboot => return vec![Effect::Reboot],
-        Message::Quit => return vec![Effect::Quit],
     }
     Vec::new()
 }
@@ -1050,7 +1032,6 @@ fn drive_messages() -> Vec<DriveInfo> {
                             .busy_reason
                             .map(|reason| vec![sanitize_text(&reason.to_string())])
                             .unwrap_or_default(),
-                        selected: false,
                     }
                 })
                 .collect()
@@ -1059,7 +1040,7 @@ fn drive_messages() -> Vec<DriveInfo> {
 }
 
 fn terminal_size() -> (u16, u16) {
-    crossterm::terminal::size().unwrap_or((80, 24))
+    render::screen_size().map_or((80, 24), |size| (size.width, size.height))
 }
 
 struct UiController {
@@ -1089,21 +1070,13 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
             None
         }
         Effect::DetectFirmware => {
-            let status = firmware::detect_setup_mode();
-            Some(Message::FirmwareReady {
-                status: crate::tui::message::FirmwareStatus {
-                    setup_mode: match &status {
-                        firmware::SetupMode::On { .. } => Some(true),
-                        firmware::SetupMode::Off => Some(false),
-                        firmware::SetupMode::Unknown { .. } => None,
-                    },
-                    secure_boot: match &status {
-                        firmware::SetupMode::On { secure_boot } => *secure_boot,
-                        _ => None,
-                    },
-                    reason: sanitize_text(status.reason().unwrap_or("")),
+            let status = match firmware::detect_setup_mode() {
+                firmware::SetupMode::Unknown { reason } => firmware::SetupMode::Unknown {
+                    reason: sanitize_text(&reason),
                 },
-            })
+                status => status,
+            };
+            Some(Message::FirmwareReady { status })
         }
         Effect::SelectDrive { index } => {
             if let Some(drive) = controller
@@ -1121,17 +1094,11 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
             controller.ctx.config.identity.timezone = name;
             None
         }
-        Effect::SetSecureBoot(enable) => {
-            controller.ctx.secure_boot = if enable {
-                crate::engine::firmware::SecureBootMode::Enroll
-            } else {
-                crate::engine::firmware::SecureBootMode::Skip
-            };
+        Effect::SetSecureBoot(mode) => {
+            controller.ctx.secure_boot = mode;
             None
         }
-        Effect::ValidateForm {
-            form: FormId::Identity,
-        } => {
+        Effect::ValidateForm => {
             let error = controller
                 .state
                 .identity
@@ -1141,20 +1108,13 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
                 && let Some(draft) = controller.state.identity.as_ref()
             {
                 controller.ctx.config.identity.hostname = draft.hostname.trim().to_string();
+                controller.ctx.config.identity.locale = draft.language.locale().to_string();
                 controller.ctx.username = draft.username.trim().to_string();
                 controller.ctx.user_password.clone_from(&draft.password);
-                controller.ctx.user_shell = if draft.shell_index == 0 {
-                    crate::engine::config::UserShell::Bash
-                } else {
-                    crate::engine::config::UserShell::Zsh
-                };
+                controller.ctx.user_shell = draft.shell;
             }
-            Some(Message::FormValidated {
-                form: FormId::Identity,
-                error,
-            })
+            Some(Message::FormValidated { error })
         }
-        Effect::ValidateForm { form } => Some(Message::FormValidated { form, error: None }),
         Effect::StartInstall => {
             controller.state.install.started = Some(Instant::now());
             controller.task = Some(InstallTask::start(&controller.ctx));
@@ -1173,7 +1133,7 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
             }
             None
         }
-        Effect::RunShell { .. } => {
+        Effect::RunShell => {
             controller.trap = Some(Trap::Shell);
             None
         }
@@ -1185,7 +1145,6 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
             controller.trap = Some(Trap::Quit);
             None
         }
-        Effect::EnrollKeys | Effect::None => None,
     }
 }
 
@@ -1212,19 +1171,19 @@ fn dispatch(controller: &mut UiController, message: Message) {
 
 fn prepare_state(controller: &mut UiController) {
     controller.state.route = Route::Welcome;
-    controller.state.selection.reboot = 1;
-    controller.state.selection.secure_boot = 1;
-    controller.state.selection.review = 1;
+    controller.state.selection.reboot = RebootChoice::Now;
+    controller.state.selection.secure_boot = SecureBootChoice::Continue;
+    controller.state.selection.review = ReviewChoice::Start;
     controller.state.install.follow_logs = true;
     if controller.state.identity.is_none() {
         controller.state.identity = Some(IdentityDraft {
-            language_index: 0,
+            language: LocaleChoice::default(),
             hostname: controller.ctx.config.identity.hostname.clone(),
             username: controller.ctx.username.clone(),
             password: controller.ctx.user_password.clone(),
             repeated_password: controller.ctx.user_password.clone(),
-            shell_index: usize::from(controller.ctx.user_shell == crate::engine::config::UserShell::Zsh),
-            field_index: 0,
+            shell: controller.ctx.user_shell,
+            field: IdentityField::Language,
             cursor: 0,
             reveal_password: false,
         });
@@ -1287,9 +1246,8 @@ fn service(controller: &mut UiController) -> bool {
         }
         dispatch(controller, message);
     }
-    let install_running = controller.state.route == Route::Install
-        && !controller.state.install.complete
-        && !controller.state.install.failed;
+    let install_running =
+        controller.state.route == Route::Install && controller.state.install.status.is_running();
     if install_running {
         // Spinner and coalesced log/progress share one redraw budget.
         // Immediate messages already set dirty above and redraw now;
@@ -1332,8 +1290,7 @@ fn poll_interval(controller: &UiController) -> Duration {
     {
         MAP_FRAME_INTERVAL
     } else if controller.state.route == Route::Install
-        && !controller.state.install.complete
-        && !controller.state.install.failed
+        && controller.state.install.status.is_running()
     {
         // Drain the install event queue frequently; redraws are budgeted
         // separately at INSTALL_RENDER_INTERVAL.
@@ -1349,7 +1306,7 @@ fn poll_interval(controller: &UiController) -> Duration {
 }
 
 fn overall_install_progress(state: &AppState) -> u16 {
-    if state.install.complete {
+    if state.install.status.is_succeeded() {
         return 100;
     }
     let total_weight = pipeline::STEPS
@@ -1785,15 +1742,19 @@ fn welcome_content(frame: &mut Frame, rect: Rect, state: &AppState) {
         theme::MUTED,
         Weight::Normal,
     );
-    let labels = ["Install system", "Open recovery shell", "Reboot machine"];
-    for (index, label) in labels.iter().enumerate() {
+    let labels = [
+        (WelcomeChoice::Install, "Install system"),
+        (WelcomeChoice::Shell, "Open recovery shell"),
+        (WelcomeChoice::Reboot, "Reboot machine"),
+    ];
+    for (offset, (choice, label)) in labels.into_iter().enumerate() {
         draw_selected_row(
             frame,
             body.x,
-            body.y + 2 + index as u16,
+            body.y + 2 + offset as u16,
             body.width,
             label,
-            state.selection.welcome == index,
+            state.selection.welcome == choice,
         );
     }
 }
@@ -1901,14 +1862,8 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
     } else {
         "*".repeat(draft.repeated_password.chars().count())
     };
-    let language = LANGUAGES
-        .get(draft.language_index)
-        .map_or("?", |(label, _)| *label);
-    let shell = if draft.shell_index == 0 {
-        "bash"
-    } else {
-        "zsh"
-    };
+    let language = draft.language.label();
+    let shell = draft.shell.label();
     let mut row = body.y;
     draw_choice_row(
         frame,
@@ -1917,7 +1872,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
         body.width,
         "Language",
         language,
-        draft.field_index == 0,
+        draft.field == IdentityField::Language,
     );
     row = row.saturating_add(1);
     draw_text_input(
@@ -1927,7 +1882,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
         body.width,
         "Hostname",
         &draft.hostname,
-        draft.field_index == 1 && state.active_modal().is_none(),
+        draft.field == IdentityField::Hostname && state.active_modal().is_none(),
         draft.cursor,
         "required",
     );
@@ -1939,7 +1894,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
         body.width,
         "Username",
         &draft.username,
-        draft.field_index == 2 && state.active_modal().is_none(),
+        draft.field == IdentityField::Username && state.active_modal().is_none(),
         draft.cursor,
         "required",
     );
@@ -1951,7 +1906,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
         body.width,
         "Password",
         &password,
-        draft.field_index == 3 && state.active_modal().is_none(),
+        draft.field == IdentityField::Password && state.active_modal().is_none(),
         draft.cursor,
         "required",
     );
@@ -1963,7 +1918,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
         body.width,
         "Repeat",
         &repeated,
-        draft.field_index == 4 && state.active_modal().is_none(),
+        draft.field == IdentityField::RepeatedPassword && state.active_modal().is_none(),
         draft.cursor,
         "required",
     );
@@ -1975,7 +1930,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
         body.width,
         "Shell",
         shell,
-        draft.field_index == 5,
+        draft.field == IdentityField::Shell,
     );
     row = row.saturating_add(1);
     if draft.reveal_password {
@@ -2099,9 +2054,12 @@ fn secure_boot_content(frame: &mut Frame, rect: Rect, controller: &UiController)
     let state = &controller.state;
     draw_panel(frame, rect, "Secure Boot configuration");
     let body = panel_body(rect);
-    let setup_mode = state.firmware.as_ref().and_then(|status| status.setup_mode);
     let mut row = body.y;
-    if setup_mode == Some(true) {
+    if state
+        .firmware
+        .as_ref()
+        .is_some_and(firmware::SetupMode::is_on)
+    {
         draw_text_row(
             frame,
             body.x,
@@ -2125,28 +2083,21 @@ fn secure_boot_content(frame: &mut Frame, rect: Rect, controller: &UiController)
             Weight::Bold,
         );
         row = row.saturating_add(1);
-        draw_selected_row(
-            frame,
-            body.x,
-            row,
-            body.width,
-            "[ Back ]",
-            state.selection.secure_boot == 0,
-        );
-        row = row.saturating_add(1);
-        draw_selected_row(
-            frame,
-            body.x,
-            row,
-            body.width,
-            "[ Enroll keys ]",
-            state.selection.secure_boot == 1,
-        );
+        for choice in SecureBootChoice::choices(true) {
+            draw_selected_row(
+                frame,
+                body.x,
+                row,
+                body.width,
+                choice.label(),
+                state.selection.secure_boot == *choice,
+            );
+            row = row.saturating_add(1);
+        }
     } else {
-        let message = if setup_mode == Some(false) {
-            "Setup Mode is off; keys cannot be enrolled."
-        } else {
-            "Firmware Setup Mode could not be detected."
+        let message = match state.firmware.as_ref() {
+            Some(firmware::SetupMode::Off) => "Setup Mode is off; keys cannot be enrolled.",
+            _ => "Firmware Setup Mode could not be detected.",
         };
         draw_text_row(
             frame,
@@ -2158,33 +2109,30 @@ fn secure_boot_content(frame: &mut Frame, rect: Rect, controller: &UiController)
             Weight::Bold,
         );
         row = row.saturating_add(1);
-        if let Some(status) = state
+        if let Some(reason) = state
             .firmware
             .as_ref()
-            .filter(|status| !status.reason.is_empty())
+            .and_then(firmware::SetupMode::reason)
         {
             draw_text_row(
                 frame,
                 body.x,
                 row,
                 body.width,
-                &status.reason,
+                reason,
                 theme::DANGER,
                 Weight::Bold,
             );
             row = row.saturating_add(1);
         }
-        for (index, label) in ["[ Back ]", "[ Continue without Secure Boot ]", "[ Reboot ]"]
-            .iter()
-            .enumerate()
-        {
+        for choice in SecureBootChoice::choices(false) {
             draw_selected_row(
                 frame,
                 body.x,
                 row,
                 body.width,
-                label,
-                state.selection.secure_boot == index,
+                choice.label(),
+                state.selection.secure_boot == *choice,
             );
             row = row.saturating_add(1);
         }
@@ -2242,7 +2190,7 @@ fn review_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
         row,
         body.width,
         "[ Back ]",
-        state.selection.review == 0,
+        state.selection.review == ReviewChoice::Back,
     );
     row = row.saturating_add(1);
     draw_selected_row(
@@ -2251,7 +2199,7 @@ fn review_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
         row,
         body.width,
         "[ Start installation ]",
-        state.selection.review == 1,
+        state.selection.review == ReviewChoice::Start,
     );
 }
 
@@ -2344,7 +2292,7 @@ fn install_content(
         .current_step
         .and_then(|index| pipeline::STEPS.get(index))
         .map_or("Preparing installation", |step| step.title);
-    let running = !state.install.complete && !state.install.failed;
+    let running = state.install.status.is_running();
     let spinner_frame = state.install.started.map_or(0, |started| {
         (Instant::now()
             .saturating_duration_since(started)
@@ -2353,9 +2301,9 @@ fn install_content(
             % 4
     });
     let spinner = ["|", "/", "-", "\\"][spinner_frame];
-    let (status, status_color) = if state.install.complete {
+    let (status, status_color) = if state.install.status.is_succeeded() {
         ("Installation complete".to_string(), theme::SUCCESS)
-    } else if state.install.failed {
+    } else if state.install.status.is_failed() {
         ("Installation failed".to_string(), theme::DANGER)
     } else {
         (
@@ -2491,7 +2439,7 @@ fn reboot_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
         body.y + 3,
         body.width,
         "[ Open shell ]",
-        state.selection.reboot == 0,
+        state.selection.reboot == RebootChoice::Shell,
     );
     draw_selected_row(
         frame,
@@ -2499,7 +2447,7 @@ fn reboot_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
         body.y + 4,
         body.width,
         "[ Reboot now ]",
-        state.selection.reboot == 1,
+        state.selection.reboot == RebootChoice::Now,
     );
 }
 
@@ -2507,9 +2455,6 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
     let Some(modal) = state.active_modal() else {
         return;
     };
-    if modal == Modal::None {
-        return;
-    }
     let (title, body) = match modal {
         Modal::WipeConfirmation => (
             "Wipe target disk?",
@@ -2523,15 +2468,15 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
             "Installation failed",
             state
                 .install
-                .failure
-                .clone()
-                .unwrap_or_else(|| "Unknown error".to_string()),
+                .status
+                .reason()
+                .unwrap_or("Unknown error")
+                .to_string(),
         ),
         Modal::Cancellation => (
             "Cancel installation?",
             "The installer will stop and clean up mounts.".to_string(),
         ),
-        Modal::None => return,
     };
     let modal_color = if modal == Modal::Failure {
         theme::DANGER
@@ -2585,12 +2530,12 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
         }
     }
     let buttons = modal_button_rects(dialog);
-    let labels = ["No", "Yes"];
-    for (index, (rect, label)) in buttons.into_iter().zip(labels).enumerate() {
+    let labels = [(ModalChoice::No, "No"), (ModalChoice::Yes, "Yes")];
+    for (rect, (choice, label)) in buttons.into_iter().zip(labels) {
         if rect.width == 0 {
             continue;
         }
-        let focused = state.selection.modal == index;
+        let focused = state.selection.modal == choice;
         let style = if focused {
             bold(Style::default().fg(theme::BACKGROUND).bg(theme::ACCENT))
         } else {
@@ -2652,8 +2597,12 @@ fn route_footer_chips(state: &AppState) -> Vec<KeyChip> {
             KeyChip::new("Enter", "activate"),
             KeyChip::new("Esc", "back"),
         ],
-        Route::Install if state.install.complete => vec![KeyChip::new("Enter", "continue")],
-        Route::Install if state.install.failed => vec![KeyChip::new("Enter", "menu")],
+        Route::Install if state.install.status.is_succeeded() => {
+            vec![KeyChip::new("Enter", "continue")]
+        }
+        Route::Install if state.install.status.is_failed() => {
+            vec![KeyChip::new("Enter", "menu")]
+        }
         Route::Install if state.install.committed => vec![KeyChip::new("PgUp/PgDn", "scroll")],
         Route::Install => vec![
             KeyChip::new("PgUp/PgDn", "scroll"),
@@ -2832,7 +2781,7 @@ fn render_screen(
 
 impl Installer {
     /// Run the terminal UI: paint offscreen frames and blit them until a trap fires.
-    pub(crate) fn run_screen(&mut self) -> Trap {
+    pub fn run(&mut self) -> Trap {
         let _panic_guard = install_panic_hook();
         let mouse = mouse_capture_enabled();
         let mut terminal = Terminal::new(io::stdout());
@@ -2853,7 +2802,6 @@ impl Installer {
             last_map_sun_minute: None,
             terminal_size: terminal_size(),
         };
-        controller.terminal_size = terminal_size();
         prepare_state(&mut controller);
         let mut map_cache: Option<timezone::MapCache> = None;
 

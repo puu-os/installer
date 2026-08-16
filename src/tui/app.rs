@@ -148,8 +148,4 @@ impl Installer {
     pub fn into_context(self) -> Context {
         self.ctx
     }
-
-    pub fn run(&mut self) -> Trap {
-        self.run_screen()
-    }
 }
