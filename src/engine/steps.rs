@@ -453,16 +453,8 @@ fn validate_timezone(deploy: &Path, timezone: &str) -> Result<()> {
 
 fn step_firstboot(r: &mut Runner) -> Result<()> {
     let ident = &r.ctx.config.identity;
-    let keymap = if r.ctx.keymap.is_empty() {
-        ident.keymap.clone()
-    } else {
-        r.ctx.keymap.clone()
-    };
-    let locale = if r.ctx.locale.is_empty() {
-        ident.locale.clone()
-    } else {
-        r.ctx.locale.clone()
-    };
+    let keymap = ident.keymap.clone();
+    let locale = ident.locale.clone();
 
     let timezone = ident.timezone.clone();
     let hostname = ident.hostname.clone();
