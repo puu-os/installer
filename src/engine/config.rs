@@ -155,12 +155,6 @@ impl fmt::Display for K3sRole {
     }
 }
 
-impl AsRef<str> for K3sRole {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
 impl FromStr for K3sRole {
     type Err = anyhow::Error;
 
@@ -173,9 +167,8 @@ impl FromStr for K3sRole {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionSize {
-    raw: String,
     bytes: u64,
 }
 
@@ -183,11 +176,6 @@ impl PartitionSize {
     #[must_use]
     pub fn bytes(&self) -> u64 {
         self.bytes
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.raw
     }
 }
 
@@ -199,10 +187,7 @@ impl FromStr for PartitionSize {
         if bytes == 0 {
             anyhow::bail!("partition size must be greater than zero");
         }
-        Ok(Self {
-            raw: s.strip_prefix('+').unwrap_or(s).to_string(),
-            bytes,
-        })
+        Ok(Self { bytes })
     }
 }
 
@@ -213,18 +198,6 @@ impl<'de> Deserialize<'de> for PartitionSize {
     {
         let s = String::deserialize(deserializer)?;
         s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
-impl fmt::Display for PartitionSize {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl AsRef<str> for PartitionSize {
-    fn as_ref(&self) -> &str {
-        self.as_str()
     }
 }
 
