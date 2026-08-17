@@ -3,10 +3,10 @@
 
 //! Timezone selection and the world-map framebuffer painter.
 //!
-//! The map renders into the offscreen [`Frame`] cell buffer rather than a
-//! widget tree: one cached row of glyph runs per visible line is painted
-//! directly into the framebuffer the terminal blit diffs against. That keeps
-//! panning a per-frame cost of microseconds, with nothing laid out or measured.
+//! The map is sampled into a 32-bit RGB window (four pixels per cell) and
+//! only converted to console glyphs when that window is copied into the
+//! offscreen [`Frame`]. The camera origin is a fractional map-x so panning
+//! moves by millidegrees rather than whole source columns.
 
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::message::Effect;
-use crate::tui::render::{Color, Frame, Modifier, Rect, Style};
+use crate::tui::render::{Color, ColorMode, Frame, Modifier, Rect, Style, color_mode};
 use crate::tui::state::{AppState, Route};
 use crate::tui::theme;
 
@@ -35,15 +35,6 @@ const ROW_BYTES: usize = MAP_W / 8;
 const INTEGRAL_STRIDE: usize = MAP_W + 1;
 const LON_SCALE: f64 = MAP_W as f64 / 360.0;
 const LAT_SCALE: f64 = MAP_H as f64 / 180.0;
-const SHADES: [(char, f64, f64); 7] = [
-    (' ', 0.00, 0.00),
-    ('░', 0.25, 0.25),
-    ('▒', 0.50, 0.50),
-    ('▓', 0.75, 0.75),
-    ('█', 1.00, 1.00),
-    ('▀', 1.00, 0.00),
-    ('▄', 0.00, 1.00),
-];
 const ZONE_TAB: &str = include_str!("zone1970.tab");
 const WORLD_MASK: &[u8] = include_bytes!("world_mask.bin");
 /// Solar elevation (degrees) above which a cell is fully day.
@@ -222,51 +213,123 @@ fn solar_elevation_sin(lat: f64, lon: f64, sun_lat: f64, sun_lon: f64) -> f64 {
     lat_r.sin() * sun_lat_r.sin() + lat_r.cos() * sun_lat_r.cos() * hour_angle.cos()
 }
 
-/// Day/night lighting class for a map cell.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Lighting {
-    Day,
-    Twilight,
-    Night,
-}
-
-fn lighting_at(lat: f64, lon: f64, sun_lat: f64, sun_lon: f64) -> Lighting {
+fn lighting_factor(lat: f64, lon: f64, sun_lat: f64, sun_lon: f64) -> f64 {
     let elevation = solar_elevation_sin(lat, lon, sun_lat, sun_lon)
+        .clamp(-1.0, 1.0)
         .asin()
         .to_degrees();
-    if elevation >= DAY_ELEVATION_DEG + TWILIGHT_HALF_WIDTH_DEG {
-        Lighting::Day
-    } else if elevation >= DAY_ELEVATION_DEG - TWILIGHT_HALF_WIDTH_DEG {
-        Lighting::Twilight
+    let lo = DAY_ELEVATION_DEG - TWILIGHT_HALF_WIDTH_DEG;
+    let hi = DAY_ELEVATION_DEG + TWILIGHT_HALF_WIDTH_DEG;
+    let span = hi - lo;
+    if span <= f64::EPSILON {
+        if elevation >= DAY_ELEVATION_DEG {
+            1.0
+        } else {
+            0.0
+        }
     } else {
-        Lighting::Night
+        ((elevation - lo) / span).clamp(0.0, 1.0)
     }
 }
 
-fn night_color(color: Color) -> Color {
-    if color == theme::LAND {
-        theme::LAND_NIGHT
-    } else if color == theme::COAST {
-        theme::COAST_NIGHT
+const fn pack_rgb(r: u8, g: u8, b: u8) -> u32 {
+    ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+}
+
+fn unpack_rgb(pixel: u32) -> (u8, u8, u8) {
+    (
+        ((pixel >> 16) & 0xFF) as u8,
+        ((pixel >> 8) & 0xFF) as u8,
+        (pixel & 0xFF) as u8,
+    )
+}
+
+const LAND_RGB: u32 = pack_rgb(0, 170, 0);
+const COAST_RGB: u32 = pack_rgb(85, 255, 85);
+const SEA_RGB: u32 = pack_rgb(0, 0, 170);
+const SEA_SHIMMER_RGB: u32 = pack_rgb(85, 85, 255);
+const GUIDE_RGB: u32 = pack_rgb(0, 170, 170);
+const LAND_NIGHT_RGB: u32 = pack_rgb(85, 85, 85);
+const COAST_NIGHT_RGB: u32 = pack_rgb(170, 170, 170);
+const SEA_NIGHT_RGB: u32 = pack_rgb(0, 0, 0);
+const GUIDE_NIGHT_RGB: u32 = pack_rgb(85, 85, 85);
+const TERMINATOR_RGB: u32 = pack_rgb(255, 85, 255);
+const ACCENT_RGB: u32 = pack_rgb(85, 255, 255);
+
+const THEME_SWATCHES: [(Color, u32); 11] = [
+    (theme::LAND, LAND_RGB),
+    (theme::COAST, COAST_RGB),
+    (theme::SEA, SEA_RGB),
+    (theme::SEA_SHIMMER, SEA_SHIMMER_RGB),
+    (theme::GUIDE, GUIDE_RGB),
+    (theme::LAND_NIGHT, LAND_NIGHT_RGB),
+    (theme::COAST_NIGHT, COAST_NIGHT_RGB),
+    (theme::SEA_NIGHT, SEA_NIGHT_RGB),
+    (theme::GUIDE_NIGHT, GUIDE_NIGHT_RGB),
+    (theme::TERMINATOR, TERMINATOR_RGB),
+    (theme::ACCENT, ACCENT_RGB),
+];
+
+fn lerp_u8(a: u8, b: u8, t: f64) -> u8 {
+    let t = t.clamp(0.0, 1.0);
+    let mixed = f64::from(a) + (f64::from(b) - f64::from(a)) * t;
+    mixed.round() as u8
+}
+
+fn lerp_rgb(a: u32, b: u32, t: f64) -> u32 {
+    let (ar, ag, ab) = unpack_rgb(a);
+    let (br, bg, bb) = unpack_rgb(b);
+    pack_rgb(lerp_u8(ar, br, t), lerp_u8(ag, bg, t), lerp_u8(ab, bb, t))
+}
+
+fn light_rgb(night: u32, twilight: u32, day: u32, t: f64) -> u32 {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        lerp_rgb(night, twilight, t * 2.0)
     } else {
-        // Guides, graticule accents, and empty sea glyphs all dim the same way.
-        theme::GUIDE_NIGHT
+        lerp_rgb(twilight, day, (t - 0.5) * 2.0)
     }
 }
 
-fn sea_background(lighting: Lighting) -> Color {
-    match lighting {
-        Lighting::Day => theme::SEA,
-        Lighting::Twilight => theme::SEA_SHIMMER,
-        Lighting::Night => theme::SEA_NIGHT,
+fn snap_theme(pixel: u32) -> Color {
+    let (r, g, b) = unpack_rgb(pixel);
+    THEME_SWATCHES
+        .iter()
+        .min_by_key(|(_, rgb)| {
+            let (pr, pg, pb) = unpack_rgb(*rgb);
+            let dr = i32::from(r) - i32::from(pr);
+            let dg = i32::from(g) - i32::from(pg);
+            let db = i32::from(b) - i32::from(pb);
+            dr * dr + dg * dg + db * db
+        })
+        .map_or(theme::SEA, |(color, _)| *color)
+}
+
+fn snap_pixel(pixel: u32) -> Color {
+    let (r, g, b) = unpack_rgb(pixel);
+    match color_mode() {
+        ColorMode::Mono | ColorMode::Ansi16 => snap_theme(pixel),
+        mode => Color::from_rgb(r, g, b, mode),
     }
 }
 
-fn light_glyph_color(base: Color, lighting: Lighting) -> Color {
-    match lighting {
-        Lighting::Day => base,
-        Lighting::Twilight => theme::TERMINATOR,
-        Lighting::Night => night_color(base),
+fn sample_pixel(coverage: f64, light: f64, lon: f64, on_parallel: bool, lon_tolerance: f64) -> u32 {
+    if coverage <= 0.01 {
+        let on_meridian = near_grid(lon, 30.0, lon_tolerance);
+        if on_parallel && on_meridian {
+            light_rgb(GUIDE_NIGHT_RGB, TERMINATOR_RGB, ACCENT_RGB, light)
+        } else if on_parallel || on_meridian {
+            light_rgb(GUIDE_NIGHT_RGB, TERMINATOR_RGB, GUIDE_RGB, light)
+        } else {
+            light_rgb(SEA_NIGHT_RGB, SEA_SHIMMER_RGB, SEA_RGB, light)
+        }
+    } else if coverage >= 0.99 {
+        light_rgb(LAND_NIGHT_RGB, TERMINATOR_RGB, LAND_RGB, light)
+    } else {
+        let span = (coverage - 0.01) / 0.98;
+        let day = lerp_rgb(COAST_RGB, LAND_RGB, span);
+        let night = lerp_rgb(COAST_NIGHT_RGB, LAND_NIGHT_RGB, span);
+        light_rgb(night, TERMINATOR_RGB, day, light)
     }
 }
 
@@ -398,8 +461,8 @@ fn reconstruct_pick(state: &AppState) -> TzPick {
 
 fn reconstruct_view(state: &AppState) -> MapView {
     MapView {
-        center_lon: f64::from(state.timezone.map_center_lon_milli) / 1000.0,
-        target_lon: f64::from(state.timezone.map_target_lon_milli) / 1000.0,
+        center_lon: state.timezone.map_center_lon,
+        target_lon: state.timezone.map_target_lon,
     }
 }
 
@@ -408,8 +471,8 @@ fn store(state: &mut AppState, pick: &TzPick, view: &MapView) {
     state.timezone.selected = pick.selected;
     state.timezone.top = pick.top;
     state.timezone.filter.clone_from(&pick.filter);
-    state.timezone.map_center_lon_milli = (view.center_lon * 1000.0).round() as i32;
-    state.timezone.map_target_lon_milli = (view.target_lon * 1000.0).round() as i32;
+    state.timezone.map_center_lon = view.center_lon;
+    state.timezone.map_target_lon = view.target_lon;
 }
 
 pub(crate) fn prepare(state: &mut AppState, current: &str) {
@@ -508,14 +571,17 @@ pub(crate) fn pan_map(state: &mut AppState, direction: f64, page: bool) {
     store(state, &pick, &view);
 }
 
+pub(crate) fn map_is_panning(state: &AppState) -> bool {
+    lon_delta(state.timezone.map_center_lon, state.timezone.map_target_lon).abs() > PAN_SNAP
+}
+
 pub(crate) fn tick(state: &mut AppState, elapsed: Duration) -> bool {
     let mut view = reconstruct_view(state);
     view.tick(elapsed);
-    let center_lon_milli = (view.center_lon * 1000.0).round() as i32;
-    if center_lon_milli == state.timezone.map_center_lon_milli {
+    if lon_delta(state.timezone.map_center_lon, view.center_lon).abs() == 0.0 {
         return false;
     }
-    state.timezone.map_center_lon_milli = center_lon_milli;
+    state.timezone.map_center_lon = view.center_lon;
     true
 }
 
@@ -661,145 +727,134 @@ fn land_fraction(left: f64, top: f64, right: f64, bottom: f64) -> f64 {
     }
     land_integral().wrapped_rectangle(left, top, right, bottom) / area
 }
-
-fn pick_glyph(top: f64, bottom: f64) -> char {
-    SHADES
-        .into_iter()
-        .min_by(|(_, left_top, left_bottom), (_, right_top, right_bottom)| {
-            let left_error = (left_top - top).powi(2) + (left_bottom - bottom).powi(2);
-            let right_error = (right_top - top).powi(2) + (right_bottom - bottom).powi(2);
-            left_error.total_cmp(&right_error)
-        })
-        .map_or(' ', |(glyph, _, _)| glyph)
-}
-
 fn near_grid(value: f64, spacing: f64, tolerance: f64) -> bool {
     (value - (value / spacing).round() * spacing).abs() <= tolerance
 }
 
-struct MapRun {
-    x: isize,
-    text: String,
-    color: Color,
-    background: Color,
-}
-
-struct MapRow {
-    runs: Vec<MapRun>,
-}
-
-/// Cached projection of one map view: a row of glyph runs per visible line.
+/// Cached 32-bit RGB window for one map view: four pixels per cell (2×2).
 ///
-/// Rebuilt only when the viewport geometry or the solar minute changes; reused
-/// across frames while the map is static, so a redraw costs only the framebuffer
-/// paint, not the geographic sampling.
+/// Rebuilt only when the fractional origin, viewport geometry, or solar minute
+/// changes. Glyph conversion happens when the window is copied into the frame.
 pub(crate) struct MapCache {
-    start_column: i32,
+    origin_x: f64,
     width: usize,
     height: usize,
     /// Unix minute used when the day/night terminator was baked in.
     sun_minute: u64,
-    rows: Vec<MapRow>,
+    pixels: Vec<u32>,
 }
 
-fn build_map_cache(start_column: i32, width: usize, height: usize, unix_secs: u64) -> MapCache {
-    let start_x = f64::from(start_column);
+impl MapCache {
+    fn cell_width(&self) -> f64 {
+        VIEW_LON_SPAN * LON_SCALE / self.width.max(1) as f64
+    }
+
+    fn pixel_width(&self) -> usize {
+        self.width.saturating_mul(2)
+    }
+
+    /// Project a geographic point through the cached window's origin and cell size.
+    fn project(&self, lat: f64, lon: f64) -> Option<MapProj> {
+        if !(LAT_MIN..=LAT_MAX).contains(&lat) {
+            return None;
+        }
+        let width_f = self.width as f64;
+        let height_f = self.height as f64;
+        if width_f == 0.0 || height_f == 0.0 {
+            return None;
+        }
+        let cell_width = self.cell_width();
+        if cell_width <= 0.0 {
+            return None;
+        }
+        let map_x = (wrap_lon(lon) + 180.0) * LON_SCALE;
+        let x = (map_x - self.origin_x).rem_euclid(MAP_W as f64) / cell_width;
+        let y = (LAT_MAX - lat) / (LAT_MAX - LAT_MIN) * height_f;
+        if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 || x >= width_f || y >= height_f {
+            return None;
+        }
+        let cell_x = isize::try_from(x as usize).ok()?;
+        let cell_y = isize::try_from(y as usize).ok()?;
+        Some(MapProj {
+            cell_x,
+            cell_y,
+            frac_x: x - x.floor(),
+            frac_y: y - y.floor(),
+        })
+    }
+}
+
+fn map_origin_x(center_lon: f64) -> f64 {
+    let raw = (wrap_lon(center_lon - VIEW_LON_SPAN / 2.0) + 180.0) * LON_SCALE;
+    raw.rem_euclid(MAP_W as f64)
+}
+
+fn origin_delta(left: f64, right: f64) -> f64 {
+    let width = MAP_W as f64;
+    if width <= 0.0 {
+        return 0.0;
+    }
+    let delta = (left - right).rem_euclid(width);
+    delta.min(width - delta)
+}
+
+fn same_origin(left: f64, right: f64) -> bool {
+    origin_delta(left, right) <= f64::EPSILON
+}
+
+fn pixel_index(width: usize, x: usize, py: usize) -> Option<usize> {
+    width.checked_mul(py).and_then(|row| row.checked_add(x))
+}
+
+fn pixel_at(pixels: &[u32], width: usize, x: usize, py: usize) -> Option<u32> {
+    pixel_index(width, x, py).and_then(|index| pixels.get(index).copied())
+}
+
+fn build_map_cache(origin_x: f64, width: usize, height: usize, unix_secs: u64) -> MapCache {
     let cell_width = VIEW_LON_SPAN * LON_SCALE / width as f64;
+    let half_width = cell_width * 0.5;
     let row_span = LAT_MAX - LAT_MIN;
-    let half_height = row_span * LAT_SCALE / (height * 2) as f64;
+    let pixel_cols = width.saturating_mul(2);
+    let pixel_rows = height.saturating_mul(2);
+    let pixel_height = row_span * LAT_SCALE / pixel_rows.max(1) as f64;
     let start_y = (90.0 - LAT_MAX) * LAT_SCALE;
-    let lon_tolerance = VIEW_LON_SPAN / width as f64 * 0.4;
-    let lat_tolerance = row_span / height as f64 * 0.18;
+    let lon_tolerance = VIEW_LON_SPAN / pixel_cols.max(1) as f64 * 0.4;
+    let lat_tolerance = row_span / pixel_rows.max(1) as f64 * 0.18;
     let (sun_lat, sun_lon) = subsolar_point(unix_secs);
-    let mut rows = Vec::with_capacity(height);
+    let mut pixels = vec![0; pixel_cols.saturating_mul(pixel_rows)];
 
-    for y in 0..height {
-        let top = start_y + (y * 2) as f64 * half_height;
-        let lat = LAT_MAX - (y as f64 + 0.5) / height as f64 * row_span;
+    for py in 0..pixel_rows {
+        let top = start_y + py as f64 * pixel_height;
+        let lat = LAT_MAX - (py as f64 + 0.5) / pixel_rows as f64 * row_span;
         let on_parallel = near_grid(lat, 30.0, lat_tolerance);
-        let mut runs = Vec::new();
-        let mut run_text = String::with_capacity(width * 3);
-        let mut run_style = None;
-        let mut run_start = 0;
-
-        for x in 0..width {
-            let left = start_x + x as f64 * cell_width;
-            let lon = wrap_lon((left + cell_width * 0.5) / LON_SCALE - 180.0);
-            let lighting = lighting_at(lat, lon, sun_lat, sun_lon);
-            let top_fraction =
-                land_fraction(left, top, left + cell_width, top + half_height).clamp(0.0, 1.0);
-            let bottom_fraction = land_fraction(
-                left,
-                top + half_height,
-                left + cell_width,
-                top + half_height * 2.0,
-            )
-            .clamp(0.0, 1.0);
-            let coverage = (top_fraction + bottom_fraction) * 0.5;
-            let (mut glyph, base_color) = if coverage <= 0.01 {
-                let on_meridian = near_grid(lon, 30.0, lon_tolerance);
-                if on_parallel && on_meridian {
-                    ('+', theme::ACCENT)
-                } else if on_parallel {
-                    ('─', theme::GUIDE)
-                } else if on_meridian {
-                    ('·', theme::GUIDE)
-                } else {
-                    (' ', theme::GUIDE)
+        for px in 0..pixel_cols {
+            let left = origin_x + px as f64 * half_width;
+            let lon = wrap_lon((left + half_width * 0.5) / LON_SCALE - 180.0);
+            let coverage =
+                land_fraction(left, top, left + half_width, top + pixel_height).clamp(0.0, 1.0);
+            let light = lighting_factor(lat, lon, sun_lat, sun_lon);
+            if let Some(index) = pixel_index(pixel_cols, px, py) {
+                if let Some(slot) = pixels.get_mut(index) {
+                    *slot = sample_pixel(coverage, light, lon, on_parallel, lon_tolerance);
                 }
-            } else if coverage >= 0.99 {
-                (pick_glyph(top_fraction, bottom_fraction), theme::LAND)
-            } else {
-                (pick_glyph(top_fraction, bottom_fraction), theme::COAST)
-            };
-            // Open ocean is blank; force a mid-dot so the terminator stays visible.
-            if lighting == Lighting::Twilight && glyph == ' ' {
-                glyph = '·';
             }
-            let color = light_glyph_color(base_color, lighting);
-            let background = sea_background(lighting);
-
-            if run_style.is_some_and(|(fg, bg)| fg != color || bg != background) {
-                if let Some((fg, bg)) = run_style {
-                    runs.push(MapRun {
-                        x: run_start as isize,
-                        text: std::mem::take(&mut run_text),
-                        color: fg,
-                        background: bg,
-                    });
-                }
-                run_start = x;
-            }
-            run_style = Some((color, background));
-            run_text.push(glyph);
         }
-        if !run_text.is_empty()
-            && let Some((fg, bg)) = run_style
-        {
-            runs.push(MapRun {
-                x: run_start as isize,
-                text: run_text,
-                color: fg,
-                background: bg,
-            });
-        }
-        rows.push(MapRow { runs });
     }
 
     MapCache {
-        start_column,
+        origin_x,
         width,
         height,
         sun_minute: unix_secs / 60,
-        rows,
+        pixels,
     }
 }
 
 /// Paint the world map into `rect` of the offscreen frame.
 ///
-/// The projection is cached in `cache` and only rebuilt when the viewport
-/// geometry or the solar minute changes, so panning costs a framebuffer blit
-/// plus an occasional geographic resample rather than a full widget layout.
+/// The 32-bit window is cached in `cache` and only rebuilt when the fractional
+/// origin, viewport geometry, or solar minute changes. Copying the window into
+/// cells is what produces Unicode half-blocks.
 pub(crate) fn paint_world_map(
     frame: &mut Frame,
     rect: Rect,
@@ -814,69 +869,151 @@ pub(crate) fn paint_world_map(
     }
     let unix_secs = map_unix_secs();
     let sun_minute = unix_secs / 60;
-    let start_column =
-        ((wrap_lon(center_lon - VIEW_LON_SPAN / 2.0) + 180.0) * LON_SCALE).round() as i32;
-    let start_column = start_column.rem_euclid(MAP_W as i32);
+    let origin_x = map_origin_x(center_lon);
     let cache_matches = cache.as_ref().is_some_and(|cached| {
-        cached.start_column == start_column
+        same_origin(cached.origin_x, origin_x)
             && cached.width == width
             && cached.height == height
             && cached.sun_minute == sun_minute
     });
     if !cache_matches {
-        *cache = Some(build_map_cache(start_column, width, height, unix_secs));
+        *cache = Some(build_map_cache(origin_x, width, height, unix_secs));
     }
     let Some(cached) = cache.as_ref() else {
         return;
     };
-    paint_map_rows(frame, rect, &cached.rows);
-    draw_map_overlays(
-        frame,
-        rect,
-        center_lon,
-        width,
-        height,
-        selected_zone,
-        &cached.rows,
-    );
+    paint_map_cells(frame, rect, cached);
+    draw_map_overlays(frame, rect, selected_zone, cached);
 }
 
-fn paint_map_rows(frame: &mut Frame, rect: Rect, rows: &[MapRow]) {
+fn mono_glyph(pixel: u32) -> char {
+    let color = snap_theme(pixel);
+    if color == theme::LAND || color == theme::LAND_NIGHT {
+        '#'
+    } else if color == theme::COAST
+        || color == theme::COAST_NIGHT
+        || color == theme::GUIDE
+        || color == theme::GUIDE_NIGHT
+        || color == theme::ACCENT
+    {
+        '+'
+    } else if color == theme::TERMINATOR {
+        '*'
+    } else if color == theme::SEA_NIGHT {
+        '.'
+    } else {
+        '~'
+    }
+}
+
+fn mono_rank(glyph: char) -> u8 {
+    match glyph {
+        '#' => 4,
+        '+' => 3,
+        '*' => 2,
+        '~' => 1,
+        _ => 0,
+    }
+}
+
+fn cell_quad(cache: &MapCache, x: usize, y: usize) -> Option<[u32; 4]> {
+    let pixel_width = cache.pixel_width();
+    let px = x.saturating_mul(2);
+    let py = y.saturating_mul(2);
+    let tl = pixel_at(&cache.pixels, pixel_width, px, py)?;
+    let tr = pixel_at(&cache.pixels, pixel_width, px.saturating_add(1), py).unwrap_or(tl);
+    let bl = pixel_at(&cache.pixels, pixel_width, px, py.saturating_add(1)).unwrap_or(tl);
+    let br = pixel_at(
+        &cache.pixels,
+        pixel_width,
+        px.saturating_add(1),
+        py.saturating_add(1),
+    )
+    .unwrap_or(tr);
+    Some([tl, tr, bl, br])
+}
+
+fn half_block(quad: [u32; 4]) -> (char, Option<Color>, Option<Color>) {
+    let [tl, tr, bl, br] = quad;
+    if color_mode() == ColorMode::Mono {
+        let glyphs = [
+            mono_glyph(tl),
+            mono_glyph(tr),
+            mono_glyph(bl),
+            mono_glyph(br),
+        ];
+        let glyph = glyphs
+            .into_iter()
+            .max_by_key(|glyph| mono_rank(*glyph))
+            .unwrap_or('~');
+        return (glyph, None, None);
+    }
+    let top_left = snap_pixel(tl);
+    let top_right = snap_pixel(tr);
+    let bottom_left = snap_pixel(bl);
+    let bottom_right = snap_pixel(br);
+    if top_left == top_right && top_left == bottom_left && top_left == bottom_right {
+        return ('█', Some(top_left), Some(top_left));
+    }
+    if top_left == top_right && bottom_left == bottom_right {
+        return ('▀', Some(top_left), Some(bottom_left));
+    }
+    if top_left == bottom_left && top_right == bottom_right {
+        return ('▌', Some(top_left), Some(top_right));
+    }
+    if bottom_left == bottom_right && top_left != top_right {
+        return ('▄', Some(bottom_left), Some(top_left));
+    }
+    if top_right == bottom_right && top_left != bottom_left {
+        return ('▐', Some(top_right), Some(top_left));
+    }
+    let vertical = u8::from(top_left == top_right) + u8::from(bottom_left == bottom_right);
+    let horizontal = u8::from(top_left == bottom_left) + u8::from(top_right == bottom_right);
+    if vertical >= horizontal {
+        ('▀', Some(top_left), Some(bottom_left))
+    } else {
+        ('▌', Some(top_left), Some(top_right))
+    }
+}
+
+fn paint_map_cells(frame: &mut Frame, rect: Rect, cache: &MapCache) {
     let mut buffer = frame.buffer_mut();
-    for (y, row) in rows.iter().enumerate() {
-        let abs_y = rect.y.saturating_add(u16::try_from(y).unwrap_or(u16::MAX));
-        for run in &row.runs {
-            for (offset, ch) in run.text.chars().enumerate() {
-                let local_x = u16::try_from(run.x.saturating_add(offset as isize)).unwrap_or(0);
-                let abs_x = rect.x.saturating_add(local_x);
-                if let Some(cell) = buffer.cell_mut((abs_x, abs_y)) {
-                    cell.set_char(ch)
-                        .set_style(Style::default().fg(run.color).bg(run.background));
+    for y in 0..cache.height {
+        let Ok(row) = u16::try_from(y) else {
+            break;
+        };
+        let abs_y = rect.y.saturating_add(row);
+        for x in 0..cache.width {
+            let Some(quad) = cell_quad(cache, x, y) else {
+                continue;
+            };
+            let (glyph, fg, bg) = half_block(quad);
+            let Ok(col) = u16::try_from(x) else {
+                continue;
+            };
+            let abs_x = rect.x.saturating_add(col);
+            if let Some(cell) = buffer.cell_mut((abs_x, abs_y)) {
+                let mut style = Style::default();
+                if let Some(fg) = fg {
+                    style = style.fg(fg);
                 }
+                if let Some(bg) = bg {
+                    style = style.bg(bg);
+                }
+                cell.set_char(glyph).set_style(style);
             }
         }
     }
 }
 
-/// Project a geographic point into map cell coordinates for the current view.
-fn project_map_point(
-    center_lon: f64,
-    lat: f64,
-    lon: f64,
-    width: usize,
-    height: usize,
-) -> Option<(isize, isize)> {
-    if !(LAT_MIN..=LAT_MAX).contains(&lat) {
-        return None;
-    }
-    let x = ((lon_delta(center_lon, lon) + VIEW_LON_SPAN / 2.0) / VIEW_LON_SPAN * width as f64)
-        .floor() as isize;
-    let y = ((LAT_MAX - lat) / (LAT_MAX - LAT_MIN) * height as f64).floor() as usize;
-    let y = y.min(height.saturating_sub(1)) as isize;
-    if x < 0 || x >= width as isize {
-        return None;
-    }
-    Some((x, y))
+/// Fractional cell projection of a geographic point in the current view.
+#[derive(Clone, Copy)]
+struct MapProj {
+    cell_x: isize,
+    cell_y: isize,
+    /// Offset within the cell, in `[0, 1)`.
+    frac_x: f64,
+    frac_y: f64,
 }
 
 /// Axis-aligned occupancy used to avoid stacking city labels on top of each other.
@@ -903,28 +1040,109 @@ impl OccupiedRect {
     }
 }
 
-fn cell_background(rows: &[MapRow], x: isize, y: isize) -> Color {
-    let Some(row) = usize::try_from(y).ok().and_then(|y| rows.get(y)) else {
+fn cell_quad_colors(cache: &MapCache, x: isize, y: isize) -> [Color; 4] {
+    let Ok(x) = usize::try_from(x) else {
+        return [theme::SEA; 4];
+    };
+    let Ok(y) = usize::try_from(y) else {
+        return [theme::SEA; 4];
+    };
+    let Some([tl, tr, bl, br]) = cell_quad(cache, x, y) else {
+        return [theme::SEA; 4];
+    };
+    [
+        snap_pixel(tl),
+        snap_pixel(tr),
+        snap_pixel(bl),
+        snap_pixel(br),
+    ]
+}
+
+fn cell_background(cache: &MapCache, x: isize, y: isize) -> Color {
+    let Ok(x) = usize::try_from(x) else {
         return theme::SEA;
     };
-    for run in &row.runs {
-        let start = run.x;
-        let end = start.saturating_add(run.text.chars().count() as isize);
-        if x >= start && x < end {
-            return run.background;
-        }
+    let Ok(y) = usize::try_from(y) else {
+        return theme::SEA;
+    };
+    let Some(quad) = cell_quad(cache, x, y) else {
+        return theme::SEA;
+    };
+    half_block(quad).2.unwrap_or(theme::SEA)
+}
+
+fn marker_background(cache: &MapCache, proj: MapProj, glyph: char) -> Color {
+    let [tl, tr, bl, br] = cell_quad_colors(cache, proj.cell_x, proj.cell_y);
+    match glyph {
+        '\u{2584}' | '\u{2590}' => tl,
+        '\u{258c}' => tr,
+        '\u{2580}' => bl,
+        _ => br,
     }
-    theme::SEA
+}
+
+/// Pick a CP437 half-block so a marker can sit on a half-cell.
+fn marker_glyph(frac_x: f64, frac_y: f64) -> char {
+    let dx = frac_x - 0.5;
+    let dy = frac_y - 0.5;
+    if dx.abs() <= 0.25 && dy.abs() <= 0.25 {
+        return '\u{2588}';
+    }
+    if dy.abs() >= dx.abs() {
+        if dy < 0.0 { '\u{2580}' } else { '\u{2584}' }
+    } else if dx < 0.0 {
+        '\u{258c}'
+    } else {
+        '\u{2590}'
+    }
+}
+
+fn put_marker(
+    frame: &mut Frame,
+    cache: &MapCache,
+    rect: Rect,
+    proj: MapProj,
+    fg: Color,
+    bold: bool,
+) {
+    let Ok(row) = u16::try_from(proj.cell_y) else {
+        return;
+    };
+    let Ok(col) = u16::try_from(proj.cell_x) else {
+        return;
+    };
+    let abs_y = rect.y.saturating_add(row);
+    let abs_x = rect.x.saturating_add(col);
+    let mono = color_mode() == ColorMode::Mono;
+    let (glyph, style) = if mono {
+        let glyph = if bold { 'X' } else { '*' };
+        let style = if bold {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        (glyph, style)
+    } else {
+        let glyph = marker_glyph(proj.frac_x, proj.frac_y);
+        let bg = marker_background(cache, proj, glyph);
+        let mut style = Style::default().fg(fg).bg(bg);
+        if bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        (glyph, style)
+    };
+    if let Some(cell) = frame.buffer_mut().cell_mut((abs_x, abs_y)) {
+        cell.set_char(glyph).set_style(style);
+    }
 }
 
 fn put_text(
     frame: &mut Frame,
-    rows: &[MapRow],
+    cache: &MapCache,
     rect: Rect,
     pos: (isize, isize),
     text: &str,
     fg: Color,
-    invert: bool,
 ) {
     let (x, y) = pos;
     let Ok(row) = u16::try_from(y) else {
@@ -939,13 +1157,10 @@ fn put_text(
         };
         let abs_x = rect.x.saturating_add(col);
         if let Some(cell) = buffer.cell_mut((abs_x, abs_y)) {
-            let cell_bg = cell_background(rows, local_x, y);
-            let style = if invert {
+            let style = if color_mode() == ColorMode::Mono {
                 Style::default()
-                    .fg(cell_bg)
-                    .bg(fg)
-                    .add_modifier(Modifier::BOLD)
             } else {
+                let cell_bg = cell_background(cache, local_x, y);
                 Style::default().fg(fg).bg(cell_bg)
             };
             cell.set_char(ch).set_style(style);
@@ -957,18 +1172,17 @@ fn put_text(
 fn draw_map_overlays(
     frame: &mut Frame,
     rect: Rect,
-    center_lon: f64,
-    width: usize,
-    height: usize,
     selected_zone: Option<&MapPoint>,
-    rows: &[MapRow],
+    cache: &MapCache,
 ) {
+    let width = cache.width;
+    let height = cache.height;
     let mut occupied = Vec::new();
 
     // Reserve the selected pin first so city labels defer to it.
-    let selected_cell = selected_zone
-        .and_then(|zone| project_map_point(center_lon, zone.lat, zone.lon, width, height));
-    if let Some((x, y)) = selected_cell {
+    let selected_proj = selected_zone.and_then(|zone| cache.project(zone.lat, zone.lon));
+    if let Some(proj) = selected_proj {
+        let (x, y) = (proj.cell_x, proj.cell_y);
         occupied.push(OccupiedRect::new(x, y, 1, 1));
         if let Some(zone) = selected_zone
             && !zone.label.is_empty()
@@ -989,12 +1203,16 @@ fn draw_map_overlays(
     let show_legend = width >= LEGEND_MIN_WIDTH && height >= LEGEND_MIN_HEIGHT;
     if show_legend {
         // Glyph key matching the overlays painted above the basemap.
-        let legend = "X pin  * city  · dusk";
+        let legend = if color_mode() == ColorMode::Mono {
+            "X pin  * city"
+        } else {
+            "\u{2588} pin  \u{2588} city"
+        };
         let legend_width = legend.chars().count();
         if legend_width <= width {
             let y = y_local(height, height as isize - 1);
             occupied.push(OccupiedRect::new(0, y, legend_width, 1));
-            put_text(frame, rows, rect, (0, y), legend, theme::MUTED, false);
+            put_text(frame, cache, rect, (0, y), legend, theme::MUTED);
         }
     }
 
@@ -1003,12 +1221,12 @@ fn draw_map_overlays(
         // Density scales with map width so compact views stay sparse.
         let min_gap = if width >= 70 { 5 } else { 7 };
         for &(label, lat, lon) in CITY_LABELS {
-            let Some((x, y)) = project_map_point(center_lon, lat, lon, width, height) else {
+            let Some(proj) = cache.project(lat, lon) else {
                 continue;
             };
-            // Require room for marker + full short name; skip rather than paint a bare "*".
-            let text = format!("*{label}");
-            let text_width = text.chars().count() as isize;
+            let (x, y) = (proj.cell_x, proj.cell_y);
+            // Require room for marker + full short name; skip rather than paint a bare mark.
+            let text_width = label.chars().count().saturating_add(1) as isize;
             if x + text_width > width as isize {
                 continue;
             }
@@ -1024,19 +1242,21 @@ fn draw_map_overlays(
                 continue;
             }
             occupied.push(placed);
-            put_text(frame, rows, rect, (x, y), &text, theme::ACCENT, false);
+            put_marker(frame, cache, rect, proj, theme::ACCENT, false);
+            put_text(frame, cache, rect, (x + 1, y), label, theme::ACCENT);
         }
     }
 
     // Selection pin is painted last so it always wins over city labels.
-    if let (Some(zone), Some((x, y))) = (selected_zone, selected_cell) {
-        put_text(frame, rows, rect, (x, y), "X", theme::WARNING, true);
+    if let (Some(zone), Some(proj)) = (selected_zone, selected_proj) {
+        put_marker(frame, cache, rect, proj, theme::WARNING, true);
+        let (x, y) = (proj.cell_x, proj.cell_y);
         if !zone.label.is_empty() && x + 1 < width as isize {
             let avail = (width as isize - (x + 1)) as usize;
             let mut label = String::from(" ");
             label.extend(zone.label.chars().take(avail.saturating_sub(1)));
             if label.chars().count() > 1 {
-                put_text(frame, rows, rect, (x + 1, y), &label, theme::WARNING, false);
+                put_text(frame, cache, rect, (x + 1, y), &label, theme::WARNING);
             }
         }
     }
@@ -1044,5 +1264,6 @@ fn draw_map_overlays(
 
 /// Clamp a local y coordinate into the visible map band.
 fn y_local(height: usize, value: isize) -> isize {
-    value.clamp(0, height as isize - 1)
+    let max = isize::try_from(height.saturating_sub(1)).unwrap_or(0);
+    value.clamp(0, max)
 }

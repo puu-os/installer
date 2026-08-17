@@ -151,8 +151,8 @@ pub(crate) struct TimezoneDraft {
     pub(crate) selected: usize,
     pub(crate) top: usize,
     pub(crate) filtered: Vec<usize>,
-    pub(crate) map_center_lon_milli: i32,
-    pub(crate) map_target_lon_milli: i32,
+    pub(crate) map_center_lon: f64,
+    pub(crate) map_target_lon: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

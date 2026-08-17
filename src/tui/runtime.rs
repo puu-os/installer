@@ -1291,10 +1291,7 @@ fn service(controller: &mut UiController) -> bool {
 }
 
 fn poll_interval(controller: &UiController) -> Duration {
-    if controller.state.route == Route::Timezone
-        && controller.state.timezone.map_center_lon_milli
-            != controller.state.timezone.map_target_lon_milli
-    {
+    if controller.state.route == Route::Timezone && timezone::map_is_panning(&controller.state) {
         MAP_FRAME_INTERVAL
     } else if controller.state.route == Route::Install
         && controller.state.install.status.is_running()
@@ -1980,7 +1977,7 @@ fn draw_world_map_panel(
         rect.width.saturating_sub(2),
         rect.height.saturating_sub(2),
     );
-    let center_lon = f64::from(controller.state.timezone.map_center_lon_milli) / 1000.0;
+    let center_lon = controller.state.timezone.map_center_lon;
     let selected = timezone::selected_zone(&controller.state);
     timezone::paint_world_map(frame, inner, map_cache, center_lon, selected.as_ref());
 }
