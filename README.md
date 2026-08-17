@@ -85,7 +85,8 @@ kernel:
 
 ## Development
 
-Run the same checks used before a release:
+Run the same checks used before a release. On non-Linux hosts this
+builds and lints `x86_64-unknown-linux-musl` via `cargo-zigbuild`:
 
 ```sh
 make ci

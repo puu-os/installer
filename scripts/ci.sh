@@ -22,6 +22,9 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" \
   || die "not inside a Git repository"
 cd "$repo_root"
 
+# shellcheck source=linux-cargo.sh
+source "$repo_root/scripts/linux-cargo.sh"
+
 printf '==> package target selection test\n'
 ./scripts/package-target-test.sh
 
@@ -29,12 +32,12 @@ printf '==> sha256 sidecar test\n'
 ./scripts/sha256-test.sh
 
 printf '==> cargo build\n'
-$CARGO build
+linux_cargo build
 
 printf '==> cargo clippy\n'
-$CARGO clippy --all-targets -- -D warnings
+linux_cargo clippy --all-targets -- -D warnings
 
 printf '==> cargo fmt --check\n'
-$CARGO fmt --check
+"$CARGO" fmt --check
 
 printf 'local CI passed\n'
