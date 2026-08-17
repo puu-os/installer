@@ -123,13 +123,6 @@ pub enum UserShell {
 }
 
 impl UserShell {
-    pub const fn toggle(self) -> Self {
-        match self {
-            Self::Bash => Self::Zsh,
-            Self::Zsh => Self::Bash,
-        }
-    }
-
     pub const fn path(self) -> &'static str {
         match self {
             Self::Bash => "/bin/bash",

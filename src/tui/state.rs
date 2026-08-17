@@ -11,13 +11,37 @@ use crate::engine::config::UserShell;
 use crate::engine::firmware::SetupMode;
 use crate::tui::message::DriveInfo;
 
-fn wrap_choice<const N: usize, T: Copy + PartialEq>(all: [T; N], current: T, backwards: bool) -> T {
+pub(crate) trait Cyclic: Copy + PartialEq + Sized + 'static {
+    const ALL: &'static [Self];
+
+    fn next(self) -> Self {
+        wrap_choice(Self::ALL, self, false)
+    }
+
+    fn previous(self) -> Self {
+        wrap_choice(Self::ALL, self, true)
+    }
+
+    fn cycle(self, backwards: bool) -> Self {
+        wrap_choice(Self::ALL, self, backwards)
+    }
+
+    fn toggle(self) -> Self {
+        self.next()
+    }
+
+    fn from_hit_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+}
+
+fn wrap_choice<T: Copy + PartialEq>(all: &[T], current: T, backwards: bool) -> T {
     let Some(index) = all.iter().position(|&item| item == current) else {
         return current;
     };
     let next = if backwards {
-        index.checked_sub(1).unwrap_or(N.saturating_sub(1))
-    } else if index + 1 < N {
+        index.checked_sub(1).unwrap_or(all.len().saturating_sub(1))
+    } else if index + 1 < all.len() {
         index + 1
     } else {
         0
@@ -36,8 +60,8 @@ pub(crate) enum IdentityField {
     Shell,
 }
 
-impl IdentityField {
-    const ALL: [Self; 6] = [
+impl Cyclic for IdentityField {
+    const ALL: &'static [Self] = &[
         Self::Language,
         Self::Hostname,
         Self::Username,
@@ -45,20 +69,6 @@ impl IdentityField {
         Self::RepeatedPassword,
         Self::Shell,
     ];
-
-    pub(crate) fn next(self) -> Self {
-        wrap_choice(Self::ALL, self, false)
-    }
-
-    pub(crate) fn previous(self) -> Self {
-        wrap_choice(Self::ALL, self, true)
-    }
-
-    /// Map a click or scroll index onto a field. Out-of-range values clamp to
-    /// the last field, matching the previous `index.min(5)` hit-test contract.
-    pub(crate) fn from_hit_index(index: usize) -> Self {
-        Self::ALL.get(index).copied().unwrap_or(Self::Shell)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -76,8 +86,8 @@ pub(crate) enum LocaleChoice {
     It,
 }
 
-impl LocaleChoice {
-    const ALL: [Self; 10] = [
+impl Cyclic for LocaleChoice {
+    const ALL: &'static [Self] = &[
         Self::EnUs,
         Self::EnGb,
         Self::Fi,
@@ -89,11 +99,9 @@ impl LocaleChoice {
         Self::Es,
         Self::It,
     ];
+}
 
-    pub(crate) fn cycle(self, backwards: bool) -> Self {
-        wrap_choice(Self::ALL, self, backwards)
-    }
-
+impl LocaleChoice {
     pub(crate) const fn label(self) -> &'static str {
         self.entry().0
     }
@@ -132,6 +140,10 @@ pub(crate) struct IdentityDraft {
     pub(crate) reveal_password: bool,
 }
 
+impl Cyclic for UserShell {
+    const ALL: &'static [Self] = &[Self::Bash, Self::Zsh];
+}
+
 /// Persistent state for the filterable timezone picker.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TimezoneDraft {
@@ -159,22 +171,8 @@ pub(crate) enum WelcomeChoice {
     Reboot,
 }
 
-impl WelcomeChoice {
-    const ALL: [Self; 3] = [Self::Install, Self::Shell, Self::Reboot];
-
-    pub(crate) fn next(self) -> Self {
-        wrap_choice(Self::ALL, self, false)
-    }
-
-    pub(crate) fn previous(self) -> Self {
-        wrap_choice(Self::ALL, self, true)
-    }
-
-    /// Map a click index onto a choice. Out-of-range values clamp to the last
-    /// choice, matching the previous `index.min(2)` hit-test contract.
-    pub(crate) fn from_hit_index(index: usize) -> Self {
-        Self::ALL.get(index).copied().unwrap_or(Self::Reboot)
-    }
+impl Cyclic for WelcomeChoice {
+    const ALL: &'static [Self] = &[Self::Install, Self::Shell, Self::Reboot];
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -184,14 +182,11 @@ pub(crate) enum ModalChoice {
     Yes,
 }
 
-impl ModalChoice {
-    pub(crate) const fn toggle(self) -> Self {
-        match self {
-            Self::No => Self::Yes,
-            Self::Yes => Self::No,
-        }
-    }
+impl Cyclic for ModalChoice {
+    const ALL: &'static [Self] = &[Self::No, Self::Yes];
+}
 
+impl ModalChoice {
     pub(crate) const fn is_yes(self) -> bool {
         matches!(self, Self::Yes)
     }
@@ -204,23 +199,8 @@ pub(crate) enum ReviewChoice {
     Start,
 }
 
-impl ReviewChoice {
-    pub(crate) const fn toggle(self) -> Self {
-        match self {
-            Self::Back => Self::Start,
-            Self::Start => Self::Back,
-        }
-    }
-
-    /// Map a click index onto a choice. Out-of-range values are rejected,
-    /// matching the previous `index > 1` hit-test contract.
-    pub(crate) fn from_hit_index(index: usize) -> Option<Self> {
-        match index {
-            0 => Some(Self::Back),
-            1 => Some(Self::Start),
-            _ => None,
-        }
-    }
+impl Cyclic for ReviewChoice {
+    const ALL: &'static [Self] = &[Self::Back, Self::Start];
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -230,23 +210,8 @@ pub(crate) enum RebootChoice {
     Now,
 }
 
-impl RebootChoice {
-    pub(crate) const fn toggle(self) -> Self {
-        match self {
-            Self::Shell => Self::Now,
-            Self::Now => Self::Shell,
-        }
-    }
-
-    /// Map a click index onto a choice. Out-of-range values are rejected,
-    /// matching the previous `index > 1` hit-test contract.
-    pub(crate) fn from_hit_index(index: usize) -> Option<Self> {
-        match index {
-            0 => Some(Self::Shell),
-            1 => Some(Self::Now),
-            _ => None,
-        }
-    }
+impl Cyclic for RebootChoice {
+    const ALL: &'static [Self] = &[Self::Shell, Self::Now];
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -24,8 +24,8 @@ use crate::tui::render::{
     Style, Terminal, install_panic_hook, mouse_kind, poll_input, tui_or_exit,
 };
 use crate::tui::state::{
-    AppState, IdentityDraft, IdentityField, InstallStatus, InstallStepState, LocaleChoice, Modal,
-    ModalChoice, RebootChoice, ReviewChoice, Route, SecureBootChoice, WelcomeChoice,
+    AppState, Cyclic, IdentityDraft, IdentityField, InstallStatus, InstallStepState, LocaleChoice,
+    Modal, ModalChoice, RebootChoice, ReviewChoice, Route, SecureBootChoice, WelcomeChoice,
 };
 use crate::tui::theme;
 use crate::tui::timezone;
@@ -478,7 +478,9 @@ fn scroll_mouse(state: &mut AppState, direction: ScrollDirection) {
 fn click_select(state: &mut AppState, index: usize) -> Vec<Effect> {
     match state.route {
         Route::Welcome => {
-            let choice = WelcomeChoice::from_hit_index(index);
+            let choice = WelcomeChoice::from_hit_index(index)
+                .or_else(|| WelcomeChoice::ALL.last().copied())
+                .unwrap_or(WelcomeChoice::Reboot);
             if state.selection.welcome == choice {
                 return activate_enter(state);
             }
@@ -495,7 +497,12 @@ fn click_select(state: &mut AppState, index: usize) -> Vec<Effect> {
         }
         Route::Identity => {
             if let Some(draft) = state.identity.as_mut() {
-                focus_identity_field(draft, IdentityField::from_hit_index(index));
+                focus_identity_field(
+                    draft,
+                    IdentityField::from_hit_index(index)
+                        .or_else(|| IdentityField::ALL.last().copied())
+                        .unwrap_or(IdentityField::Shell),
+                );
             }
         }
         Route::Timezone => {
