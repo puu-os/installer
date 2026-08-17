@@ -28,6 +28,7 @@ cleanup() {
 			"refs/tags/$signing_check_tag" >/dev/null; then
 		git tag -d "$signing_check_tag" >/dev/null 2>&1 || true
 	fi
+	rm -f Cargo.toml.next
 	if (( status != 0 && !committed )); then
 		git restore -- Cargo.toml Cargo.lock 2>/dev/null || true
 	fi
@@ -61,10 +62,21 @@ git tag -s "$signing_check_tag" -m "puu-installer release signing check" \
 git tag -d "$signing_check_tag" >/dev/null
 signing_check_tag=""
 
-pkg="$(sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]\+\)".*/\1/p' Cargo.toml | head -1)"
+toml_string() {
+	awk -v key="$1" '
+		$0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+			if (match($0, /"[^"]+"/)) {
+				print substr($0, RSTART + 1, RLENGTH - 2)
+				exit
+			}
+		}
+	' Cargo.toml
+}
+
+pkg="$(toml_string name)"
 [[ -n "$pkg" ]] || die "cannot find package name in Cargo.toml"
 
-cur_ver="$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/p' Cargo.toml | head -1)"
+cur_ver="$(toml_string version)"
 [[ -n "$cur_ver" ]] || die "cannot find version in Cargo.toml"
 
 [[ "$cur_ver" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] \
@@ -76,7 +88,14 @@ cur_c="${BASH_REMATCH[3]}"
 ver_gt "$next_a" "$next_b" "$next_c" "$cur_a" "$cur_b" "$cur_c" \
 	|| die "$next_ver is not greater than current $cur_ver"
 
-sed -i -E "0,/(^[[:space:]]*version[[:space:]]*=[[:space:]]*\")${cur_ver//./\\.}(\")/s//\1$next_ver\2/" Cargo.toml
+awk -v cur="$cur_ver" -v nxt="$next_ver" '
+	!done && $0 ~ /^[[:space:]]*version[[:space:]]*=[[:space:]]*"/ {
+		sub("\"" cur "\"", "\"" nxt "\"")
+		done = 1
+	}
+	{ print }
+' Cargo.toml > Cargo.toml.next
+mv Cargo.toml.next Cargo.toml
 grep -q "^version = \"$next_ver\"" Cargo.toml \
 	|| die "failed to update version in Cargo.toml"
 
