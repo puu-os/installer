@@ -5,8 +5,9 @@ use std::collections::VecDeque;
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::io::{self, BufRead, BufReader};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -190,7 +191,7 @@ impl<'a> Command<'a> {
         .with_context(|| format!("failed to spawn {}", self.program.to_string_lossy()))?;
         let (tx, rx) = mpsc::sync_channel::<String>(OUTPUT_QUEUE_CAPACITY);
 
-        let reader_thread = std::thread::spawn(move || -> i32 {
+        let reader_thread = std::thread::spawn(move || -> io::Result<ExitStatus> {
             for line in BufReader::new(&reader)
                 .lines()
                 .map_while(std::result::Result::ok)
@@ -200,11 +201,11 @@ impl<'a> Command<'a> {
                 }
             }
             // The read above ran to EOF, so the child has been reaped and
-            // `try_wait` is guaranteed to report its exit status.
-            match reader.try_wait() {
-                Ok(Some(output)) => output.status.code().unwrap_or(-1),
-                _ => -1,
-            }
+            // `try_wait` should report its exit status.
+            reader
+                .try_wait()?
+                .map(|output| output.status)
+                .ok_or_else(|| io::Error::other("child exit status was not available after EOF"))
         });
 
         let started = Instant::now();
@@ -252,16 +253,26 @@ impl<'a> Command<'a> {
             }
         }
 
-        let rc = reader_thread
+        let status = reader_thread
             .join()
-            .map_err(|_| anyhow::anyhow!("command output reader thread panicked"))?;
-        if rc != 0 {
+            .map_err(|_| anyhow::anyhow!("command output reader thread panicked"))?
+            .with_context(|| format!("failed to wait for {command_line}"))?;
+        if !status.success() {
+            let reason = command_failure_reason(status);
             if let Some(last_line) = output_tail.back() {
-                bail!("command failed (exit {rc}): {last_line}\ncommand: {command_line}");
+                bail!("command failed ({reason}): {last_line}\ncommand: {command_line}");
             }
-            bail!("command failed (exit {rc}): {command_line}");
+            bail!("command failed ({reason}): {command_line}");
         }
         Ok(())
+    }
+}
+
+fn command_failure_reason(status: ExitStatus) -> String {
+    match (status.code(), status.signal()) {
+        (Some(code), _) => format!("exit {code}"),
+        (_, Some(signal)) => format!("killed by signal {signal}"),
+        _ => format!("{status}"),
     }
 }
 
