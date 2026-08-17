@@ -82,6 +82,42 @@ kernel:
 - **`configure-k3s-cluster`**: stages k3s cluster configuration (chrooted).
 - **`flatpak-sync`**: pre-seeds system Flatpaks (chrooted into the target).
 
+## Development
+
+Run the same checks used before a release:
+
+```sh
+make ci
+```
+
+`make package` archives `HEAD` and cross-compiles static musl binaries with
+[`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild). Host-native
+triples use plain `cargo`; other triples use Zig as the linker. Requires
+`cargo-zigbuild`, `zig`, and the matching `rustup` targets
+(`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`). Staging writes
+release tarballs under `artifacts/`:
+
+```sh
+make package
+make package PLATFORMS='linux-x64'
+PACKAGE_STRICT=1 make package
+```
+
+## Release
+
+Create the version commit and signed tag, push them, then package `HEAD` and
+publish the GitLab release:
+
+```sh
+scripts/release.sh <version>
+git push --atomic origin main <version>
+make ci
+PACKAGE_STRICT=1 make package
+make publish
+```
+
+`make publish` creates or updates the GitLab release with `glab`.
+
 ## Licensing
 
 `puu-installer` is licensed under the `GPL-2.0-or-later` license.

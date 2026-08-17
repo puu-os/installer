@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
-# Copyright (C) Jarkko Sakkinen 2026
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
 
 set -euo pipefail
 
@@ -18,9 +18,16 @@ ver_gt() {
 }
 
 committed=0
+signing_check_tag=""
 
 cleanup() {
 	local status=$?
+
+	if [[ -n "$signing_check_tag" ]] \
+		&& git rev-parse --verify --quiet \
+			"refs/tags/$signing_check_tag" >/dev/null; then
+		git tag -d "$signing_check_tag" >/dev/null 2>&1 || true
+	fi
 	if (( status != 0 && !committed )); then
 		git restore -- Cargo.toml Cargo.lock 2>/dev/null || true
 	fi
@@ -45,6 +52,14 @@ branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" \
 
 [[ -z "$(git tag -l "$next_ver")" ]] \
 	|| die "tag $next_ver already exists"
+
+signing_check_tag="puu-installer-signing-check-$next_ver-$$"
+[[ -z "$(git tag -l "$signing_check_tag")" ]] \
+	|| die "temporary signing-check tag already exists: $signing_check_tag"
+git tag -s "$signing_check_tag" -m "puu-installer release signing check" \
+	|| die "cannot sign release tags; renew or configure the Git signing key"
+git tag -d "$signing_check_tag" >/dev/null
+signing_check_tag=""
 
 pkg="$(sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]\+\)".*/\1/p' Cargo.toml | head -1)"
 [[ -n "$pkg" ]] || die "cannot find package name in Cargo.toml"
@@ -87,4 +102,7 @@ committed=1
 sob="Signed-off-by: $(git config user.name) <$(git config user.email)>"
 printf '%s %s\n\n%s\n\n%s\n' "$pkg" "$next_ver" "$log" "$sob" | git tag -s "$next_ver" -F -
 
-echo "tagged $next_ver"
+printf 'tagged %s\n' "$next_ver"
+printf 'push the commit and tag: git push --atomic origin %q %q\n' \
+	"HEAD:refs/heads/$branch" "refs/tags/$next_ver"
+printf 'then run: make ci && PACKAGE_STRICT=1 make package && make publish\n'

@@ -1,3 +1,4 @@
 /target/
+/artifacts/
 /.readseek
 !/todo.txt
