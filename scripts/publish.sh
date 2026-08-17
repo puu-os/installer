@@ -7,6 +7,10 @@
 
 set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=sha256.sh
+source "$script_dir/sha256.sh"
+
 GLAB="${GLAB:-glab}"
 platforms=(linux-arm64 linux-x64)
 
@@ -39,17 +43,6 @@ latest_semver_tag() {
     fi
   done < <(git tag --merged HEAD --sort=-v:refname)
   return 1
-}
-
-sha256_digest() {
-  local output
-
-  if command -v sha256sum >/dev/null 2>&1; then
-    output="$(sha256sum "$1")"
-  else
-    output="$(shasum -a 256 "$1")"
-  fi
-  printf '%s\n' "${output%% *}"
 }
 
 for command in file git tar; do

@@ -95,7 +95,7 @@ make ci
 triples use plain `cargo`; other triples use Zig as the linker. Requires
 `cargo-zigbuild`, `zig`, and the matching `rustup` targets
 (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`). Staging writes
-release tarballs under `artifacts/`:
+release tarballs and matching `<file>.sha256` sidecars under `artifacts/`:
 
 ```sh
 make package
@@ -116,7 +116,12 @@ PACKAGE_STRICT=1 make package
 make publish
 ```
 
-`make publish` creates or updates the GitLab release with `glab`.
+`make publish` creates or updates the GitLab release with `glab`, including
+each tarball and its `<file>.sha256` sidecar. Verify a download with:
+
+```sh
+sha256sum -c puu-installer-<version>-<platform>.tar.gz.sha256
+```
 
 ## Licensing
 

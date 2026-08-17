@@ -19,6 +19,8 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=package-target.sh
 source "$script_dir/package-target.sh"
+# shellcheck source=sha256.sh
+source "$script_dir/sha256.sh"
 
 CARGO="${CARGO:-cargo}"
 RUSTC="${RUSTC:-rustc}"
@@ -36,17 +38,6 @@ die() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
-}
-
-sha256_digest() {
-  local output
-
-  if command -v sha256sum >/dev/null 2>&1; then
-    output="$(sha256sum "$1")"
-  else
-    output="$(shasum -a 256 "$1")"
-  fi
-  printf '%s\n' "${output%% *}"
 }
 
 for command in "$CARGO" "$RUSTC" git tar "$FILE"; do
@@ -277,8 +268,7 @@ for platform in "${requested[@]}"; do
   tar -C "$(dirname "$source_bin")" -czf "artifacts/$asset" "$binary"
   printf '%s\n' "$(sha256_digest "$source_bin")" \
     >"artifacts/puu-installer-$version-$platform.bin.sha256"
-  printf '%s  %s\n' "$(sha256_digest "artifacts/$asset")" "$asset" \
-    >"artifacts/$asset.sha256"
+  write_sha256_sidecar "artifacts/$asset"
   built+=("$platform")
   printf 'packaged %s -> artifacts/%s\n' "$platform" "$asset"
 done

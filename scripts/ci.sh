@@ -25,6 +25,9 @@ cd "$repo_root"
 printf '==> package target selection test\n'
 ./scripts/package-target-test.sh
 
+printf '==> sha256 sidecar test\n'
+./scripts/sha256-test.sh
+
 printf '==> cargo build\n'
 $CARGO build
 
