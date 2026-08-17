@@ -21,6 +21,8 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/package-target.sh"
 # shellcheck source=sha256.sh
 source "$script_dir/sha256.sh"
+# shellcheck source=linux-cargo.sh
+source "$script_dir/linux-cargo.sh"
 
 CARGO="${CARGO:-cargo}"
 RUSTC="${RUSTC:-rustc}"
@@ -184,7 +186,9 @@ build_with_zigbuild() {
     export CARGO_HOME="$cargo_home"
     export CARGO_TARGET_DIR="$target_dir"
     export CARGO_ZIGBUILD_ZIG_PATH="$zig_path"
+    export CARGO_INCREMENTAL=0
     unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+    raise_nofile_limit
     "$CARGO_ZIGBUILD" zigbuild --release --target "$triple"
   )
 }
