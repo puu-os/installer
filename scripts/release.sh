@@ -19,6 +19,7 @@ ver_gt() {
 
 committed=0
 signing_check_tag=""
+zigcc=""
 
 cleanup() {
 	local status=$?
@@ -27,6 +28,9 @@ cleanup() {
 		&& git rev-parse --verify --quiet \
 			"refs/tags/$signing_check_tag" >/dev/null; then
 		git tag -d "$signing_check_tag" >/dev/null 2>&1 || true
+	fi
+	if [[ -n "$zigcc" ]]; then
+		rm -f "$zigcc"
 	fi
 	rm -f Cargo.toml.next
 	if (( status != 0 && !committed )); then
@@ -103,7 +107,22 @@ cargo metadata --format-version 1 >/dev/null
 grep -A2 "^name = \"$pkg\"" Cargo.lock | grep -q "^version = \"$next_ver\"" \
 	|| die "failed to update version in Cargo.lock"
 
-cargo clippy --all-targets --locked
+if [[ "$(uname -s)" == Linux ]]; then
+	cargo clippy --all-targets --locked
+else
+	# efivar and the rest of the crate are Linux-only. Lint the musl
+	# release target with zig cc so macOS hosts can cut a release.
+	command -v cargo-zigbuild >/dev/null 2>&1 \
+		|| die "cargo-zigbuild is required to lint on $(uname -s)"
+	rustup target list --installed | grep -Fxq x86_64-unknown-linux-musl \
+		|| die "rustup target x86_64-unknown-linux-musl is not installed"
+	zigcc="$(mktemp "${TMPDIR:-/tmp}/puu-zigcc.XXXXXX")"
+	printf '%s\n' '#!/bin/sh' \
+		'exec cargo-zigbuild zig cc -- -target x86_64-linux-musl "$@"' >"$zigcc"
+	chmod +x "$zigcc"
+	CC_x86_64_unknown_linux_musl="$zigcc" cargo clippy \
+		--target x86_64-unknown-linux-musl --all-targets --locked
+fi
 
 git rev-parse -q --verify "refs/tags/$cur_ver" >/dev/null \
 	|| die "current version tag $cur_ver does not exist"
