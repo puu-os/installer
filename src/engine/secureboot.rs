@@ -273,7 +273,7 @@ fn certificate_table_range(image: &[u8]) -> Result<Option<std::ops::Range<usize>
     if table_off == 0 || table_size == 0 {
         bail!("incomplete PE certificate table directory");
     }
-    if table_off % 8 != 0 {
+    if !table_off.is_multiple_of(8) {
         bail!("PE certificate table is not 8-byte aligned");
     }
     let table_end = table_off
@@ -426,7 +426,7 @@ pub fn sign_pe(image: &[u8], key_pem: &str, cert_pem: &str) -> Result<Vec<u8>> {
         out.truncate(table.start);
     }
     out[dir..dir + 8].fill(0);
-    while out.len() % 8 != 0 {
+    while !out.len().is_multiple_of(8) {
         out.push(0);
     }
 
@@ -621,9 +621,9 @@ fn write_auth_variable(name: &str, vendor_guid: &[u8; 16], payload: &[u8]) -> Re
 pub fn enroll_keys(keydir: &std::path::Path, owner_guid: &[u8; 16]) -> Result<()> {
     let read_pair = |kind: &str| -> Result<(PKey<Private>, X509)> {
         let dir = keydir.join(kind);
-        let key_pem = std::fs::read_to_string(dir.join(format!("{kind}.key")))
+        let key_pem = std::fs::read_to_string(dir.join(kind).with_extension("key"))
             .map_err(|e| anyhow!("failed to read {kind} key: {e}"))?;
-        let cert_pem = std::fs::read_to_string(dir.join(format!("{kind}.pem")))
+        let cert_pem = std::fs::read_to_string(dir.join(kind).with_extension("pem"))
             .map_err(|e| anyhow!("failed to read {kind} certificate: {e}"))?;
         load_key_and_cert(&key_pem, &cert_pem)
     };
@@ -783,10 +783,10 @@ pub fn ensure_sbctl_keys() -> Result<()> {
         let dir = keydir.join(kind);
         std::fs::create_dir_all(&dir)?;
         let (key_pem, cert_pem) = generate_sb_key(kind)?;
-        let key_path = dir.join(format!("{kind}.key"));
+        let key_path = dir.join(kind).with_extension("key");
         std::fs::write(&key_path, key_pem)?;
         std::fs::set_permissions(&key_path, PermissionsExt::from_mode(0o600))?;
-        std::fs::write(dir.join(format!("{kind}.pem")), cert_pem)?;
+        std::fs::write(dir.join(kind).with_extension("pem"), cert_pem)?;
     }
     let guid_path = target_sbctl_dir().join("GUID");
     if !guid_path.exists() {

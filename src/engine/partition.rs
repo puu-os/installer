@@ -4,9 +4,13 @@
 //! GPT partition-table creation and inspection, plus the derived partition
 //! geometry the install pipeline operates on.
 
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use uuid::Uuid;
 
 use crate::engine::config::PartitionSize;
 use crate::engine::util::random_bytes;
@@ -52,10 +56,11 @@ const PART_TYPE_LINUX: [u8; 16] = [
 /// Layout mirrors the previous `sgdisk` calls: EFI (`efi_size`) at the front,
 /// home (`home_size`) pinned to the end of the disk, and root filling the gap.
 pub fn partition_drive(
-    drive: &str,
+    drive: impl AsRef<Path>,
     efi_size: &PartitionSize,
     home_size: &PartitionSize,
 ) -> Result<PartitionLayout> {
+    let drive = drive.as_ref();
     let efi_bytes = efi_size.bytes();
     let home_bytes = home_size.bytes();
 
@@ -64,9 +69,9 @@ pub fn partition_drive(
         .write(true)
         .custom_flags(libc::O_EXCL)
         .open(drive)
-        .with_context(|| format!("failed to open {drive} for exclusive access"))?;
+        .with_context(|| format!("failed to open {} for exclusive access", drive.display()))?;
     let sector_size = gptman::linux::get_sector_size(&mut file)
-        .with_context(|| format!("failed to determine sector size of {drive}"))?;
+        .with_context(|| format!("failed to determine sector size of {}", drive.display()))?;
 
     let disk_guid = random_bytes::<16>()?;
     let mut gpt = gptman::GPT::new_from(&mut file, sector_size, disk_guid)?;
@@ -79,7 +84,7 @@ pub fn partition_drive(
 
     let start = gpt
         .find_first_place(efi_sectors)
-        .ok_or_else(|| anyhow::anyhow!("no room for EFI partition on {drive}"))?;
+        .ok_or_else(|| anyhow::anyhow!("no room for EFI partition on {}", drive.display()))?;
     set_entry(
         &mut gpt,
         1,
@@ -90,13 +95,13 @@ pub fn partition_drive(
     )?;
     let start = gpt
         .find_last_place(home_sectors)
-        .ok_or_else(|| anyhow::anyhow!("no room for home partition on {drive}"))?;
+        .ok_or_else(|| anyhow::anyhow!("no room for home partition on {}", drive.display()))?;
     let end = gpt.header.last_usable_lba;
     set_entry(&mut gpt, 3, PART_TYPE_LINUX, start, end, "home")?;
     let size = gpt.get_maximum_partition_size()?;
     let start = gpt
         .find_optimal_place(size)
-        .ok_or_else(|| anyhow::anyhow!("no room for root partition on {drive}"))?;
+        .ok_or_else(|| anyhow::anyhow!("no room for root partition on {}", drive.display()))?;
     set_entry(
         &mut gpt,
         2,
@@ -109,7 +114,8 @@ pub fn partition_drive(
     let part_bytes = |n: u32| (gpt[n].ending_lba - gpt[n].starting_lba + 1) * sector_size;
     tracing::info!(
         target: crate::engine::INSTALLATION_LOG_TARGET,
-        "wrote GPT to {drive}: EFI {}, root {}, home {}",
+        "wrote GPT to {}: EFI {}, root {}, home {}",
+        drive.display(),
         crate::engine::util::human_size(part_bytes(1)),
         crate::engine::util::human_size(part_bytes(2)),
         crate::engine::util::human_size(part_bytes(3)),
@@ -144,24 +150,29 @@ fn set_entry(
 fn commit_gpt(
     file: &mut std::fs::File,
     gpt: &mut gptman::GPT,
-    drive: &str,
+    drive: &Path,
     sector_size: u64,
 ) -> Result<()> {
     gptman::GPT::write_protective_mbr_into(file, sector_size)?;
     gpt.write_into(file)?;
     file.sync_all()?;
-    gptman::linux::reread_partition_table(file)
-        .map_err(|e| anyhow::anyhow!("failed to reread partition table on {drive}: {e}"))
+    gptman::linux::reread_partition_table(file).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to reread partition table on {}: {e}",
+            drive.display()
+        )
+    })
 }
 
 /// Read the EFI partition layout metadata from an existing GPT on `drive`.
-pub fn load_partition_layout(drive: &str) -> Result<PartitionLayout> {
+pub fn load_partition_layout(drive: impl AsRef<Path>) -> Result<PartitionLayout> {
+    let drive = drive.as_ref();
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .open(drive)
-        .map_err(|e| anyhow::anyhow!("failed to open {drive}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to open {}: {e}", drive.display()))?;
     let gpt = gptman::GPT::find_from(&mut file)
-        .map_err(|e| anyhow::anyhow!("failed to read GPT from {drive}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to read GPT from {}: {e}", drive.display()))?;
 
     for number in 1..=gpt.header.number_of_partition_entries {
         let entry = &gpt[number];
@@ -172,12 +183,15 @@ pub fn load_partition_layout(drive: &str) -> Result<PartitionLayout> {
         }
     }
 
-    Err(anyhow::anyhow!("no EFI partition found on {drive}"))
+    Err(anyhow::anyhow!(
+        "no EFI partition found on {}",
+        drive.display()
+    ))
 }
 
 /// Return the minimum target disk size required by the configured partition sizes.
 pub fn min_target_size_bytes(config: &crate::engine::config::Config) -> Result<u64> {
-    let padding = part_size_bytes("1G")?;
+    let padding = "1G".parse::<PartitionSize>()?.bytes();
     config
         .partitions
         .efi
@@ -188,18 +202,28 @@ pub fn min_target_size_bytes(config: &crate::engine::config::Config) -> Result<u
         .ok_or_else(|| anyhow::anyhow!("minimum target size is too large"))
 }
 
-pub fn derive_partitions(drive: &str) -> DerivedPartitions {
-    let sep = if drive.ends_with(|c: char| c.is_ascii_digit()) {
-        "p"
-    } else {
-        ""
-    };
+pub fn derive_partitions(drive: impl AsRef<Path>) -> DerivedPartitions {
+    let drive = drive.as_ref();
     DerivedPartitions {
-        efi_part: format!("{drive}{sep}1"),
-        root_part: format!("{drive}{sep}2"),
-        home_part: format!("{drive}{sep}3"),
+        efi_part: partition_path(drive, 1),
+        root_part: partition_path(drive, 2),
+        home_part: partition_path(drive, 3),
         ..Default::default()
     }
+}
+
+fn partition_path(drive: &Path, number: u8) -> PathBuf {
+    let mut name = OsString::from(drive.as_os_str());
+    if drive
+        .as_os_str()
+        .as_bytes()
+        .last()
+        .is_some_and(u8::is_ascii_digit)
+    {
+        name.push("p");
+    }
+    name.push(number.to_string());
+    PathBuf::from(name)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -228,11 +252,11 @@ pub struct PartitionLayout {
 
 #[derive(Debug, Clone, Default)]
 pub struct DerivedPartitions {
-    pub efi_part: String,
-    pub efi_uuid: String,
-    pub root_part: String,
-    pub root_uuid: String,
-    pub home_part: String,
-    pub home_uuid: String,
+    pub efi_part: PathBuf,
+    pub efi_uuid: Option<Uuid>,
+    pub root_part: PathBuf,
+    pub root_uuid: Option<Uuid>,
+    pub home_part: PathBuf,
+    pub home_uuid: Option<Uuid>,
     pub layout: Option<PartitionLayout>,
 }

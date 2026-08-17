@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
 
 /// Fill an `N`-byte array with cryptographically secure random bytes.
@@ -12,12 +16,12 @@ pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N]> {
 
 /// Flush all filesystem buffers to stable storage.
 pub(crate) fn sync_all() {
-    unsafe { libc::sync() };
+    nix::unistd::sync();
 }
 
 /// Whether the current process has superuser privileges.
 pub(crate) fn running_as_root() -> bool {
-    unsafe { libc::geteuid() == 0 }
+    nix::unistd::Uid::effective().is_root()
 }
 
 /// Format a byte count as a human-readable string (e.g. "1.5 GiB").
@@ -64,23 +68,8 @@ pub fn clean_log_line(line: &str) -> String {
 }
 
 /// The user's login shell from `$SHELL`, falling back to `/bin/sh`.
-pub fn default_shell() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-}
-
-/// Validate a hostname accepted by the installer.
-pub fn valid_hostname(name: &str) -> bool {
-    if name.is_empty() || name.len() > 253 {
-        return false;
-    }
-
-    name.split('.').all(|label| {
-        !label.is_empty()
-            && label.len() <= 63
-            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-    })
+pub fn default_shell() -> PathBuf {
+    std::env::var_os("SHELL").map_or_else(|| PathBuf::from("/bin/sh"), PathBuf::from)
 }
 
 /// Check whether `path` points to an executable regular file.
@@ -91,7 +80,7 @@ fn is_executable(path: &std::path::Path) -> bool {
 
 /// Decode the octal escape sequences (`\NNN`) that `/proc/self/mountinfo`
 /// uses for spaces and other special characters in mount paths.
-pub(crate) fn decode_mountinfo_path(path: &str) -> String {
+pub(crate) fn decode_mountinfo_path(path: &str) -> PathBuf {
     let mut out = String::new();
     let mut chars = path.chars().peekable();
 
@@ -111,13 +100,12 @@ pub(crate) fn decode_mountinfo_path(path: &str) -> String {
         }
     }
 
-    out
+    PathBuf::from(out)
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MountInfo {
-    pub mountpoint: String,
-    pub source: String,
-    pub fstype: String,
+    pub mountpoint: PathBuf,
+    pub source: PathBuf,
 }
 
 impl std::str::FromStr for MountInfo {
@@ -136,21 +124,70 @@ impl std::str::FromStr for MountInfo {
                 break;
             }
         }
-        let fstype = fields.next().ok_or(())?;
+        fields.next().ok_or(())?;
         let source = fields.next().ok_or(())?;
         Ok(Self {
             mountpoint: decode_mountinfo_path(mountpoint),
             source: decode_mountinfo_path(source),
-            fstype: fstype.to_string(),
         })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Mounts {
+    entries: Vec<MountInfo>,
+}
+
+impl Mounts {
+    pub(crate) fn current() -> Self {
+        std::fs::read_to_string("/proc/self/mountinfo")
+            .map(|text| Self::from(text.as_str()))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn contains_mountpoint(&self, path: impl AsRef<Path>) -> bool {
+        let path = path.as_ref();
+        let normalized = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        self.iter().any(|info| info.mountpoint == normalized)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &MountInfo> {
+        self.entries.iter()
+    }
+}
+
+impl From<&str> for Mounts {
+    fn from(text: &str) -> Self {
+        Self {
+            entries: text.lines().filter_map(|line| line.parse().ok()).collect(),
+        }
+    }
+}
+
+impl IntoIterator for Mounts {
+    type Item = MountInfo;
+    type IntoIter = std::vec::IntoIter<MountInfo>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Mounts {
+    type Item = &'a MountInfo;
+    type IntoIter = std::slice::Iter<'a, MountInfo>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter()
     }
 }
 
 /// Check whether a command exists in `$PATH`, by searching `$PATH` directly
 /// instead of shelling out to `sh -c 'command -v'`.
-pub fn which_exists(cmd: &str) -> bool {
-    if cmd.contains('/') {
-        return is_executable(std::path::Path::new(cmd));
+pub fn which_exists(cmd: impl AsRef<OsStr>) -> bool {
+    let cmd = cmd.as_ref();
+    if cmd.as_bytes().contains(&b'/') {
+        return is_executable(Path::new(cmd));
     }
     std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| is_executable(&dir.join(cmd))))

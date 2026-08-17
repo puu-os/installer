@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
+use std::ffi::OsStr;
 use std::io::Write as _;
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -12,9 +13,8 @@ use efivar::boot::{
 };
 use zeroize::Zeroize;
 
-use udev::AsRaw;
-
 use crate::engine::command::Command;
+use crate::engine::config::Timezone;
 use crate::engine::firmware::{SecureBootMode, SetupMode};
 use crate::engine::image;
 use crate::engine::partition;
@@ -95,22 +95,27 @@ fn step_cleanup(_r: &mut Runner) -> Result<()> {
     pipeline::cleanup_mounts()
 }
 
-fn validate_target_drive(drive: &str, config: &crate::engine::config::Config) -> Result<u64> {
+fn validate_target_drive(
+    drive: impl AsRef<Path>,
+    config: &crate::engine::config::Config,
+) -> Result<u64> {
+    let drive = drive.as_ref();
     let metadata = std::fs::metadata(drive)
-        .with_context(|| format!("failed to inspect target drive {drive}"))?;
+        .with_context(|| format!("failed to inspect target drive {}", drive.display()))?;
     if !metadata.file_type().is_block_device() {
-        bail!("'{drive}' is not a block device");
+        bail!("'{}' is not a block device", drive.display());
     }
     if let Some(reason) = crate::engine::block::disk_busy(drive) {
-        bail!("'{drive}' is busy: {reason}");
+        bail!("'{}' is busy: {reason}", drive.display());
     }
 
     let size_b = crate::engine::block::drive_size_bytes(drive)?;
     let min = partition::min_target_size_bytes(config)?;
     if size_b < min {
         bail!(
-            "'{drive}' is too small: {} detected, need at least {} for EFI, \
+            "'{}' is too small: {} detected, need at least {} for EFI, \
              root and home partitions",
+            drive.display(),
             crate::engine::util::human_size(size_b),
             crate::engine::util::human_size(min)
         );
@@ -131,11 +136,12 @@ fn step_validate_drive(r: &mut Runner) -> Result<()> {
 
     tracing::info!(
         target: crate::engine::INSTALLATION_LOG_TARGET,
-        "target {drive} ({}; {}, {}, {})",
+        "target {} ({}; {}, {}, {})",
+        drive.display(),
         crate::engine::util::human_size(size_b),
-        r.ctx.parts.efi_part,
-        r.ctx.parts.root_part,
-        r.ctx.parts.home_part
+        r.ctx.parts.efi_part.display(),
+        r.ctx.parts.root_part.display(),
+        r.ctx.parts.home_part.display()
     );
     Ok(())
 }
@@ -150,29 +156,7 @@ fn step_partition(r: &mut Runner) -> Result<()> {
         &r.ctx.config.partitions.home,
     )?);
     // Wait for the udev event queue to drain (replaces `udevadm settle`).
-    let udev = udev::Udev::new()?;
-    let queue = unsafe { udev::ffi::udev_queue_new(udev.as_raw()) };
-    if queue.is_null() {
-        bail!("failed to create udev queue");
-    }
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let is_empty = unsafe { udev::ffi::udev_queue_get_queue_is_empty(queue) };
-        if is_empty > 0 {
-            break;
-        }
-        if is_empty < 0 {
-            unsafe { udev::ffi::udev_queue_unref(queue) };
-            bail!("udev_queue_get_queue_is_empty returned {is_empty}");
-        }
-        unsafe { udev::ffi::udev_queue_flush(queue) };
-        if std::time::Instant::now() >= deadline {
-            unsafe { udev::ffi::udev_queue_unref(queue) };
-            bail!("udev settle timed out after 30s");
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    unsafe { udev::ffi::udev_queue_unref(queue) };
+    crate::engine::block::wait_for_udev_settle(Duration::from_secs(30))?;
 
     pipeline::wait_for_block_device(&r.ctx.parts.efi_part)?;
     pipeline::wait_for_block_device(&r.ctx.parts.root_part)?;
@@ -185,10 +169,18 @@ fn step_format_efi(r: &mut Runner) -> Result<()> {
     pipeline::wait_for_block_device(&part)?;
     tracing::info!(
         target: crate::engine::INSTALLATION_LOG_TARGET,
-        "formatting {part} as FAT32 (label EFI)"
+        "formatting {} as FAT32 (label EFI)",
+        part.display()
     );
-    Command::new(&["mkfs.fat", "-F32", "-n", "EFI", &part]).run()?;
-    r.ctx.parts.efi_uuid = crate::engine::block::capture_partuuid(&part)?;
+    Command::new(&[
+        OsStr::new("mkfs.fat"),
+        OsStr::new("-F32"),
+        OsStr::new("-n"),
+        OsStr::new("EFI"),
+        part.as_os_str(),
+    ])
+    .run()?;
+    r.ctx.parts.efi_uuid = Some(crate::engine::block::capture_partuuid(&part)?);
     Ok(())
 }
 
@@ -198,10 +190,18 @@ fn step_format_root(r: &mut Runner) -> Result<()> {
     pipeline::wait_for_block_device(&part)?;
     tracing::info!(
         target: crate::engine::INSTALLATION_LOG_TARGET,
-        "formatting {part} as XFS (label {label})"
+        "formatting {} as XFS (label {label})",
+        part.display()
     );
-    Command::new(&["mkfs.xfs", "-f", "-L", &label, &part]).run()?;
-    r.ctx.parts.root_uuid = crate::engine::block::capture_uuid(&part)?;
+    Command::new(&[
+        OsStr::new("mkfs.xfs"),
+        OsStr::new("-f"),
+        OsStr::new("-L"),
+        OsStr::new(label.as_str()),
+        part.as_os_str(),
+    ])
+    .run()?;
+    r.ctx.parts.root_uuid = Some(crate::engine::block::capture_uuid(&part)?);
     Ok(())
 }
 
@@ -210,10 +210,18 @@ fn step_format_home(r: &mut Runner) -> Result<()> {
     let label = r.ctx.config.labels.home.clone();
     pipeline::wait_for_block_device(&part)?;
     Command::new(&[
-        "mke2fs", "-t", "ext4", "-O", "encrypt", "-F", "-L", &label, &part,
+        OsStr::new("mke2fs"),
+        OsStr::new("-t"),
+        OsStr::new("ext4"),
+        OsStr::new("-O"),
+        OsStr::new("encrypt"),
+        OsStr::new("-F"),
+        OsStr::new("-L"),
+        OsStr::new(label.as_str()),
+        part.as_os_str(),
     ])
     .run()?;
-    r.ctx.parts.home_uuid = crate::engine::block::capture_uuid(&part)?;
+    r.ctx.parts.home_uuid = Some(crate::engine::block::capture_uuid(&part)?);
     Ok(())
 }
 
@@ -237,16 +245,16 @@ fn step_mount_home(r: &mut Runner) -> Result<()> {
 
 #[allow(clippy::too_many_lines)]
 fn step_bootc_install(r: &mut Runner) -> Result<()> {
-    if r.ctx.parts.root_uuid.is_empty() {
+    let Some(root_uuid) = r.ctx.parts.root_uuid else {
         bail!("root partition UUID is unset; re-run without skipping the format steps");
-    }
+    };
 
     let source_image = r.ctx.source_image.clone();
     let source_image = if source_image.is_none() {
         let default = image::default_source_image(&r.ctx.config);
         r.ctx.source_image.clone_from(&default);
         if let Some(ref img) = default {
-            r.ctx.target_imgref = image::load_target_imgref(Some(img), &r.ctx.config);
+            r.ctx.target_imgref = image::load_target_imgref(Some(img), &r.ctx.config)?;
             r.ctx.image_version = image::load_image_version(Some(img));
             tracing::info!(
                 target: crate::engine::INSTALLATION_LOG_TARGET,
@@ -291,10 +299,10 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
         });
     }
     if !pipeline::path_is_mount(&bootc_tmp_dir) {
-        let bootc_tmp_dir_str = bootc_tmp_dir.to_string_lossy().to_string();
-        pipeline::bind_mount(&bootc_tmp_dir_str, &bootc_tmp_dir_str)?;
+        pipeline::bind_mount(&bootc_tmp_dir, &bootc_tmp_dir)?;
+        let bootc_tmp_dir = bootc_tmp_dir.clone();
         cleanups.push(move || {
-            let _ = pipeline::unmount(&bootc_tmp_dir_str);
+            let _ = pipeline::unmount(&bootc_tmp_dir);
         });
     }
 
@@ -325,21 +333,21 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
 
     if let Some(ref src) = source_image {
         argv.push("--source-imgref".into());
-        argv.push(image::image_source_ref(src));
+        argv.push(image::image_source_ref(src).to_string());
     }
 
     argv.extend([
         "--target-imgref".into(),
-        r.ctx.target_imgref.clone(),
+        r.ctx.target_imgref.to_string(),
         "--skip-fetch-check".into(),
         "--bootloader".into(),
         "none".into(),
         "--skip-finalize".into(),
     ]);
 
-    for arg in pipeline::install_kernel_args(&r.ctx.parts.root_uuid, &r.ctx.config) {
+    for arg in pipeline::install_kernel_args(&root_uuid, &r.ctx.config)? {
         argv.push("--karg".into());
-        argv.push(arg);
+        argv.push(arg.to_string());
     }
 
     argv.push(TARGET_MOUNT.into());
@@ -349,12 +357,12 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
         "bootc image deployment may take several minutes without native progress output"
     );
 
-    let env = vec![
+    let env = [
         (
-            "CONTAINERS_STORAGE_CONF".into(),
-            storage_conf.to_string_lossy().to_string(),
+            OsStr::new("CONTAINERS_STORAGE_CONF"),
+            storage_conf.as_os_str(),
         ),
-        ("TMPDIR".into(), BOOTC_VAR_TMP.into()),
+        (OsStr::new("TMPDIR"), OsStr::new(BOOTC_VAR_TMP)),
     ];
 
     let tracker = image::install_size_estimate(source_image.as_deref())
@@ -375,9 +383,9 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
 }
 
 fn step_configure_mounts(r: &mut Runner) -> Result<()> {
-    if r.ctx.parts.efi_uuid.is_empty() || r.ctx.parts.home_uuid.is_empty() {
+    let (Some(efi_uuid), Some(home_uuid)) = (r.ctx.parts.efi_uuid, r.ctx.parts.home_uuid) else {
         bail!("EFI or home partition UUID is unset; re-run without skipping the format steps");
-    }
+    };
 
     let deploy = pipeline::deployment_root()?;
     for dir in &["efi", "var", "var/home"] {
@@ -391,7 +399,7 @@ fn step_configure_mounts(r: &mut Runner) -> Result<()> {
     } else {
         String::new()
     };
-    let new = pipeline::merge_fstab(&old, &r.ctx.parts.efi_uuid, &r.ctx.parts.home_uuid);
+    let new = pipeline::merge_fstab(&old, &efi_uuid, &home_uuid);
     std::fs::write(&fstab, &new)?;
     std::fs::set_permissions(&fstab, PermissionsExt::from_mode(0o644))?;
     Ok(())
@@ -414,10 +422,11 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
         );
         return Ok(());
     };
-    let expected = r.ctx.config.image.expected_digest.clone();
-    if expected.is_empty() {
-        bail!("image.expectedDigest is required when installing from a local image source");
-    }
+    let expected = r.ctx.config.image.expected_digest.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "image.expectedDigest is required when installing from a local image source"
+        )
+    })?;
 
     tracing::info!(
         target: crate::engine::INSTALLATION_LOG_TARGET,
@@ -425,7 +434,7 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
     );
     let raw = image::raw_manifest(&src)?;
     let actual = format!("sha256:{}", hex_lower(&openssl::sha::sha256(&raw)));
-    if !actual.eq_ignore_ascii_case(&expected) {
+    if !actual.eq_ignore_ascii_case(expected.as_str()) {
         bail!("image digest mismatch: expected {expected}, got {actual}");
     }
     tracing::info!(
@@ -435,39 +444,24 @@ fn step_verify_image(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
-fn validate_timezone(deploy: &Path, timezone: &str) -> Result<()> {
-    let relative = Path::new(timezone);
-    if !relative
-        .components()
-        .all(|component| matches!(component, std::path::Component::Normal(_)))
-    {
-        bail!("invalid timezone: {timezone}");
-    }
-
-    let path = deploy.join("usr/share/zoneinfo").join(relative);
+fn timezone_in_image(deploy: &Path, timezone: &Timezone) -> Result<()> {
+    let path = deploy.join("usr/share/zoneinfo").join(timezone.as_str());
     if !path.is_file() {
         bail!("timezone not found in target system: {timezone}");
     }
-
     Ok(())
 }
 
 fn step_firstboot(r: &mut Runner) -> Result<()> {
     let ident = &r.ctx.config.identity;
-    let keymap = ident.keymap.clone();
-    let locale = ident.locale.clone();
+    let keymap = ident.keymap.as_str();
+    let locale = ident.locale.as_str();
 
-    let timezone = ident.timezone.clone();
+    let timezone = &ident.timezone;
     let hostname = ident.hostname.clone();
 
-    if !hostname.is_empty() && !crate::engine::util::valid_hostname(&hostname) {
-        bail!("invalid hostname: {hostname}");
-    }
-
     let deploy = pipeline::deployment_root()?;
-    if !timezone.is_empty() {
-        validate_timezone(&deploy, &timezone)?;
-    }
+    timezone_in_image(&deploy, timezone)?;
 
     // Equivalent of `systemd-firstboot --root`: write the config files directly,
     // and like firstboot, never overwrite values already present in the image.
@@ -480,17 +474,16 @@ fn step_firstboot(r: &mut Runner) -> Result<()> {
         }
         Ok(())
     };
-    if !hostname.is_empty() {
-        write_if_absent(etc.join("hostname"), format!("{hostname}\n"))?;
-    }
+    write_if_absent(etc.join("hostname"), format!("{hostname}\n"))?;
     if !locale.is_empty() {
         write_if_absent(etc.join("locale.conf"), format!("LANG={locale}\n"))?;
     }
-    if !timezone.is_empty() {
-        let link = etc.join("localtime");
-        if !link.exists() {
-            std::os::unix::fs::symlink(format!("../usr/share/zoneinfo/{timezone}"), &link)?;
-        }
+    let link = etc.join("localtime");
+    if !link.exists() {
+        std::os::unix::fs::symlink(
+            Path::new("../usr/share/zoneinfo").join(timezone.as_str()),
+            &link,
+        )?;
     }
 
     if !keymap.is_empty() {
@@ -507,7 +500,7 @@ fn step_firstboot(r: &mut Runner) -> Result<()> {
 
 fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
     if r.ctx.config.k3s.role == crate::engine::config::K3sRole::Server
-        && r.ctx.config.k3s.node_name.is_empty()
+        && r.ctx.config.k3s.node_name.is_none()
     {
         tracing::info!(
             target: crate::engine::INSTALLATION_LOG_TARGET,
@@ -517,13 +510,13 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
     }
 
     let mut argv: Vec<String> = vec![
-        r.ctx.config.k3s.helper.clone(),
+        r.ctx.config.k3s.helper.display().to_string(),
         "--role".into(),
         r.ctx.config.k3s.role.to_string(),
     ];
-    if !r.ctx.config.k3s.server_url.is_empty() {
+    if let Some(server_url) = &r.ctx.config.k3s.server_url {
         argv.push("--server-url".into());
-        argv.push(r.ctx.config.k3s.server_url.clone());
+        argv.push(server_url.to_string());
     }
 
     let mut cleanups = pipeline::CleanupStack::default();
@@ -554,9 +547,9 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
         argv.push("--token-file".into());
         argv.push("/etc/rancher/k3s/puu-token".into());
     }
-    if !r.ctx.config.k3s.node_name.is_empty() {
+    if let Some(node_name) = &r.ctx.config.k3s.node_name {
         argv.push("--node-name".into());
-        argv.push(r.ctx.config.k3s.node_name.clone());
+        argv.push(node_name.to_string());
     }
     Command::new(&argv).chroot(TARGET_MOUNT).run()?;
     drop(cleanups);
@@ -571,10 +564,11 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
 }
 
 fn step_stage_homed_identity(r: &mut Runner) -> Result<()> {
-    if r.ctx.username.is_empty() {
-        bail!("username is required to stage a homed identity");
-    }
-    let name = &r.ctx.username;
+    let name = r
+        .ctx
+        .username
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("username is required to stage a homed identity"))?;
     if r.ctx.user_password.contains('\n') || r.ctx.user_password.contains('\r') {
         bail!("password must not contain newline characters");
     }
@@ -582,13 +576,13 @@ fn step_stage_homed_identity(r: &mut Runner) -> Result<()> {
     let hashed = crate::engine::passwd::hash_password_sha512(&r.ctx.user_password)?;
 
     let identity = serde_json::json!({
-        "userName": name,
+        "userName": name.as_str(),
         "secret": { "password": [r.ctx.user_password.as_str()] },
-        "realName": name,
+        "realName": name.as_str(),
         "shell": r.ctx.user_shell.path(),
         "memberOf": r.ctx.config.homed.groups.as_slice(),
-        "homeDirectory": format!("/var/home/{name}"),
-        "imagePath": format!("/var/home/{name}.homedir"),
+        "homeDirectory": Path::new("/var/home").join(name.as_str()),
+        "imagePath": Path::new("/var/home").join(format!("{name}.homedir")),
         "storage": "fscrypt",
         "preferredSessionLauncher": "gnome",
         "enforcePasswordPolicy": false,
@@ -633,10 +627,11 @@ fn step_stage_homed_identity(r: &mut Runner) -> Result<()> {
 }
 
 fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
+    let manifest_path = r.ctx.config.flatpak.manifest_path.as_path();
     let manifest =
-        Path::new(TARGET_MOUNT).join(r.ctx.config.flatpak.manifest_path.trim_start_matches('/'));
-    let refs = pipeline::flatpak_manifest_refs(&manifest);
-    if refs.is_empty() {
+        Path::new(TARGET_MOUNT).join(manifest_path.strip_prefix("/").unwrap_or(manifest_path));
+    let refs = pipeline::flatpak_manifest_ref_count(&manifest);
+    if refs == 0 {
         tracing::info!(
             target: crate::engine::INSTALLATION_LOG_TARGET,
             "flatpak-seed: no Flatpak refs in manifest"
@@ -644,8 +639,8 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
         return Ok(());
     }
 
-    let sync =
-        Path::new(TARGET_MOUNT).join(r.ctx.config.flatpak.sync_helper.trim_start_matches('/'));
+    let helper = r.ctx.config.flatpak.sync_helper.clone();
+    let sync = Path::new(TARGET_MOUNT).join(helper.strip_prefix("/").unwrap_or(&helper));
     if !sync.is_file() {
         bail!("flatpak-sync helper not found at {}", sync.display());
     }
@@ -653,13 +648,12 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
     tracing::info!(
         target: crate::engine::INSTALLATION_LOG_TARGET,
         "flatpak-seed: installing {} system Flatpak refs",
-        refs.len()
+        refs
     );
     let mounted = pipeline::mount_chroot_binds()?;
-    let sync_helper = r.ctx.config.flatpak.sync_helper.clone();
     let source = Box::new(progress::MarkerProgress::default()) as Box<dyn progress::ProgressSource>;
     let result = r
-        .cmd_tracked(&[sync_helper], source)
+        .cmd_tracked(&[helper.as_os_str()], source)
         .chroot(TARGET_MOUNT)
         .heartbeat(
             Duration::from_secs(30),
@@ -721,7 +715,7 @@ fn step_nvram(r: &mut Runner) -> Result<()> {
     };
     let entry = BootEntry {
         attributes: BootEntryAttributes::LOAD_OPTION_ACTIVE,
-        description: r.ctx.config.branding.name.clone(),
+        description: r.ctx.config.branding.name.to_string(),
         file_path_list: Some(file_path_list),
         optional_data: Vec::new(),
     };
@@ -800,12 +794,7 @@ fn systemd_boot_source() -> Result<PathBuf> {
 }
 
 fn efi_arch_suffix() -> Result<&'static str> {
-    match std::env::consts::ARCH {
-        "x86_64" => Ok("x64"),
-        "aarch64" => Ok("aa64"),
-        "arm" => Ok("arm"),
-        arch => bail!("unsupported EFI architecture: {arch}"),
-    }
+    Ok(crate::engine::config::Arch::host()?.efi_suffix())
 }
 
 fn first_free_boot_id(order: &[u16], vars: &dyn efivar::VarManager) -> Result<u16> {

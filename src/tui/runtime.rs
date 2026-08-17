@@ -807,7 +807,7 @@ fn update_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
             }
             KeyCode::Enter => {
                 if let Some(drive) = selected_drive(state)
-                    && drive.busy_reasons.is_empty()
+                    && drive.busy_reason.is_none()
                 {
                     return vec![Effect::SelectDrive { index: drive.index }];
                 }
@@ -923,7 +923,7 @@ pub(crate) fn update(state: &mut AppState, message: Message) -> Vec<Effect> {
             if state
                 .drives
                 .iter()
-                .any(|drive| drive.index == index && drive.busy_reasons.is_empty())
+                .any(|drive| drive.index == index && drive.busy_reason.is_none())
             {
                 state.push_modal(Modal::WipeConfirmation);
             }
@@ -991,19 +991,19 @@ pub(crate) fn update(state: &mut AppState, message: Message) -> Vec<Effect> {
 }
 
 fn validate_identity(draft: &IdentityDraft) -> Option<String> {
-    let hostname = draft.hostname.trim();
-    if !crate::engine::util::valid_hostname(hostname) {
+    if draft
+        .hostname
+        .trim()
+        .parse::<crate::engine::config::Hostname>()
+        .is_err()
+    {
         return Some("Invalid hostname".to_string());
     }
     let username = draft.username.trim();
-    let mut chars = username.chars();
-    let Some(first) = chars.next() else {
+    if username.is_empty() {
         return Some("Username must not be empty".to_string());
-    };
-    if (!first.is_ascii_lowercase() && first != '_')
-        || chars
-            .any(|ch| !ch.is_ascii_lowercase() && !ch.is_ascii_digit() && ch != '_' && ch != '-')
-    {
+    }
+    if username.parse::<crate::engine::config::Username>().is_err() {
         return Some("Invalid username".to_string());
     }
     if draft.password.is_empty() {
@@ -1023,22 +1023,23 @@ fn drive_messages() -> Vec<DriveInfo> {
                 .into_iter()
                 .enumerate()
                 .map(|(index, device)| {
-                    let path = sanitize_text(&device.path);
-                    let model = sanitize_text(&device.model);
-                    let size = sanitize_text(&device.size);
-                    let transport = sanitize_text(&device.transport);
-                    let label = sanitize_text(&format!("{path} - {model}, {size}"));
+                    let path_text = sanitize_text(&device.path.to_string_lossy());
+                    let model = sanitize_text(device.model.as_deref().unwrap_or("(unknown)"));
+                    let size = sanitize_text(
+                        &device
+                            .size
+                            .map_or_else(|| "-".into(), crate::engine::util::human_size),
+                    );
+                    let transport = sanitize_text(device.transport.as_deref().unwrap_or("-"));
+                    let label = sanitize_text(&format!("{path_text} - {model}, {size}"));
                     DriveInfo {
                         index,
-                        path,
+                        path: device.path,
                         label,
                         size,
                         model,
                         transport,
-                        busy_reasons: device
-                            .busy_reason
-                            .map(|reason| vec![sanitize_text(&reason.to_string())])
-                            .unwrap_or_default(),
+                        busy_reason: device.busy_reason,
                     }
                 })
                 .collect()
@@ -1090,15 +1091,17 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
                 .state
                 .drives
                 .iter()
-                .find(|drive| drive.index == index && drive.busy_reasons.is_empty())
+                .find(|drive| drive.index == index && drive.busy_reason.is_none())
             {
                 controller.ctx.drive.clone_from(&drive.path);
-                controller.ctx.drive_label.clone_from(&drive.label);
+                controller.ctx.drive_label = Some(drive.label.clone());
             }
             Some(Message::DriveSelected { index })
         }
         Effect::SelectTimezone { name } => {
-            controller.ctx.config.identity.timezone = name;
+            if let Ok(timezone) = name.parse() {
+                controller.ctx.config.identity.timezone = timezone;
+            }
             None
         }
         Effect::SetSecureBoot(mode) => {
@@ -1114,9 +1117,15 @@ fn execute_effect(controller: &mut UiController, effect: Effect) -> Option<Messa
             if error.is_none()
                 && let Some(draft) = controller.state.identity.as_ref()
             {
-                controller.ctx.config.identity.hostname = draft.hostname.trim().to_string();
-                controller.ctx.config.identity.locale = draft.language.locale().to_string();
-                controller.ctx.username = draft.username.trim().to_string();
+                if let Ok(hostname) = draft.hostname.trim().parse() {
+                    controller.ctx.config.identity.hostname = hostname;
+                }
+                if let Ok(locale) = draft.language.locale().parse() {
+                    controller.ctx.config.identity.locale = locale;
+                }
+                if let Ok(username) = draft.username.trim().parse() {
+                    controller.ctx.username = Some(username);
+                }
                 controller.ctx.user_password.clone_from(&draft.password);
                 controller.ctx.user_shell = draft.shell;
             }
@@ -1185,8 +1194,13 @@ fn prepare_state(controller: &mut UiController) {
     if controller.state.identity.is_none() {
         controller.state.identity = Some(IdentityDraft {
             language: LocaleChoice::default(),
-            hostname: controller.ctx.config.identity.hostname.clone(),
-            username: controller.ctx.username.clone(),
+            hostname: controller.ctx.config.identity.hostname.to_string(),
+            username: controller
+                .ctx
+                .username
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
             password: controller.ctx.user_password.clone(),
             repeated_password: controller.ctx.user_password.clone(),
             shell: controller.ctx.user_shell,
@@ -1198,7 +1212,7 @@ fn prepare_state(controller: &mut UiController) {
     if controller.state.timezone.filtered.is_empty() {
         timezone::prepare(
             &mut controller.state,
-            &controller.ctx.config.identity.timezone.clone(),
+            controller.ctx.config.identity.timezone.as_str(),
         );
     }
 }
@@ -1809,17 +1823,21 @@ fn target_content(frame: &mut Frame, rect: Rect, controller: &UiController, layo
         row = row.saturating_add(1);
     }
     for (index, drive) in state.drives.iter().enumerate() {
-        let status = if drive.busy_reasons.is_empty() {
+        let status = if drive.busy_reason.is_none() {
             "available"
         } else {
             "BUSY"
         };
         let label = if layout == LayoutMode::Compact {
-            format!("{:<18} {:<10} {status}", drive.path, drive.size)
+            format!(
+                "{:<18} {:<10} {status}",
+                sanitize_text(&drive.path.to_string_lossy()),
+                drive.size
+            )
         } else {
             format!(
                 "{:<18} {:<10} {:<8} {:<20} {status}",
-                drive.path,
+                sanitize_text(&drive.path.to_string_lossy()),
                 drive.size,
                 drive.transport,
                 drive.model.chars().take(20).collect::<String>()
@@ -2163,7 +2181,10 @@ fn review_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
         body.x,
         row,
         body.width,
-        &format!("Target disk  {}", controller.ctx.drive_label),
+        &format!(
+            "Target disk  {}",
+            controller.ctx.drive_label.as_deref().unwrap_or("-")
+        ),
         theme::FOREGROUND,
         Weight::Normal,
     );
@@ -2421,7 +2442,10 @@ fn reboot_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
         body.x,
         body.y,
         body.width,
-        &format!("Target  {}", controller.ctx.drive_label),
+        &format!(
+            "Target  {}",
+            controller.ctx.drive_label.as_deref().unwrap_or("-")
+        ),
         theme::FOREGROUND,
         Weight::Normal,
     );
@@ -2692,16 +2716,13 @@ fn draw_footer(frame: &mut Frame, chips: &[KeyChip], width: u16, height: u16) {
 
 fn screen_title(controller: &UiController) -> String {
     match controller.state.route {
-        Route::Welcome => {
-            if controller.ctx.image_version.is_empty() {
-                format!("{} Installer", controller.ctx.config.branding.name)
-            } else {
-                format!(
-                    "{} {} Installer",
-                    controller.ctx.config.branding.name, controller.ctx.image_version
-                )
-            }
-        }
+        Route::Welcome => match controller.ctx.image_version.as_deref() {
+            Some(version) => format!(
+                "{} {version} Installer",
+                controller.ctx.config.branding.name
+            ),
+            None => format!("{} Installer", controller.ctx.config.branding.name),
+        },
         Route::Target => "Select Target Drive".to_string(),
         Route::Identity => "System Identity".to_string(),
         Route::Timezone => "Select Time Zone".to_string(),

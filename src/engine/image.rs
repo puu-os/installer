@@ -10,7 +10,7 @@ use anyhow::Result;
 use nix::mount::MsFlags;
 
 use crate::engine::block::probe_value;
-use crate::engine::config::Config;
+use crate::engine::config::{Config, Digest, ImageRef};
 use crate::engine::pipeline::{path_is_mount, unmount};
 
 const MANIFEST_FILENAME: &str = "image.manifest";
@@ -35,13 +35,15 @@ fn manifest_field(source_image: Option<&Path>, key: &str) -> Option<String> {
     json.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }
 
-pub fn load_target_imgref(source_image: Option<&Path>, config: &Config) -> String {
-    manifest_field(source_image, "target_imgref")
-        .unwrap_or_else(|| config.image.target_img_ref.clone())
+pub fn load_target_imgref(source_image: Option<&Path>, config: &Config) -> Result<ImageRef> {
+    match manifest_field(source_image, "target_imgref") {
+        Some(value) => value.parse(),
+        None => Ok(config.image.target_img_ref.clone()),
+    }
 }
 
-pub fn load_image_version(source_image: Option<&Path>) -> String {
-    manifest_field(source_image, "version").unwrap_or_default()
+pub fn load_image_version(source_image: Option<&Path>) -> Option<String> {
+    manifest_field(source_image, "version").filter(|version| !version.is_empty())
 }
 
 /// Estimated bytes the bootc deployment writes to the target filesystem, used
@@ -93,23 +95,23 @@ fn read_archive_entry(src: &Path, name: &Path) -> Result<Option<Vec<u8>>> {
 }
 
 /// Digest of the image manifest referenced by an OCI `index.json`.
-fn oci_index_manifest_digest(index: &[u8]) -> Result<String> {
+fn oci_index_manifest_digest(index: &[u8]) -> Result<Digest> {
     let json: serde_json::Value = serde_json::from_slice(index)?;
     json.get("manifests")
         .and_then(|m| m.as_array())
         .and_then(|m| m.first())
         .and_then(|m| m.get("digest"))
         .and_then(|d| d.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("OCI index.json has no manifest digest"))
+        .ok_or_else(|| anyhow::anyhow!("OCI index.json has no manifest digest"))?
+        .parse()
 }
 
 /// Path of a blob inside an OCI archive for a `<algo>:<hex>` digest.
-fn oci_blob_path(digest: &str) -> Result<PathBuf> {
-    let (algo, hex) = digest
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("malformed OCI digest {digest}"))?;
-    Ok(Path::new("blobs").join(algo).join(hex))
+fn oci_blob_path(digest: &Digest) -> PathBuf {
+    match digest.as_str().split_once(':') {
+        Some((algo, hex)) => Path::new("blobs").join(algo).join(hex),
+        None => Path::new("blobs").join(digest.as_str()),
+    }
 }
 
 /// Raw image manifest bytes for digest verification: the `manifest.json` from a
@@ -137,7 +139,7 @@ pub fn raw_manifest(source_image: &Path) -> Result<Vec<u8>> {
         )
     })?;
     let digest = oci_index_manifest_digest(&index)?;
-    let blob = oci_blob_path(&digest)?;
+    let blob = oci_blob_path(&digest);
     read_archive_entry(source_image, &blob)?.ok_or_else(|| {
         anyhow::anyhow!(
             "OCI archive {} is missing manifest blob {}",
@@ -147,52 +149,44 @@ pub fn raw_manifest(source_image: &Path) -> Result<Vec<u8>> {
     })
 }
 
-pub fn image_source_ref(source_image: &Path) -> String {
+pub fn image_source_ref(source_image: &Path) -> ImageRef {
     if source_image.is_dir() {
-        return format!("dir:{}", source_image.display());
+        return ImageRef::dir(source_image);
     }
     let ref_name = manifest_field(Some(source_image), "imgref").unwrap_or_default();
     if ref_name.is_empty() {
-        return format!("oci-archive:{}", source_image.display());
+        return ImageRef::oci_archive(source_image, None);
     }
     let name = ref_name.strip_prefix("oci:").unwrap_or(&ref_name);
-    format!("oci-archive:{}:{}", source_image.display(), name)
+    ImageRef::oci_archive(source_image, Some(name))
 }
 
 pub fn default_source_image(config: &Config) -> Option<PathBuf> {
-    let mount = PathBuf::from(&config.image.source_mount);
+    let mount = &config.image.source_mount;
     let default_img = mount.join("image.tar");
     if default_img.is_file() {
         return Some(default_img);
     }
-    if path_is_mount(&mount) {
-        let _ = unmount(&config.image.source_mount);
+    if path_is_mount(mount) {
+        let _ = unmount(mount);
     }
     if running_in_container() {
         return None;
     }
 
-    // Resolve the payload label to a device node via libblkid (replaces `blkid -L`).
-    let cache = blkid::cache::Cache::new().ok()?;
-    cache.probe_all().ok()?;
-    let dev = cache
-        .find_dev_with_tag(blkid::tag::Tag::new(
-            blkid::tag::SuperblockTag::Label,
-            &config.image.source_label,
-        ))
-        .ok()??;
-    let device = dev.name().to_path_buf();
-    let device = device.to_str()?;
+    // Resolve the payload label to a device node via UDisks2, falling back to
+    // /dev/disk/by-label (replaces `blkid -L`).
+    let device = crate::engine::block::find_device_by_label(config.image.source_label.as_str())?;
 
     // mount(2) needs an explicit filesystem type; probe it (replaces `mount -o ro`).
-    let fstype = probe_value(device, false, "TYPE").ok()?;
+    let fstype = probe_value(&device, "TYPE");
     if fstype.is_empty() {
         return None;
     }
 
-    std::fs::create_dir_all(&mount).ok()?;
+    std::fs::create_dir_all(mount).ok()?;
     nix::mount::mount(
-        Some(device),
+        Some(device.as_path()),
         mount.as_path(),
         Some(fstype.as_str()),
         MsFlags::MS_RDONLY,
@@ -203,7 +197,7 @@ pub fn default_source_image(config: &Config) -> Option<PathBuf> {
     if default_img.is_file() {
         Some(default_img)
     } else {
-        let _ = unmount(&config.image.source_mount);
+        let _ = unmount(mount);
         None
     }
 }

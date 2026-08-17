@@ -2,10 +2,11 @@
 // Copyright (C) Opinsys Oy 2026
 
 use std::collections::VecDeque;
-use std::ffi::CStr;
-use std::ffi::CString;
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::io::{self, BufRead, BufReader};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -26,17 +27,18 @@ const OUTPUT_TAIL_LINES: usize = 12;
 const OUTPUT_QUEUE_CAPACITY: usize = 64;
 const PROGRESS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
-fn format_argv(argv: &[String]) -> String {
+fn format_argv(argv: &[OsString]) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(argv.len());
     let mut redact_next = false;
     for arg in argv {
+        let arg = arg.to_string_lossy();
         if redact_next {
             parts.push(REDACTED.to_string());
             redact_next = false;
             continue;
         }
-        if SECRET_OPTIONS.contains(&arg.as_str()) {
-            parts.push(arg.clone());
+        if SECRET_OPTIONS.contains(&arg.as_ref()) {
+            parts.push(arg.into_owned());
             redact_next = true;
             continue;
         }
@@ -46,7 +48,7 @@ fn format_argv(argv: &[String]) -> String {
                 continue;
             }
         }
-        parts.push(arg.clone());
+        parts.push(arg.into_owned());
     }
     parts.join(" ")
 }
@@ -56,9 +58,9 @@ fn format_argv(argv: &[String]) -> String {
 /// replacing the external `chroot` helper. The expression is `unchecked`, so a
 /// non-zero exit is reported as a code rather than an error.
 fn build_expression(
-    argv: &[String],
-    env: Option<&[(String, String)]>,
-    chroot_dir: Option<&str>,
+    argv: &[OsString],
+    env: Option<&[(OsString, OsString)]>,
+    chroot_dir: Option<&Path>,
 ) -> Expression {
     let mut expr = duct::cmd(&argv[0], &argv[1..])
         .stderr_to_stdout()
@@ -71,11 +73,11 @@ fn build_expression(
         }
     }
 
-    let chroot_dir = chroot_dir.map(str::to_string);
+    let chroot_dir = chroot_dir.map(Path::to_path_buf);
     expr.before_spawn(move |command| {
         let chroot_c = chroot_dir
             .as_deref()
-            .map(CString::new)
+            .map(|dir| CString::new(dir.as_os_str().as_bytes()))
             .transpose()
             .map_err(|_| io::Error::other("chroot path contains an interior NUL"))?;
 
@@ -86,32 +88,28 @@ fn build_expression(
     })
 }
 
-unsafe fn enter_chroot(target: Option<&CStr>) -> io::Result<()> {
+fn enter_chroot(target: Option<&CStr>) -> io::Result<()> {
     if let Some(dir) = target {
-        if unsafe { libc::chroot(dir.as_ptr()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if unsafe { libc::chdir(c"/".as_ptr()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        nix::unistd::chroot(dir)?;
+        nix::unistd::chdir(c"/")?;
     }
-    unsafe { libc::setsid() };
+    let _ = nix::unistd::setsid();
     Ok(())
 }
 
 /// A subprocess invocation. Merged stdout+stderr is emitted as tracing events;
 /// a non-zero exit becomes an error.
 pub struct Command<'a> {
-    argv: Vec<String>,
-    env: Option<&'a [(String, String)]>,
+    argv: Vec<OsString>,
+    env: Option<Vec<(OsString, OsString)>>,
     heartbeat: Option<(Duration, &'a str)>,
-    chroot_dir: Option<&'a str>,
+    chroot_dir: Option<PathBuf>,
     tracker: Option<ProgressTracker<'a>>,
 }
 
 impl<'a> Command<'a> {
-    pub fn new<S: AsRef<str>>(argv: &[S]) -> Self {
-        let argv = argv.iter().map(|arg| arg.as_ref().to_string()).collect();
+    pub fn new<S: AsRef<OsStr>>(argv: &[S]) -> Self {
+        let argv = argv.iter().map(|arg| arg.as_ref().to_os_string()).collect();
         Self {
             argv,
             env: None,
@@ -123,8 +121,16 @@ impl<'a> Command<'a> {
 
     /// Run with the given environment variables set for the child.
     #[must_use]
-    pub fn env(mut self, env: &'a [(String, String)]) -> Self {
-        self.env = Some(env);
+    pub fn env<K, V>(mut self, env: &[(K, V)]) -> Self
+    where
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        self.env = Some(
+            env.iter()
+                .map(|(key, value)| (key.as_ref().to_os_string(), value.as_ref().to_os_string()))
+                .collect(),
+        );
         self
     }
 
@@ -137,8 +143,8 @@ impl<'a> Command<'a> {
 
     /// Chroot into `dir` before exec, replacing the external `chroot` helper.
     #[must_use]
-    pub fn chroot(mut self, dir: &'a str) -> Self {
-        self.chroot_dir = Some(dir);
+    pub fn chroot(mut self, dir: impl AsRef<Path>) -> Self {
+        self.chroot_dir = Some(dir.as_ref().to_path_buf());
         self
     }
 
@@ -160,9 +166,9 @@ impl<'a> Command<'a> {
         let command_line = self.to_string();
         tracing::info!(target: crate::engine::INSTALLATION_LOG_TARGET, "$ {command_line}");
 
-        let reader = build_expression(&self.argv, self.env, self.chroot_dir)
+        let reader = build_expression(&self.argv, self.env.as_deref(), self.chroot_dir.as_deref())
             .reader()
-            .with_context(|| format!("failed to spawn {}", self.argv[0]))?;
+            .with_context(|| format!("failed to spawn {}", self.argv[0].to_string_lossy()))?;
         let (tx, rx) = mpsc::sync_channel::<String>(OUTPUT_QUEUE_CAPACITY);
 
         let reader_thread = std::thread::spawn(move || -> i32 {

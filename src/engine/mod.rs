@@ -13,6 +13,7 @@ pub(crate) mod pipeline;
 pub(crate) mod progress;
 pub(crate) mod secureboot;
 pub(crate) mod steps;
+pub(crate) mod udisks;
 pub(crate) mod util;
 
 pub(crate) const INSTALLATION_LOG_TARGET: &str = "puu_installer::installation";

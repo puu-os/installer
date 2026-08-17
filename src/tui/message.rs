@@ -8,10 +8,12 @@
 //! [`crate::tui::state::AppState`] pure and keeps disk, firmware, command,
 //! rollback, and reboot work out of render nodes and update logic.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crossterm::event::KeyEvent;
 
+use crate::engine::block::BusyReason;
 use crate::engine::firmware::{SecureBootMode, SetupMode};
 
 /// Maximum UTF-8 byte length of text crossing the worker/UI queue.
@@ -151,12 +153,12 @@ pub(crate) enum Message {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DriveInfo {
     pub(crate) index: usize,
-    pub(crate) path: String,
+    pub(crate) path: PathBuf,
     pub(crate) label: String,
     pub(crate) size: String,
     pub(crate) model: String,
     pub(crate) transport: String,
-    pub(crate) busy_reasons: Vec<String>,
+    pub(crate) busy_reason: Option<BusyReason>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

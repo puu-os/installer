@@ -32,7 +32,7 @@ struct Args {
 
     /// override k3s cluster role from config ("server" or "agent")
     #[argh(option)]
-    k3s_role: Option<String>,
+    k3s_role: Option<K3sRole>,
 
     /// read the k3s cluster token from this file
     #[argh(option)]
@@ -46,14 +46,14 @@ fn read_first_line(path: &std::path::Path) -> Result<String> {
 }
 
 fn main() -> Result<()> {
-    tui::logging::init()?;
-    tracing::info!(target: engine::INSTALLATION_LOG_TARGET, "installer started");
-
     let args: Args = argh::from_env();
 
     if !engine::util::running_as_root() {
         bail!("puu-installer must be run as root.");
     }
+
+    tui::logging::init()?;
+    tracing::info!(target: engine::INSTALLATION_LOG_TARGET, "installer started");
 
     engine::pipeline::enter_private_mount_namespace()?;
 
@@ -67,10 +67,7 @@ fn main() -> Result<()> {
     };
     let mut cfg = Config::load(&config_path)?;
 
-    if let Some(role_str) = args.k3s_role {
-        let Ok(role) = role_str.parse::<K3sRole>() else {
-            bail!("--k3s-role must be \"server\" or \"agent\", got \"{role_str}\".");
-        };
+    if let Some(role) = args.k3s_role {
         cfg.k3s.role = role;
     }
 
@@ -92,11 +89,11 @@ fn main() -> Result<()> {
         None => String::new(),
     };
 
-    if cfg.k3s.role == K3sRole::Agent && (cfg.k3s.server_url.is_empty() || k3s_token.is_empty()) {
+    if cfg.k3s.role == K3sRole::Agent && (cfg.k3s.server_url.is_none() || k3s_token.is_empty()) {
         bail!("--k3s-role agent requires k3s.serverUrl and --k3s-token-file.");
     }
 
-    let target_imgref = engine::image::load_target_imgref(source_image.as_deref(), &cfg);
+    let target_imgref = engine::image::load_target_imgref(source_image.as_deref(), &cfg)?;
     let image_version = engine::image::load_image_version(source_image.as_deref());
 
     let ctx = Context {
