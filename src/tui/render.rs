@@ -3,7 +3,7 @@
 
 use std::io::{self, Stdout, Write};
 use std::panic;
-use std::sync::{Mutex, Once};
+use std::sync::{Mutex, Once, OnceLock};
 use std::thread::{self, ThreadId};
 use std::time::Duration;
 
@@ -23,10 +23,8 @@ use crate::tui::message::{expand_char, sanitize_char};
 /// The 16-colour ANSI palette, as the two SGR runs that carry it: 30-37 and
 /// 90-97 for the foreground, 40-47 and 100-107 for the background.
 ///
-/// These are emitted by hand rather than through crossterm, which renders even
-/// a plain ANSI colour as a 256-colour `38;5;N` sequence. The short form is half
-/// the bytes and asks less of the terminal — a plain VT100-class serial console
-/// understands it — and the installer only ever uses these 16 colours.
+/// Theme colours stay on these indexes. Emit promotes them through the VGA RGB
+/// for that index when the terminal advertised 256 or 16M colours.
 const FG_SGR: [&[u8]; 16] = [
     b"\x1b[30m",
     b"\x1b[31m",
@@ -98,22 +96,40 @@ impl CursorStyle {
     }
 }
 
-/// A 16-colour palette index.
+/// A terminal colour: a 16-colour index, a 256-colour cube index, or RGB.
 ///
-/// The installer only ever uses the 16 ANSI colours; carrying the index keeps
-/// the renderer's SGR tables trivial and the on-the-wire colour escapes short.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Color(u8);
+/// Theme constants stay on the 16-colour indexes so `Ansi16` still emits the
+/// short SGR form. Emit promotes those indexes through [`ANSI16_RGB`] when the
+/// terminal advertised 256 or 16M colours. Sampled map pixels carry RGB or a
+/// cube index and are quantized from the detected [`ColorMode`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Color {
+    Indexed(u8),
+    Cube(u8),
+    Rgb { r: u8, g: u8, b: u8 },
+}
+
+impl Default for Color {
+    fn default() -> Self {
+        Self::Indexed(0)
+    }
+}
 
 impl Color {
     pub(crate) const fn indexed(index: u8) -> Self {
-        Self(index)
+        Self::Indexed(index)
     }
 
-    /// Index into the 16-colour palette. Anything above the palette clamps to
-    /// white rather than running off the end of the SGR tables.
-    const fn index(self) -> usize {
-        if self.0 > 15 { 15 } else { self.0 as usize }
+    pub(crate) const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self::Rgb { r, g, b }
+    }
+
+    pub(crate) fn from_rgb(r: u8, g: u8, b: u8, mode: ColorMode) -> Self {
+        match mode {
+            ColorMode::Mono | ColorMode::Ansi16 => Self::Indexed(nearest_ansi16(r, g, b)),
+            ColorMode::Ansi256 => Self::Cube(rgb_to_ansi256(r, g, b)),
+            ColorMode::TrueColor => Self::rgb(r, g, b),
+        }
     }
 }
 
@@ -561,10 +577,120 @@ pub(crate) fn rendered_width(text: &str) -> u16 {
         .sum()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ColorMode {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ColorMode {
     Mono,
+    #[default]
     Ansi16,
+    Ansi256,
+    TrueColor,
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn detect_color_mode() -> ColorMode {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return ColorMode::Mono;
+    }
+    let term = env_nonempty("TERM");
+    if term.as_deref() == Some("dumb") {
+        return ColorMode::Mono;
+    }
+    let colorterm = env_nonempty("COLORTERM");
+    if colorterm.as_deref() == Some("truecolor") || colorterm.as_deref() == Some("24bit") {
+        return ColorMode::TrueColor;
+    }
+    if let Some(term) = term.as_deref() {
+        if term.ends_with("direct") || term.ends_with("truecolor") {
+            return ColorMode::TrueColor;
+        }
+        if term.ends_with("256color") || term.ends_with("256") {
+            return ColorMode::Ansi256;
+        }
+    }
+    ColorMode::Ansi16
+}
+
+pub(crate) fn color_mode() -> ColorMode {
+    static MODE: OnceLock<ColorMode> = OnceLock::new();
+    *MODE.get_or_init(detect_color_mode)
+}
+
+const ANSI16_RGB: [(u8, u8, u8); 16] = [
+    (0, 0, 0),
+    (170, 0, 0),
+    (0, 170, 0),
+    (170, 85, 0),
+    (0, 0, 170),
+    (170, 0, 170),
+    (0, 170, 170),
+    (170, 170, 170),
+    (85, 85, 85),
+    (255, 85, 85),
+    (85, 255, 85),
+    (255, 255, 85),
+    (85, 85, 255),
+    (255, 85, 255),
+    (85, 255, 255),
+    (255, 255, 255),
+];
+
+fn color_distance(r: u8, g: u8, b: u8, pr: u8, pg: u8, pb: u8) -> i32 {
+    let dr = i32::from(r) - i32::from(pr);
+    let dg = i32::from(g) - i32::from(pg);
+    let db = i32::from(b) - i32::from(pb);
+    dr * dr + dg * dg + db * db
+}
+
+fn nearest_ansi16(r: u8, g: u8, b: u8) -> u8 {
+    ANSI16_RGB
+        .iter()
+        .copied()
+        .enumerate()
+        .min_by_key(|&(_, (pr, pg, pb))| color_distance(r, g, b, pr, pg, pb))
+        .map_or(0, |(index, _)| index as u8)
+}
+
+fn cube_level(channel: u8) -> u8 {
+    if channel < 48 {
+        0
+    } else if channel < 115 {
+        1
+    } else {
+        ((u16::from(channel) - 35) / 40).min(5) as u8
+    }
+}
+
+fn cube_value(level: u8) -> u8 {
+    if level == 0 { 0 } else { 55 + 40 * level }
+}
+
+fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
+    if r == g && g == b {
+        if r < 8 {
+            return 16;
+        }
+        if r > 238 {
+            return 231;
+        }
+        return 232 + ((u16::from(r) - 8) / 10) as u8;
+    }
+    let ri = cube_level(r);
+    let gi = cube_level(g);
+    let bi = cube_level(b);
+    let cube = 16 + 36 * ri + 6 * gi + bi;
+    let cube_dist = color_distance(r, g, b, cube_value(ri), cube_value(gi), cube_value(bi));
+    let indexed = nearest_ansi16(r, g, b);
+    let Some(&(ir, ig, ib)) = ANSI16_RGB.get(indexed as usize) else {
+        return cube;
+    };
+    if color_distance(r, g, b, ir, ig, ib) <= cube_dist {
+        indexed
+    } else {
+        cube
+    }
 }
 
 /// A double-buffered terminal that writes one diffed, run-batched frame per
@@ -598,13 +724,7 @@ pub(crate) struct Terminal<W: Write = Stdout> {
 
 impl<W: Write> Terminal<W> {
     pub(crate) fn new(out: W) -> Self {
-        let color_mode = if std::env::var_os("NO_COLOR").is_some()
-            || std::env::var("TERM").is_ok_and(|term| term == "dumb")
-        {
-            ColorMode::Mono
-        } else {
-            ColorMode::Ansi16
-        };
+        let color_mode = color_mode();
         let empty = Size {
             width: 0,
             height: 0,
@@ -899,12 +1019,68 @@ fn push_move_to(bytes: &mut Vec<u8>, x: u16, y: u16) {
     bytes.push(b'H');
 }
 
+fn promote_color(color: Color, mode: ColorMode) -> Color {
+    match (color, mode) {
+        (Color::Indexed(index), ColorMode::Ansi256 | ColorMode::TrueColor) => {
+            let Some(&(r, g, b)) = ANSI16_RGB.get(usize::from(index)) else {
+                return color;
+            };
+            Color::from_rgb(r, g, b, mode)
+        }
+        _ => color,
+    }
+}
+
+fn promote_style(style: Style, mode: ColorMode) -> Style {
+    Style {
+        fg: style.fg.map(|color| promote_color(color, mode)),
+        bg: style.bg.map(|color| promote_color(color, mode)),
+        modifiers: style.modifiers,
+    }
+}
+
+fn emit_sgr_color(bytes: &mut Vec<u8>, color: Color, foreground: bool) {
+    match color {
+        Color::Indexed(index) => {
+            let table = if foreground { FG_SGR } else { BG_SGR };
+            let seq = table.get(usize::from(index)).or_else(|| table.get(15));
+            if let Some(seq) = seq {
+                bytes.extend_from_slice(seq);
+            }
+        }
+        Color::Cube(index) => {
+            bytes.extend_from_slice(if foreground {
+                b"\x1b[38;5;"
+            } else {
+                b"\x1b[48;5;"
+            });
+            push_num(bytes, u16::from(index));
+            bytes.push(b'm');
+        }
+        Color::Rgb { r, g, b } => {
+            bytes.extend_from_slice(if foreground {
+                b"\x1b[38;2;"
+            } else {
+                b"\x1b[48;2;"
+            });
+            push_num(bytes, u16::from(r));
+            bytes.push(b';');
+            push_num(bytes, u16::from(g));
+            bytes.push(b';');
+            push_num(bytes, u16::from(b));
+            bytes.push(b'm');
+        }
+    }
+}
+
 /// Emit only the escape sequences needed to move the terminal from the style it
 /// is in (`wire`) to `next`, and update `wire` to match.
 ///
 /// An individual attribute cannot be switched off, so dropping one costs a full
 /// SGR reset — which also drops the colours, hence the re-emit that follows.
 fn emit_style(bytes: &mut Vec<u8>, wire: &mut Style, next: Style, color_mode: ColorMode) {
+    *wire = promote_style(*wire, color_mode);
+    let next = promote_style(next, color_mode);
     if *wire == next {
         return;
     }
@@ -918,35 +1094,34 @@ fn emit_style(bytes: &mut Vec<u8>, wire: &mut Style, next: Style, color_mode: Co
     let next_reverse = next.modifiers.contains(Modifier::REVERSE);
 
     match color_mode {
-        ColorMode::Ansi16 => {
-            if wire.fg != next.fg {
-                match next.fg {
-                    Some(color) => bytes.extend_from_slice(FG_SGR[color.index()]),
-                    None => bytes.extend_from_slice(SGR_FG_DEFAULT),
-                }
-            }
-            if wire.bg != next.bg {
-                match next.bg {
-                    Some(color) => bytes.extend_from_slice(BG_SGR[color.index()]),
-                    None => bytes.extend_from_slice(SGR_BG_DEFAULT),
-                }
-            }
-            if wire_reverse != next_reverse {
-                bytes.extend_from_slice(if next_reverse {
+        ColorMode::Mono => {
+            // In mono mode the only visible fill is an explicit reverse.
+            // Theme backgrounds must not invert the whole chrome.
+            let wire_fill = wire_reverse;
+            let next_fill = next_reverse;
+            if wire_fill != next_fill {
+                bytes.extend_from_slice(if next_fill {
                     SGR_REVERSE
                 } else {
                     SGR_NO_REVERSE
                 });
             }
         }
-        ColorMode::Mono => {
-            // In mono mode the only visible styling is a filled background:
-            // a real background colour or an explicit reverse both show as
-            // inverted cells.
-            let wire_fill = wire.bg.is_some() || wire_reverse;
-            let next_fill = next.bg.is_some() || next_reverse;
-            if wire_fill != next_fill {
-                bytes.extend_from_slice(if next_fill {
+        ColorMode::Ansi16 | ColorMode::Ansi256 | ColorMode::TrueColor => {
+            if wire.fg != next.fg {
+                match next.fg {
+                    Some(color) => emit_sgr_color(bytes, color, true),
+                    None => bytes.extend_from_slice(SGR_FG_DEFAULT),
+                }
+            }
+            if wire.bg != next.bg {
+                match next.bg {
+                    Some(color) => emit_sgr_color(bytes, color, false),
+                    None => bytes.extend_from_slice(SGR_BG_DEFAULT),
+                }
+            }
+            if wire_reverse != next_reverse {
+                bytes.extend_from_slice(if next_reverse {
                     SGR_REVERSE
                 } else {
                     SGR_NO_REVERSE

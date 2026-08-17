@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
-//! Shared 16-colour terminal palette.
+//! Shared terminal palette.
 //!
-//! Each constant is an ANSI palette index carried by the offscreen renderer
-//! ([`crate::tui::render::Color`]). The indexes match the crossterm named colours
-//! the installer previously used, so the on-screen look is unchanged.
+//! Each constant is a 16-colour ANSI index carried by the offscreen renderer
+//! ([`crate::tui::render::Color`]). The indexes match the VGA RGB the map already
+//! samples. Emit keeps the short SGR form on `Ansi16` and promotes the same RGB
+//! to 256 or 16M when the terminal advertised it.
 
 use crate::tui::render::Color;
 
