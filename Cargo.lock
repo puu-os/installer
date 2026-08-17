@@ -998,6 +998,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "xattr",
  "zbus",
  "zeroize",
 ]

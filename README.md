@@ -48,6 +48,7 @@ identity:
 flatpak:
   manifestPath: /usr/share/puu/flatpaks.list
   syncHelper: /usr/libexec/puu/flatpak-sync
+  liveStore: /var/lib/flatpak
 k3s:
   helper: /usr/libexec/puu/configure-k3s-cluster
   role: server          # "server" or "agent"

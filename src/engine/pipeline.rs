@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -9,6 +11,7 @@ use anyhow::{Result, bail};
 use nix::mount::MsFlags;
 use nix::sched::{CloneFlags, unshare};
 use uuid::Uuid;
+use xattr::FileExt;
 use zeroize::Zeroizing;
 
 use crate::engine::command;
@@ -439,20 +442,17 @@ pub fn deployment_root() -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("ostree did not report the installed deployment root"))
 }
 
-pub fn flatpak_manifest_ref_count(path: &Path) -> usize {
+pub fn flatpak_manifest_refs(path: &Path) -> Vec<String> {
     let Ok(content) = std::fs::read_to_string(path) else {
-        return 0;
+        return Vec::new();
     };
     content
         .lines()
-        .filter(|line| {
-            !line
-                .split_once('#')
-                .map_or(*line, |(value, _)| value)
-                .trim()
-                .is_empty()
+        .filter_map(|line| {
+            let value = line.split_once('#').map_or(line, |(value, _)| value).trim();
+            (!value.is_empty()).then(|| value.to_string())
         })
-        .count()
+        .collect()
 }
 
 pub fn copy_tree_files(src: &Path, dst: &Path) -> Result<()> {
@@ -475,6 +475,65 @@ pub fn copy_tree_files(src: &Path, dst: &Path) -> Result<()> {
         Ok(())
     }
     recurse(src, dst)
+}
+
+pub fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    if dst.exists() {
+        std::fs::remove_dir_all(dst)?;
+    }
+    let mut hardlinks = HashMap::new();
+    copy_tree_entry(src, dst, &mut hardlinks)
+}
+
+fn copy_tree_entry(
+    src: &Path,
+    dst: &Path,
+    hardlinks: &mut HashMap<(u64, u64), PathBuf>,
+) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(src)?;
+    let file_type = metadata.file_type();
+    if file_type.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_tree_entry(&entry.path(), &dst.join(entry.file_name()), hardlinks)?;
+        }
+        std::fs::set_permissions(dst, metadata.permissions())?;
+        copy_xattrs(src, dst)?;
+    } else if file_type.is_symlink() {
+        std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)?;
+    } else if file_type.is_file() {
+        let key = (metadata.dev(), metadata.ino());
+        if metadata.nlink() > 1 {
+            if let Some(existing) = hardlinks.get(&key) {
+                std::fs::hard_link(existing, dst)?;
+                return Ok(());
+            }
+        }
+        std::fs::copy(src, dst)?;
+        std::fs::set_permissions(dst, metadata.permissions())?;
+        copy_xattrs(src, dst)?;
+        if metadata.nlink() > 1 {
+            hardlinks.insert(key, dst.to_path_buf());
+        }
+    } else {
+        bail!("unsupported file type at {}", src.display());
+    }
+    Ok(())
+}
+
+fn copy_xattrs(src: &Path, dst: &Path) -> Result<()> {
+    let src_file = std::fs::File::open(src)?;
+    let dst_file = std::fs::File::open(dst)?;
+    for name in src_file.list_xattr()? {
+        if !name.as_encoded_bytes().starts_with(b"user.") {
+            continue;
+        }
+        if let Some(value) = src_file.get_xattr(&name)? {
+            dst_file.set_xattr(&name, &value)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn rollback() {

@@ -10,8 +10,8 @@ license = "GPL-2.0-or-later"
 description = "Standalone installer for bootc-based OSs"
 authors = ["Jarkko Sakkinen <jarkko.sakkinen@opinsys.fi>"]
 readme = "README.md"
-homepage = "https://gitlab.com/puu-os/puu-installer"
-repository = "https://gitlab.com/puu-os/puu-installer"
+homepage = "https://gitlab.com/puu-os/installer"
+repository = "https://gitlab.com/puu-os/installer"
 
 [dependencies]
 anyhow = "1"
@@ -31,6 +31,7 @@ serde_norway = "0.9"
 serde = { version = "1", features = ["derive"] }
 tar = "0.4"
 uuid = { version = "1", features = ["v4"] }
+xattr = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 zbus = "5"

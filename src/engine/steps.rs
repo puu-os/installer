@@ -629,11 +629,34 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
     let manifest_path = r.ctx.config.flatpak.manifest_path.as_path();
     let manifest =
         Path::new(TARGET_MOUNT).join(manifest_path.strip_prefix("/").unwrap_or(manifest_path));
-    let refs = pipeline::flatpak_manifest_ref_count(&manifest);
-    if refs == 0 {
+    let refs = pipeline::flatpak_manifest_refs(&manifest);
+    if refs.is_empty() {
         tracing::info!(
             target: crate::engine::INSTALLATION_LOG_TARGET,
             "flatpak-seed: no Flatpak refs in manifest"
+        );
+        return Ok(());
+    }
+
+    let live_flatpak_dir = r.ctx.config.flatpak.live_store.as_path();
+    let preseeded = live_flatpak_dir.join("repo/config").is_file()
+        && refs
+            .iter()
+            .all(|reference| live_flatpak_dir.join("app").join(reference).is_dir());
+    if preseeded {
+        let deployment = pipeline::deployment_root()?;
+        let ostree_deploy_dir = deployment.parent().and_then(Path::parent).ok_or_else(|| {
+            anyhow::anyhow!(
+                "deployment root has unexpected path: {}",
+                deployment.display()
+            )
+        })?;
+        let target_flatpak_dir = ostree_deploy_dir.join("var/lib/flatpak");
+        pipeline::copy_tree(live_flatpak_dir, &target_flatpak_dir)?;
+        tracing::info!(
+            target: crate::engine::INSTALLATION_LOG_TARGET,
+            "flatpak-seed: copied {} system Flatpak refs from the live image",
+            refs.len()
         );
         return Ok(());
     }
@@ -647,7 +670,7 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
     tracing::info!(
         target: crate::engine::INSTALLATION_LOG_TARGET,
         "flatpak-seed: installing {} system Flatpak refs",
-        refs
+        refs.len()
     );
     let mounted = pipeline::mount_chroot_binds()?;
     let source = Box::new(progress::MarkerProgress::default()) as Box<dyn progress::ProgressSource>;

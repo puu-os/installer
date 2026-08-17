@@ -158,6 +158,7 @@ impl UserShell {
 pub struct Flatpak {
     pub manifest_path: PathBuf,
     pub sync_helper: PathBuf,
+    pub live_store: PathBuf,
 }
 
 impl Default for Flatpak {
@@ -165,6 +166,7 @@ impl Default for Flatpak {
         Self {
             manifest_path: "/usr/share/puu/flatpaks.list".into(),
             sync_helper: "/usr/libexec/puu/flatpak-sync".into(),
+            live_store: "/var/lib/flatpak".into(),
         }
     }
 }
