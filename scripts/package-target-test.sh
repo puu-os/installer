@@ -34,3 +34,5 @@ expect_driver zigbuild \
   x86_64-unknown-linux-gnu aarch64-unknown-linux-musl
 expect_driver zigbuild \
   aarch64-unknown-linux-gnu x86_64-unknown-linux-musl
+expect_driver zigbuild \
+  aarch64-apple-darwin aarch64-unknown-linux-musl

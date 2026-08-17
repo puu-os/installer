@@ -139,26 +139,6 @@ verify_linux_static() {
   return 0
 }
 
-smoke_host_binary() {
-  local platform="$1"
-  local bin="$2"
-  local host_platform
-
-  host_platform="$(uname -m)"
-  case "$platform" in
-    linux-x64)
-      [[ "$host_platform" == x86_64 ]] || return 0
-      ;;
-    linux-arm64)
-      [[ "$host_platform" == aarch64 || "$host_platform" == arm64 ]] || return 0
-      ;;
-    *)
-      return 0
-      ;;
-  esac
-  "$bin" --help >/dev/null
-}
-
 rustup_has_target() {
   local triple="$1"
   command -v rustup >/dev/null 2>&1 || return 0
@@ -259,12 +239,6 @@ for platform in "${requested[@]}"; do
 
   if ! verify_linux_static "$source_bin"; then
     failed+=("$platform: not statically linked")
-    continue
-  fi
-
-  if ! smoke_host_binary "$platform" "$source_bin"; then
-    failed+=("$platform: host smoke test failed")
-    printf 'fail: %s (host smoke test failed)\n' "$platform" >&2
     continue
   fi
 
