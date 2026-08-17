@@ -437,6 +437,13 @@ impl Digest {
     pub fn as_str(&self) -> &str {
         &self.value
     }
+
+    /// Path of this digest's blob inside an OCI archive (`blobs/sha256/<hex>`).
+    #[must_use]
+    pub fn oci_blob_path(&self) -> PathBuf {
+        let hex = self.value.strip_prefix("sha256:").unwrap_or(&self.value);
+        Path::new("blobs").join("sha256").join(hex)
+    }
 }
 
 impl AsRef<str> for Digest {

@@ -106,14 +106,6 @@ fn oci_index_manifest_digest(index: &[u8]) -> Result<Digest> {
         .parse()
 }
 
-/// Path of a blob inside an OCI archive for a `<algo>:<hex>` digest.
-fn oci_blob_path(digest: &Digest) -> PathBuf {
-    match digest.as_str().split_once(':') {
-        Some((algo, hex)) => Path::new("blobs").join(algo).join(hex),
-        None => Path::new("blobs").join(digest.as_str()),
-    }
-}
-
 /// Raw image manifest bytes for digest verification: the `manifest.json` from a
 /// `dir:` layout or tar archive, else the manifest blob referenced by the
 /// archive's `index.json`.
@@ -139,7 +131,7 @@ pub fn raw_manifest(source_image: &Path) -> Result<Vec<u8>> {
         )
     })?;
     let digest = oci_index_manifest_digest(&index)?;
-    let blob = oci_blob_path(&digest);
+    let blob = digest.oci_blob_path();
     read_archive_entry(source_image, &blob)?.ok_or_else(|| {
         anyhow::anyhow!(
             "OCI archive {} is missing manifest blob {}",
