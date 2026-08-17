@@ -172,14 +172,14 @@ fn step_format_efi(r: &mut Runner) -> Result<()> {
         "formatting {} as FAT32 (label EFI)",
         part.display()
     );
-    Command::new(&[
-        OsStr::new("mkfs.fat"),
-        OsStr::new("-F32"),
-        OsStr::new("-n"),
-        OsStr::new("EFI"),
-        part.as_os_str(),
-    ])
-    .run()?;
+    Command::new("mkfs.fat")
+        .args([
+            OsStr::new("-F32"),
+            OsStr::new("-n"),
+            OsStr::new("EFI"),
+            part.as_os_str(),
+        ])
+        .run()?;
     r.ctx.parts.efi_uuid = Some(crate::engine::block::capture_partuuid(&part)?);
     Ok(())
 }
@@ -193,14 +193,14 @@ fn step_format_root(r: &mut Runner) -> Result<()> {
         "formatting {} as XFS (label {label})",
         part.display()
     );
-    Command::new(&[
-        OsStr::new("mkfs.xfs"),
-        OsStr::new("-f"),
-        OsStr::new("-L"),
-        OsStr::new(label.as_str()),
-        part.as_os_str(),
-    ])
-    .run()?;
+    Command::new("mkfs.xfs")
+        .args([
+            OsStr::new("-f"),
+            OsStr::new("-L"),
+            OsStr::new(label.as_str()),
+            part.as_os_str(),
+        ])
+        .run()?;
     r.ctx.parts.root_uuid = Some(crate::engine::block::capture_uuid(&part)?);
     Ok(())
 }
@@ -209,18 +209,18 @@ fn step_format_home(r: &mut Runner) -> Result<()> {
     let part = r.ctx.parts.home_part.clone();
     let label = r.ctx.config.labels.home.clone();
     pipeline::wait_for_block_device(&part)?;
-    Command::new(&[
-        OsStr::new("mke2fs"),
-        OsStr::new("-t"),
-        OsStr::new("ext4"),
-        OsStr::new("-O"),
-        OsStr::new("encrypt"),
-        OsStr::new("-F"),
-        OsStr::new("-L"),
-        OsStr::new(label.as_str()),
-        part.as_os_str(),
-    ])
-    .run()?;
+    Command::new("mke2fs")
+        .args([
+            OsStr::new("-t"),
+            OsStr::new("ext4"),
+            OsStr::new("-O"),
+            OsStr::new("encrypt"),
+            OsStr::new("-F"),
+            OsStr::new("-L"),
+            OsStr::new(label.as_str()),
+            part.as_os_str(),
+        ])
+        .run()?;
     r.ctx.parts.home_uuid = Some(crate::engine::block::capture_uuid(&part)?);
     Ok(())
 }
@@ -320,8 +320,7 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
         ),
     )?;
 
-    let mut argv: Vec<String> = vec![
-        "unshare".into(),
+    let mut args: Vec<String> = vec![
         "--pid".into(),
         "--fork".into(),
         "--mount-proc".into(),
@@ -332,11 +331,11 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
     ];
 
     if let Some(ref src) = source_image {
-        argv.push("--source-imgref".into());
-        argv.push(image::image_source_ref(src).to_string());
+        args.push("--source-imgref".into());
+        args.push(image::image_source_ref(src).to_string());
     }
 
-    argv.extend([
+    args.extend([
         "--target-imgref".into(),
         r.ctx.target_imgref.to_string(),
         "--skip-fetch-check".into(),
@@ -346,11 +345,11 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
     ]);
 
     for arg in pipeline::install_kernel_args(&root_uuid, &r.ctx.config)? {
-        argv.push("--karg".into());
-        argv.push(arg.to_string());
+        args.push("--karg".into());
+        args.push(arg.to_string());
     }
 
-    argv.push(TARGET_MOUNT.into());
+    args.push(TARGET_MOUNT.into());
 
     tracing::info!(
         target: crate::engine::INSTALLATION_LOG_TARGET,
@@ -369,8 +368,8 @@ fn step_bootc_install(r: &mut Runner) -> Result<()> {
         .and_then(|expected| progress::DiskWriteProgress::new(TARGET_MOUNT, expected).ok())
         .map(|source| Box::new(source) as Box<dyn progress::ProgressSource>);
     let cmd = match tracker {
-        Some(source) => r.cmd_tracked(&argv, source),
-        None => Command::new(&argv),
+        Some(source) => r.cmd_tracked("unshare", source).args(&args),
+        None => Command::new("unshare").args(&args),
     };
     cmd.env(&env)
         .heartbeat(
@@ -509,14 +508,11 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
         return Ok(());
     }
 
-    let mut argv: Vec<String> = vec![
-        r.ctx.config.k3s.helper.display().to_string(),
-        "--role".into(),
-        r.ctx.config.k3s.role.to_string(),
-    ];
+    let helper = r.ctx.config.k3s.helper.clone();
+    let mut args: Vec<String> = vec!["--role".into(), r.ctx.config.k3s.role.to_string()];
     if let Some(server_url) = &r.ctx.config.k3s.server_url {
-        argv.push("--server-url".into());
-        argv.push(server_url.to_string());
+        args.push("--server-url".into());
+        args.push(server_url.to_string());
     }
 
     let mut cleanups = pipeline::CleanupStack::default();
@@ -544,14 +540,17 @@ fn step_configure_k3s_cluster(r: &mut Runner) -> Result<()> {
         token_file.write_all(r.ctx.k3s_token.as_bytes())?;
         token_file.write_all(b"\n")?;
         token_file.sync_all()?;
-        argv.push("--token-file".into());
-        argv.push("/etc/rancher/k3s/puu-token".into());
+        args.push("--token-file".into());
+        args.push("/etc/rancher/k3s/puu-token".into());
     }
     if let Some(node_name) = &r.ctx.config.k3s.node_name {
-        argv.push("--node-name".into());
-        argv.push(node_name.to_string());
+        args.push("--node-name".into());
+        args.push(node_name.to_string());
     }
-    Command::new(&argv).chroot(TARGET_MOUNT).run()?;
+    Command::new(&helper)
+        .args(&args)
+        .chroot(TARGET_MOUNT)
+        .run()?;
     drop(cleanups);
     r.ctx.k3s_token.zeroize();
 
@@ -653,7 +652,7 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
     let mounted = pipeline::mount_chroot_binds()?;
     let source = Box::new(progress::MarkerProgress::default()) as Box<dyn progress::ProgressSource>;
     let result = r
-        .cmd_tracked(&[helper.as_os_str()], source)
+        .cmd_tracked(helper.as_os_str(), source)
         .chroot(TARGET_MOUNT)
         .heartbeat(
             Duration::from_secs(30),

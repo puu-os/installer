@@ -27,10 +27,10 @@ const OUTPUT_TAIL_LINES: usize = 12;
 const OUTPUT_QUEUE_CAPACITY: usize = 64;
 const PROGRESS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
-fn format_argv(argv: &[OsString]) -> String {
-    let mut parts: Vec<String> = Vec::with_capacity(argv.len());
+fn format_argv(program: &OsStr, args: &[OsString]) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(args.len() + 1);
     let mut redact_next = false;
-    for arg in argv {
+    for arg in std::iter::once(program).chain(args.iter().map(OsString::as_os_str)) {
         let arg = arg.to_string_lossy();
         if redact_next {
             parts.push(REDACTED.to_string());
@@ -58,11 +58,12 @@ fn format_argv(argv: &[OsString]) -> String {
 /// replacing the external `chroot` helper. The expression is `unchecked`, so a
 /// non-zero exit is reported as a code rather than an error.
 fn build_expression(
-    argv: &[OsString],
+    program: &OsStr,
+    args: &[OsString],
     env: Option<&[(OsString, OsString)]>,
     chroot_dir: Option<&Path>,
 ) -> Expression {
-    let mut expr = duct::cmd(&argv[0], &argv[1..])
+    let mut expr = duct::cmd(program, args)
         .stderr_to_stdout()
         .stdin_null()
         .unchecked();
@@ -100,7 +101,8 @@ fn enter_chroot(target: Option<&CStr>) -> io::Result<()> {
 /// A subprocess invocation. Merged stdout+stderr is emitted as tracing events;
 /// a non-zero exit becomes an error.
 pub struct Command<'a> {
-    argv: Vec<OsString>,
+    program: OsString,
+    args: Vec<OsString>,
     env: Option<Vec<(OsString, OsString)>>,
     heartbeat: Option<(Duration, &'a str)>,
     chroot_dir: Option<PathBuf>,
@@ -108,15 +110,27 @@ pub struct Command<'a> {
 }
 
 impl<'a> Command<'a> {
-    pub fn new<S: AsRef<OsStr>>(argv: &[S]) -> Self {
-        let argv = argv.iter().map(|arg| arg.as_ref().to_os_string()).collect();
+    pub fn new(program: impl AsRef<OsStr>) -> Self {
         Self {
-            argv,
+            program: program.as_ref().to_os_string(),
+            args: Vec::new(),
             env: None,
             heartbeat: None,
             chroot_dir: None,
             tracker: None,
         }
+    }
+
+    /// Append arguments after the program name.
+    #[must_use]
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.args
+            .extend(args.into_iter().map(|arg| arg.as_ref().to_os_string()));
+        self
     }
 
     /// Run with the given environment variables set for the child.
@@ -166,9 +180,14 @@ impl<'a> Command<'a> {
         let command_line = self.to_string();
         tracing::info!(target: crate::engine::INSTALLATION_LOG_TARGET, "$ {command_line}");
 
-        let reader = build_expression(&self.argv, self.env.as_deref(), self.chroot_dir.as_deref())
-            .reader()
-            .with_context(|| format!("failed to spawn {}", self.argv[0].to_string_lossy()))?;
+        let reader = build_expression(
+            &self.program,
+            &self.args,
+            self.env.as_deref(),
+            self.chroot_dir.as_deref(),
+        )
+        .reader()
+        .with_context(|| format!("failed to spawn {}", self.program.to_string_lossy()))?;
         let (tx, rx) = mpsc::sync_channel::<String>(OUTPUT_QUEUE_CAPACITY);
 
         let reader_thread = std::thread::spawn(move || -> i32 {
@@ -248,6 +267,6 @@ impl<'a> Command<'a> {
 
 impl std::fmt::Display for Command<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format_argv(&self.argv))
+        f.write_str(&format_argv(&self.program, &self.args))
     }
 }

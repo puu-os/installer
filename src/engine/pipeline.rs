@@ -203,15 +203,15 @@ impl Runner {
 
     /// Build a command that samples `source` while it runs and
     /// reports it as the current step's progress.
-    pub fn cmd_tracked<S: AsRef<OsStr>>(
+    pub fn cmd_tracked(
         &mut self,
-        argv: &[S],
+        program: impl AsRef<OsStr>,
         source: Box<dyn crate::engine::progress::ProgressSource>,
     ) -> command::Command<'_> {
         let step_index = self.step_index;
         let progress = &mut self.progress;
         let emit = move |fraction: f64| (progress)(step_index, fraction);
-        command::Command::new(argv).track(source, Box::new(emit))
+        command::Command::new(program).track(source, Box::new(emit))
     }
 
     pub fn execute(
