@@ -15,6 +15,10 @@ use zbus::blocking::fdo::ObjectManagerProxy;
 use zbus::names::OwnedInterfaceName;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
+use uuid::Uuid;
+
+use crate::engine::block::DeviceField;
+
 const UDISKS2_SERVICE: &str = "org.freedesktop.UDisks2";
 const UDISKS2_PATH: &str = "/org/freedesktop/UDisks2";
 const IFACE_BLOCK: &str = "org.freedesktop.UDisks2.Block";
@@ -118,17 +122,18 @@ impl Objects {
         })
     }
 
-    pub(crate) fn probe(&self, device: &Path, key: &str) -> Option<String> {
+    pub(crate) fn probe_uuid(&self, device: &Path, field: DeviceField) -> Option<Uuid> {
         let path = self.block_by_device(device)?;
-        match key {
-            "UUID" => owned_string(self.prop(path, IFACE_BLOCK, "IdUUID")),
-            "TYPE" => owned_string(self.prop(path, IFACE_BLOCK, "IdType")),
-            "LABEL" => owned_string(self.prop(path, IFACE_BLOCK, "IdLabel")),
-            "PARTUUID" | "PART_ENTRY_UUID" => {
-                owned_string(self.prop(path, IFACE_PARTITION, "UUID"))
-            }
-            _ => None,
-        }
+        let value = match field {
+            DeviceField::Uuid => owned_string(self.prop(path, IFACE_BLOCK, "IdUUID"))?,
+            DeviceField::PartUuid => owned_string(self.prop(path, IFACE_PARTITION, "UUID"))?,
+        };
+        Uuid::parse_str(value.trim()).ok()
+    }
+
+    pub(crate) fn probe_fstype(&self, device: &Path) -> Option<String> {
+        let path = self.block_by_device(device)?;
+        owned_string(self.prop(path, IFACE_BLOCK, "IdType"))
     }
 }
 

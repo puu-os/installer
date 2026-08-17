@@ -18,6 +18,12 @@ pub struct Device {
     pub busy_reason: Option<BusyReason>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeviceField {
+    Uuid,
+    PartUuid,
+}
+
 /// Stacked holder that keeps a disk from being an install target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MappingKind {
@@ -221,63 +227,12 @@ fn udev_property(name: &OsStr, key: &str) -> Option<String> {
     None
 }
 
-fn list_disks_sysfs() -> Result<Vec<Device>> {
-    let mut disks = Vec::new();
-    for entry in std::fs::read_dir("/sys/block")
-        .map_err(|e| anyhow::anyhow!("failed to list /sys/block: {e}"))?
-    {
-        let entry = entry.map_err(|e| anyhow::anyhow!("failed to read /sys/block: {e}"))?;
-        let name = entry.file_name();
-        if crate::engine::udisks::is_virtual_block(name.as_bytes()) {
-            continue;
-        }
-        if !Path::new("/sys/class/block")
-            .join(&name)
-            .join("dev")
-            .is_file()
-        {
-            continue;
-        }
-        let path = Path::new("/dev").join(&name);
-        disks.push(Device {
-            model: sysfs_disk_model(&name),
-            size: sysfs_disk_size(&name),
-            transport: sysfs_disk_transport(&name),
-            busy_reason: disk_busy(&path),
-            path,
-        });
-    }
+fn sort_disks(mut disks: Vec<Device>) -> Vec<Device> {
     disks.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(disks)
+    disks
 }
 
-pub fn list_disks() -> Result<Vec<Device>> {
-    match crate::engine::udisks::Objects::fetch() {
-        Ok(objects) => {
-            let mut disks: Vec<Device> = objects
-                .disks()
-                .into_iter()
-                .map(|disk| {
-                    let transport = disk
-                        .transport
-                        .or_else(|| disk.path.file_name().and_then(sysfs_disk_transport));
-                    Device {
-                        busy_reason: disk_busy(&disk.path),
-                        path: disk.path,
-                        model: disk.model,
-                        size: disk.size,
-                        transport,
-                    }
-                })
-                .collect();
-            disks.sort_by(|a, b| a.path.cmp(&b.path));
-            Ok(disks)
-        }
-        Err(_) => list_disks_sysfs(),
-    }
-}
-
-fn by_id_value(dir: &str, device: &Path) -> Option<String> {
+fn by_id_uuid(dir: &str, device: &Path) -> Option<Uuid> {
     let device_path = std::fs::canonicalize(device).ok()?;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let entry_path = entry.path();
@@ -285,99 +240,194 @@ fn by_id_value(dir: &str, device: &Path) -> Option<String> {
             continue;
         }
         if let Some(value) = entry_path.file_name().and_then(|name| name.to_str()) {
-            return Some(value.to_string());
+            return Uuid::parse_str(value.trim()).ok();
         }
     }
     None
 }
 
-pub(crate) fn find_device_by_label(label: &str) -> Option<PathBuf> {
-    if let Ok(objects) = crate::engine::udisks::Objects::fetch()
-        && let Some(device) = objects.find_by_label(label)
-    {
-        return Some(device);
+fn sysfs_partuuid(device: &Path) -> Option<Uuid> {
+    if let Some(partuuid) = by_id_uuid("/dev/disk/by-partuuid", device) {
+        return Some(partuuid);
     }
-    let by_label = Path::new("/dev/disk/by-label").join(label);
-    by_label.exists().then_some(by_label)
+    let name = device.file_name()?;
+    let uevent =
+        std::fs::read_to_string(Path::new("/sys/class/block").join(name).join("uevent")).ok()?;
+    uevent.lines().find_map(|line| {
+        line.strip_prefix("PARTUUID=")
+            .and_then(|value| Uuid::parse_str(value.trim()).ok())
+    })
 }
 
-pub(crate) fn probe_value(device: impl AsRef<Path>, key: &str) -> String {
-    let device = device.as_ref();
-    if let Ok(objects) = crate::engine::udisks::Objects::fetch()
-        && let Some(value) = objects.probe(device, key)
-    {
-        return value;
+trait DiskBackend {
+    fn disks(&self) -> Result<Vec<Device>>;
+    fn find_by_label(&self, label: &str) -> Option<PathBuf>;
+    fn probe_uuid(&self, device: &Path, field: DeviceField) -> Option<Uuid>;
+    fn probe_fstype(&self, device: &Path) -> Option<String>;
+}
+
+struct Sysfs;
+
+impl DiskBackend for Sysfs {
+    fn disks(&self) -> Result<Vec<Device>> {
+        let mut disks = Vec::new();
+        for entry in std::fs::read_dir("/sys/block")
+            .map_err(|e| anyhow::anyhow!("failed to list /sys/block: {e}"))?
+        {
+            let entry = entry.map_err(|e| anyhow::anyhow!("failed to read /sys/block: {e}"))?;
+            let name = entry.file_name();
+            if crate::engine::udisks::is_virtual_block(name.as_bytes()) {
+                continue;
+            }
+            if !Path::new("/sys/class/block")
+                .join(&name)
+                .join("dev")
+                .is_file()
+            {
+                continue;
+            }
+            let path = Path::new("/dev").join(&name);
+            disks.push(Device {
+                model: sysfs_disk_model(&name),
+                size: sysfs_disk_size(&name),
+                transport: sysfs_disk_transport(&name),
+                busy_reason: disk_busy(&path),
+                path,
+            });
+        }
+        Ok(sort_disks(disks))
     }
-    let value = match key {
-        "UUID" => by_id_value("/dev/disk/by-uuid", device),
-        "LABEL" => by_id_value("/dev/disk/by-label", device),
-        "PARTUUID" | "PART_ENTRY_UUID" => by_id_value("/dev/disk/by-partuuid", device),
-        "TYPE" => device
+
+    fn find_by_label(&self, label: &str) -> Option<PathBuf> {
+        let by_label = Path::new("/dev/disk/by-label").join(label);
+        by_label.exists().then_some(by_label)
+    }
+
+    fn probe_uuid(&self, device: &Path, field: DeviceField) -> Option<Uuid> {
+        match field {
+            DeviceField::Uuid => by_id_uuid("/dev/disk/by-uuid", device),
+            DeviceField::PartUuid => sysfs_partuuid(device),
+        }
+    }
+
+    fn probe_fstype(&self, device: &Path) -> Option<String> {
+        device
             .file_name()
-            .and_then(|name| udev_property(name, "ID_FS_TYPE")),
-        _ => None,
-    };
-    value.unwrap_or_default()
+            .and_then(|name| udev_property(name, "ID_FS_TYPE"))
+    }
 }
 
-fn parse_uuid(value: &str, device: &Path, kind: &str) -> Result<Uuid> {
-    Uuid::parse_str(value.trim())
-        .map_err(|e| anyhow::anyhow!("invalid {kind} for {}: {e}", device.display()))
+impl DiskBackend for crate::engine::udisks::Objects {
+    fn disks(&self) -> Result<Vec<Device>> {
+        let disks = crate::engine::udisks::Objects::disks(self)
+            .into_iter()
+            .map(|disk| {
+                let transport = disk
+                    .transport
+                    .or_else(|| disk.path.file_name().and_then(sysfs_disk_transport));
+                Device {
+                    busy_reason: disk_busy(&disk.path),
+                    path: disk.path,
+                    model: disk.model,
+                    size: disk.size,
+                    transport,
+                }
+            })
+            .collect();
+        Ok(sort_disks(disks))
+    }
+
+    fn find_by_label(&self, label: &str) -> Option<PathBuf> {
+        crate::engine::udisks::Objects::find_by_label(self, label)
+    }
+
+    fn probe_uuid(&self, device: &Path, field: DeviceField) -> Option<Uuid> {
+        crate::engine::udisks::Objects::probe_uuid(self, device, field)
+    }
+
+    fn probe_fstype(&self, device: &Path) -> Option<String> {
+        crate::engine::udisks::Objects::probe_fstype(self, device)
+    }
+}
+
+pub(crate) enum DiskSource {
+    Udisks(crate::engine::udisks::Objects),
+    Sysfs,
+}
+
+impl DiskSource {
+    pub(crate) fn open() -> Self {
+        match crate::engine::udisks::Objects::fetch() {
+            Ok(objects) => Self::Udisks(objects),
+            Err(_) => Self::Sysfs,
+        }
+    }
+
+    fn backend(&self) -> &dyn DiskBackend {
+        match self {
+            Self::Udisks(objects) => objects,
+            Self::Sysfs => &Sysfs,
+        }
+    }
+
+    pub(crate) fn find_by_label(&self, label: &str) -> Option<PathBuf> {
+        DiskBackend::find_by_label(self, label)
+    }
+
+    pub(crate) fn probe_uuid(&self, device: &Path, field: DeviceField) -> Option<Uuid> {
+        DiskBackend::probe_uuid(self, device, field)
+    }
+
+    pub(crate) fn probe_fstype(&self, device: &Path) -> Option<String> {
+        DiskBackend::probe_fstype(self, device)
+    }
+}
+
+impl DiskBackend for DiskSource {
+    fn disks(&self) -> Result<Vec<Device>> {
+        self.backend().disks()
+    }
+
+    fn find_by_label(&self, label: &str) -> Option<PathBuf> {
+        self.backend().find_by_label(label).or_else(|| match self {
+            Self::Udisks(_) => Sysfs.find_by_label(label),
+            Self::Sysfs => None,
+        })
+    }
+
+    fn probe_uuid(&self, device: &Path, field: DeviceField) -> Option<Uuid> {
+        self.backend()
+            .probe_uuid(device, field)
+            .or_else(|| match self {
+                Self::Udisks(_) => Sysfs.probe_uuid(device, field),
+                Self::Sysfs => None,
+            })
+    }
+
+    fn probe_fstype(&self, device: &Path) -> Option<String> {
+        self.backend().probe_fstype(device).or_else(|| match self {
+            Self::Udisks(_) => Sysfs.probe_fstype(device),
+            Self::Sysfs => None,
+        })
+    }
+}
+
+pub fn list_disks() -> Result<Vec<Device>> {
+    DiskBackend::disks(&DiskSource::open())
 }
 
 pub fn capture_uuid(device: impl AsRef<Path>) -> Result<Uuid> {
     let device = device.as_ref();
-    let uuid = probe_value(device, "UUID");
-    if uuid.is_empty() {
-        bail!("unable to determine UUID for {}", device.display());
-    }
-    parse_uuid(&uuid, device, "UUID")
+    DiskSource::open()
+        .probe_uuid(device, DeviceField::Uuid)
+        .ok_or_else(|| anyhow::anyhow!("unable to determine UUID for {}", device.display()))
 }
 
 pub fn capture_partuuid(device: impl AsRef<Path>) -> Result<Uuid> {
     let device = device.as_ref();
-    let partuuid = probe_value(device, "PART_ENTRY_UUID");
-    if !partuuid.is_empty() {
-        return parse_uuid(&partuuid, device, "PARTUUID");
-    }
-
-    let partuuid = probe_value(device, "PARTUUID");
-    if !partuuid.is_empty() {
-        return parse_uuid(&partuuid, device, "PARTUUID");
-    }
-
-    let name = device
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("invalid partition device '{}'", device.display()))?;
-    let uevent = std::fs::read_to_string(Path::new("/sys/class/block").join(name).join("uevent"));
-    if let Ok(uevent) = uevent {
-        for line in uevent.lines() {
-            if let Some(partuuid) = line.strip_prefix("PARTUUID=") {
-                return parse_uuid(partuuid, device, "PARTUUID");
-            }
-        }
-    }
-
-    let device_path = std::fs::canonicalize(device)
-        .map_err(|e| anyhow::anyhow!("failed to canonicalize {}: {e}", device.display()))?;
-    for entry in std::fs::read_dir("/dev/disk/by-partuuid")
-        .into_iter()
-        .flatten()
-        .flatten()
-    {
-        let entry_path = entry.path();
-        let target = std::fs::canonicalize(&entry_path);
-        if target.as_ref().ok() != Some(&device_path) {
-            continue;
-        }
-
-        if let Some(partuuid) = entry_path.file_name().and_then(|name| name.to_str()) {
-            return parse_uuid(partuuid, device, "PARTUUID");
-        }
-    }
-
-    bail!("unable to determine PARTUUID for {}", device.display());
+    DiskSource::open()
+        .probe_uuid(device, DeviceField::PartUuid)
+        .ok_or_else(|| anyhow::anyhow!("unable to determine PARTUUID for {}", device.display()))
 }
 
 pub fn drive_size_bytes(drive: impl AsRef<Path>) -> Result<u64> {

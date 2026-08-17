@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use nix::mount::MsFlags;
 
-use crate::engine::block::probe_value;
+use crate::engine::block::DiskSource;
 use crate::engine::config::{Config, Digest, ImageRef};
 use crate::engine::pipeline::{path_is_mount, unmount};
 
@@ -168,13 +168,11 @@ pub fn default_source_image(config: &Config) -> Option<PathBuf> {
 
     // Resolve the payload label to a device node via UDisks2, falling back to
     // /dev/disk/by-label (replaces `blkid -L`).
-    let device = crate::engine::block::find_device_by_label(config.image.source_label.as_str())?;
+    let disks = DiskSource::open();
+    let device = disks.find_by_label(config.image.source_label.as_str())?;
 
     // mount(2) needs an explicit filesystem type; probe it (replaces `mount -o ro`).
-    let fstype = probe_value(&device, "TYPE");
-    if fstype.is_empty() {
-        return None;
-    }
+    let fstype = disks.probe_fstype(&device)?;
 
     std::fs::create_dir_all(mount).ok()?;
     nix::mount::mount(
