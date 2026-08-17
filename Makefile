@@ -4,27 +4,32 @@
 CARGO ?= cargo
 CARGO_ZIGBUILD ?= cargo-zigbuild
 
-.PHONY: all check ci clippy package publish clean
+.PHONY: default help all check ci clippy package publish clean
 
-all:
+default: help
+
+help: ## Show this help
+	@awk -F ':[^#]*## ?' '/^[a-z_-]+:[^#]*##/{printf "  make %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+all: ## Build the installer
 	$(CARGO) build
 
-check:
+check: ## Build and lint with clippy
 	$(CARGO) build
 	$(CARGO) clippy --all-targets -- -D warnings
 
-ci:
+ci: ## Run the local CI script
 	CARGO="$(CARGO)" ./scripts/ci.sh
 
-clippy:
+clippy: ## Lint with clippy
 	$(CARGO) clippy --all-targets -- -D warnings
 
-package:
+package: ## Package release tarballs
 	CARGO_ZIGBUILD="$(CARGO_ZIGBUILD)" ./scripts/package.sh $(PLATFORMS)
 
-publish:
+publish: ## Publish a GitLab release
 	./scripts/publish.sh "$(VERSION)"
 
-clean:
+clean: ## Remove build artifacts
 	$(CARGO) clean
 	$(RM) -r artifacts
