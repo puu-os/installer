@@ -13,17 +13,15 @@ use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 
 use crate::engine::config::PartitionSize;
+use crate::engine::firmware::EfiGuid;
 use crate::engine::util::random_bytes;
 
-// GPT partition type GUIDs, in on-disk (mixed-endian) byte order.
-// EFI System Partition: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
-const PART_TYPE_ESP: [u8; 16] = [
+const PART_TYPE_ESP: EfiGuid = EfiGuid::from_bytes_le([
     0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
-];
-// Linux filesystem: 0FC63DAF-8483-4772-8E79-3D69D8477DE4
-const PART_TYPE_LINUX: [u8; 16] = [
+]);
+const PART_TYPE_LINUX: EfiGuid = EfiGuid::from_bytes_le([
     0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47, 0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4,
-];
+]);
 
 /// Create a fresh GPT on `drive` with EFI, root and home partitions, using the
 /// `gptman` crate instead of shelling out to `sgdisk`/`partprobe`.
@@ -106,13 +104,13 @@ pub fn partition_drive(
 fn set_entry(
     gpt: &mut gptman::GPT,
     index: u32,
-    partition_type_guid: [u8; 16],
+    partition_type_guid: EfiGuid,
     start: u64,
     end: u64,
     name: &str,
 ) -> Result<()> {
     gpt[index] = gptman::GPTPartitionEntry {
-        partition_type_guid,
+        partition_type_guid: partition_type_guid.into(),
         unique_partition_guid: random_bytes::<16>()?,
         starting_lba: start,
         ending_lba: end,
@@ -151,7 +149,7 @@ pub fn load_partition_layout(drive: impl AsRef<Path>) -> Result<PartitionLayout>
 
     for number in 1..=gpt.header.number_of_partition_entries {
         let entry = &gpt[number];
-        if entry.is_used() && entry.partition_type_guid == PART_TYPE_ESP {
+        if entry.is_used() && EfiGuid::from_bytes_le(entry.partition_type_guid) == PART_TYPE_ESP {
             return Ok(PartitionLayout {
                 efi: PartitionInfo::from_entry(number, entry),
             });
@@ -204,7 +202,7 @@ fn partition_path(drive: &Path, number: u8) -> PathBuf {
 #[derive(Debug, Clone, Default)]
 pub struct PartitionInfo {
     pub number: u32,
-    pub unique_guid: [u8; 16],
+    pub unique_guid: EfiGuid,
     pub starting_lba: u64,
     pub ending_lba: u64,
 }
@@ -213,7 +211,7 @@ impl PartitionInfo {
     fn from_entry(number: u32, entry: &gptman::GPTPartitionEntry) -> Self {
         Self {
             number,
-            unique_guid: entry.unique_partition_guid,
+            unique_guid: EfiGuid::from_bytes_le(entry.unique_partition_guid),
             starting_lba: entry.starting_lba,
             ending_lba: entry.ending_lba,
         }

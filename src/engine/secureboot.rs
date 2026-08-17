@@ -27,6 +27,7 @@ use openssl::x509::store::X509StoreBuilder;
 use crate::engine::der::{
     algorithm_identifier, der_int_u8, der_octet, der_oid, der_read, der_seq, der_set, der_tlv,
 };
+use crate::engine::firmware::EfiGuid;
 use crate::engine::pipeline::{TARGET_EFI_MOUNT, TARGET_MOUNT};
 
 // Object identifiers, expressed as arc sequences and DER-encoded on demand.
@@ -495,19 +496,15 @@ pub fn verify_pe(image: &[u8], cert_pem: &str) -> Result<bool> {
 
 // --- Key enrollment (replaces `sbctl enroll-keys`) ---
 
-// GUIDs in on-disk (mixed-endian) byte order.
-const EFI_CERT_X509_GUID: [u8; 16] = [
+const EFI_CERT_X509: EfiGuid = EfiGuid::from_bytes_le([
     0xa1, 0x59, 0xc0, 0xa5, 0xe4, 0x94, 0xa7, 0x4a, 0x87, 0xb5, 0xab, 0x15, 0x5c, 0x2b, 0xf0, 0x72,
-];
-const EFI_CERT_TYPE_PKCS7_GUID: [u8; 16] = [
+]);
+const EFI_CERT_TYPE_PKCS7: EfiGuid = EfiGuid::from_bytes_le([
     0x9d, 0xd2, 0xaf, 0x4a, 0xdf, 0x68, 0xee, 0x49, 0x8a, 0xa9, 0x34, 0x7d, 0x37, 0x56, 0x65, 0xa7,
-];
-const EFI_GLOBAL_VARIABLE_GUID: [u8; 16] = [
-    0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93, 0xd2, 0x11, 0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c,
-];
-const EFI_IMAGE_SECURITY_DATABASE_GUID: [u8; 16] = [
+]);
+const EFI_IMAGE_SECURITY_DATABASE: EfiGuid = EfiGuid::from_bytes_le([
     0xcb, 0xb2, 0x19, 0xd7, 0x3a, 0x3d, 0x96, 0x45, 0xa3, 0xbc, 0xda, 0xd0, 0x0e, 0x67, 0x65, 0x6f,
-];
+]);
 
 // NV | BS | RT | TIME_BASED_AUTHENTICATED_WRITE_ACCESS
 const AUTH_VAR_ATTRS: u32 = 0x1 | 0x2 | 0x4 | 0x20;
@@ -515,15 +512,15 @@ const WIN_CERT_TYPE_EFI_GUID: u16 = 0x0ef1;
 const EFIVARS_DIR: &str = "/sys/firmware/efi/efivars";
 
 /// EFI_SIGNATURE_LIST holding a single X.509 certificate.
-fn signature_list(cert_der: &[u8], owner_guid: &[u8; 16]) -> Vec<u8> {
+fn signature_list(cert_der: &[u8], owner_guid: EfiGuid) -> Vec<u8> {
     let signature_size = 16 + cert_der.len();
     let list_size = 28 + signature_size;
     let mut out = Vec::with_capacity(list_size);
-    out.extend_from_slice(&EFI_CERT_X509_GUID);
+    out.extend_from_slice(EFI_CERT_X509.as_ref());
     out.extend_from_slice(&(list_size as u32).to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes()); // SignatureHeaderSize
     out.extend_from_slice(&(signature_size as u32).to_le_bytes());
-    out.extend_from_slice(owner_guid);
+    out.extend_from_slice(owner_guid.as_ref());
     out.extend_from_slice(cert_der);
     out
 }
@@ -534,12 +531,12 @@ fn efi_time_zero() -> [u8; 16] {
 }
 
 /// VariableName (CHAR16, no NUL) || VendorGuid || Attributes || TimeStamp || Data.
-fn auth_message(name: &str, vendor_guid: &[u8; 16], data: &[u8]) -> Vec<u8> {
+fn auth_message(name: &str, vendor_guid: EfiGuid, data: &[u8]) -> Vec<u8> {
     let mut msg = Vec::new();
     for unit in name.encode_utf16() {
         msg.extend_from_slice(&unit.to_le_bytes());
     }
-    msg.extend_from_slice(vendor_guid);
+    msg.extend_from_slice(vendor_guid.as_ref());
     msg.extend_from_slice(&AUTH_VAR_ATTRS.to_le_bytes());
     msg.extend_from_slice(&efi_time_zero());
     msg.extend_from_slice(data);
@@ -568,7 +565,7 @@ fn sign_detached_pkcs7(
 /// descriptor followed by the EFI_SIGNATURE_LIST).
 fn authenticated_payload(
     name: &str,
-    vendor_guid: &[u8; 16],
+    vendor_guid: EfiGuid,
     esl: &[u8],
     signer_key: &PKeyRef<Private>,
     signer_cert: &X509,
@@ -583,20 +580,17 @@ fn authenticated_payload(
     out.extend_from_slice(&(win_cert_len as u32).to_le_bytes()); // dwLength
     out.extend_from_slice(&WIN_CERT_REVISION_2_0.to_le_bytes());
     out.extend_from_slice(&WIN_CERT_TYPE_EFI_GUID.to_le_bytes());
-    out.extend_from_slice(&EFI_CERT_TYPE_PKCS7_GUID);
+    out.extend_from_slice(EFI_CERT_TYPE_PKCS7.as_ref());
     out.extend_from_slice(&pkcs7);
     out.extend_from_slice(esl);
     Ok(out)
 }
 
 /// Write an authenticated EFI variable via efivarfs.
-fn write_auth_variable(name: &str, vendor_guid: &[u8; 16], payload: &[u8]) -> Result<()> {
+fn write_auth_variable(name: &str, vendor_guid: EfiGuid, payload: &[u8]) -> Result<()> {
     use std::io::Write;
 
-    let guid_str = uuid::Uuid::from_bytes_le(*vendor_guid)
-        .hyphenated()
-        .to_string();
-    let path = format!("{EFIVARS_DIR}/{name}-{guid_str}");
+    let path = format!("{EFIVARS_DIR}/{name}-{vendor_guid}");
 
     // efivarfs expects one write of: attributes(u32 LE) || payload.
     let mut buf = Vec::with_capacity(4 + payload.len());
@@ -618,7 +612,7 @@ fn write_auth_variable(name: &str, vendor_guid: &[u8; 16], payload: &[u8]) -> Re
 
 /// Enroll PK/KEK/db from a sbctl-style keydir. Enrolls db and KEK first, then
 /// PK last (enrolling PK leaves Setup Mode). Replaces `sbctl enroll-keys`.
-pub fn enroll_keys(keydir: &std::path::Path, owner_guid: &[u8; 16]) -> Result<()> {
+pub fn enroll_keys(keydir: &std::path::Path, owner_guid: EfiGuid) -> Result<()> {
     let read_pair = |kind: &str| -> Result<(PKey<Private>, X509)> {
         let dir = keydir.join(kind);
         let key_pem = std::fs::read_to_string(dir.join(kind).with_extension("key"))
@@ -636,24 +630,19 @@ pub fn enroll_keys(keydir: &std::path::Path, owner_guid: &[u8; 16]) -> Result<()
 
     // db: payload db cert, signed by KEK, stored under the image security db GUID.
     let esl = signature_list(&cert_der(&db_cert)?, owner_guid);
-    let payload = authenticated_payload(
-        "db",
-        &EFI_IMAGE_SECURITY_DATABASE_GUID,
-        &esl,
-        &kek_key,
-        &kek_cert,
-    )?;
-    write_auth_variable("db", &EFI_IMAGE_SECURITY_DATABASE_GUID, &payload)?;
+    let payload =
+        authenticated_payload("db", EFI_IMAGE_SECURITY_DATABASE, &esl, &kek_key, &kek_cert)?;
+    write_auth_variable("db", EFI_IMAGE_SECURITY_DATABASE, &payload)?;
 
     // KEK: payload KEK cert, signed by PK.
     let esl = signature_list(&cert_der(&kek_cert)?, owner_guid);
-    let payload = authenticated_payload("KEK", &EFI_GLOBAL_VARIABLE_GUID, &esl, &pk_key, &pk_cert)?;
-    write_auth_variable("KEK", &EFI_GLOBAL_VARIABLE_GUID, &payload)?;
+    let payload = authenticated_payload("KEK", EfiGuid::GLOBAL_VARIABLE, &esl, &pk_key, &pk_cert)?;
+    write_auth_variable("KEK", EfiGuid::GLOBAL_VARIABLE, &payload)?;
 
     // PK: payload PK cert, self-signed; enrolling this leaves Setup Mode.
     let esl = signature_list(&cert_der(&pk_cert)?, owner_guid);
-    let payload = authenticated_payload("PK", &EFI_GLOBAL_VARIABLE_GUID, &esl, &pk_key, &pk_cert)?;
-    write_auth_variable("PK", &EFI_GLOBAL_VARIABLE_GUID, &payload)?;
+    let payload = authenticated_payload("PK", EfiGuid::GLOBAL_VARIABLE, &esl, &pk_key, &pk_cert)?;
+    write_auth_variable("PK", EfiGuid::GLOBAL_VARIABLE, &payload)?;
 
     Ok(())
 }
@@ -683,11 +672,9 @@ pub fn sbctl_keydir() -> PathBuf {
 }
 
 /// Signature owner GUID (from the generated GUID file) in EFI byte order.
-pub fn sbctl_owner_guid() -> [u8; 16] {
+pub fn sbctl_owner_guid() -> EfiGuid {
     let contents = std::fs::read_to_string(target_sbctl_dir().join("GUID")).unwrap_or_default();
-    uuid::Uuid::parse_str(contents.trim())
-        .unwrap_or(uuid::Uuid::nil())
-        .to_bytes_le()
+    contents.trim().parse().unwrap_or(EfiGuid::NIL)
 }
 
 pub fn target_efi_binaries() -> Vec<PathBuf> {

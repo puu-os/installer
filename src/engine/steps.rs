@@ -698,7 +698,7 @@ fn step_nvram(r: &mut Runner) -> Result<()> {
         .layout
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("EFI partition layout metadata is missing"))?;
-    let partition_sig = uuid::Builder::from_bytes_le(layout.efi.unique_guid).into_uuid();
+    let partition_sig = layout.efi.unique_guid.into();
     let file_path_list = FilePathList {
         hard_drive: EFIHardDrive {
             partition_number: layout.efi.number,
@@ -864,7 +864,7 @@ fn step_secureboot(_r: &mut Runner) -> Result<()> {
     crate::engine::secureboot::ensure_sbctl_keys()?;
     let keydir = crate::engine::secureboot::sbctl_keydir();
     let owner = crate::engine::secureboot::sbctl_owner_guid();
-    match crate::engine::secureboot::enroll_keys(&keydir, &owner) {
+    match crate::engine::secureboot::enroll_keys(&keydir, owner) {
         Ok(()) => {
             tracing::info!(
                 target: crate::engine::INSTALLATION_LOG_TARGET,

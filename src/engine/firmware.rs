@@ -1,10 +1,70 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-const EFI_GLOBAL_VARIABLE: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
 const EFIVARS: &str = "/sys/firmware/efi/efivars";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EfiGuid([u8; 16]);
+
+impl EfiGuid {
+    pub(crate) const NIL: Self = Self([0; 16]);
+    pub(crate) const GLOBAL_VARIABLE: Self = Self::from_bytes_le([
+        0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93, 0xd2, 0x11, 0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b,
+        0x8c,
+    ]);
+
+    pub(crate) const fn from_bytes_le(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl Default for EfiGuid {
+    fn default() -> Self {
+        Self::NIL
+    }
+}
+
+impl From<uuid::Uuid> for EfiGuid {
+    fn from(uuid: uuid::Uuid) -> Self {
+        Self::from_bytes_le(uuid.to_bytes_le())
+    }
+}
+
+impl From<EfiGuid> for uuid::Uuid {
+    fn from(guid: EfiGuid) -> Self {
+        Self::from_bytes_le(guid.0)
+    }
+}
+
+impl From<EfiGuid> for [u8; 16] {
+    fn from(guid: EfiGuid) -> Self {
+        guid.0
+    }
+}
+
+impl FromStr for EfiGuid {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(uuid::Uuid::parse_str(s)?.into())
+    }
+}
+
+impl fmt::Display for EfiGuid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        uuid::Uuid::from_bytes_le(self.0).hyphenated().fmt(f)
+    }
+}
+
+impl AsRef<[u8; 16]> for EfiGuid {
+    fn as_ref(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
 
 /// Whether the install should enroll Secure Boot keys.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -35,7 +95,7 @@ impl SetupMode {
 }
 
 fn efi_variable_path(name: &str, root: &Path) -> Option<PathBuf> {
-    let exact = root.join(format!("{name}-{EFI_GLOBAL_VARIABLE}"));
+    let exact = root.join(format!("{name}-{}", EfiGuid::GLOBAL_VARIABLE));
     if exact.exists() {
         return Some(exact);
     }
