@@ -15,31 +15,6 @@ use uuid::Uuid;
 use crate::engine::config::PartitionSize;
 use crate::engine::util::random_bytes;
 
-const PART_SIZE_UNITS: &[(&str, u64)] = &[
-    ("K", 1024),
-    ("M", 1024 * 1024),
-    ("G", 1024 * 1024 * 1024),
-    ("T", 1024 * 1024 * 1024 * 1024),
-    ("P", 1024 * 1024 * 1024 * 1024 * 1024),
-];
-
-pub(crate) fn part_size_bytes(size: &str) -> Result<u64> {
-    let s = size.strip_prefix('+').unwrap_or(size);
-    let (num_str, unit) = s
-        .split_at_checked(s.len().saturating_sub(1))
-        .ok_or_else(|| anyhow::anyhow!("unsupported partition size: {size}"))?;
-    let num: u64 = num_str
-        .parse()
-        .map_err(|_| anyhow::anyhow!("unsupported partition size: {size}"))?;
-    let multiplier = PART_SIZE_UNITS
-        .iter()
-        .find(|(u, _)| *u == unit)
-        .map(|(_, m)| *m)
-        .ok_or_else(|| anyhow::anyhow!("unsupported partition unit: {unit}"))?;
-    num.checked_mul(multiplier)
-        .ok_or_else(|| anyhow::anyhow!("partition size is too large: {size}"))
-}
-
 // GPT partition type GUIDs, in on-disk (mixed-endian) byte order.
 // EFI System Partition: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
 const PART_TYPE_ESP: [u8; 16] = [

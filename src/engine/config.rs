@@ -884,11 +884,33 @@ impl PartitionSize {
     }
 }
 
+const PART_SIZE_UNITS: &[(&str, u64)] = &[
+    ("K", 1024),
+    ("M", 1024 * 1024),
+    ("G", 1024 * 1024 * 1024),
+    ("T", 1024 * 1024 * 1024 * 1024),
+    ("P", 1024 * 1024 * 1024 * 1024 * 1024),
+];
+
 impl FromStr for PartitionSize {
     type Err = anyhow::Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bytes = crate::engine::partition::part_size_bytes(s)?;
+    fn from_str(size: &str) -> Result<Self, Self::Err> {
+        let s = size.strip_prefix('+').unwrap_or(size);
+        let (num_str, unit) = s
+            .split_at_checked(s.len().saturating_sub(1))
+            .ok_or_else(|| anyhow::anyhow!("unsupported partition size: {size}"))?;
+        let num: u64 = num_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("unsupported partition size: {size}"))?;
+        let multiplier = PART_SIZE_UNITS
+            .iter()
+            .find(|(u, _)| *u == unit)
+            .map(|(_, m)| *m)
+            .ok_or_else(|| anyhow::anyhow!("unsupported partition unit: {unit}"))?;
+        let bytes = num
+            .checked_mul(multiplier)
+            .ok_or_else(|| anyhow::anyhow!("partition size is too large: {size}"))?;
         if bytes == 0 {
             anyhow::bail!("partition size must be greater than zero");
         }
