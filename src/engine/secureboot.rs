@@ -586,8 +586,15 @@ fn authenticated_payload(
     Ok(out)
 }
 
+/// linux/fs.h FS_IMMUTABLE_FL. libc exports the ioctl numbers, not this flag.
+const FS_IMMUTABLE_FL: libc::c_long = 0x0000_0010;
+
 /// Clear FS_IMMUTABLE so an existing authenticated variable can be replaced.
 fn clear_immutable(file: &std::fs::File) {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+    }
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::AsRawFd;
@@ -599,10 +606,9 @@ fn clear_immutable(file: &std::fs::File) {
         if unsafe { libc::ioctl(fd, libc::FS_IOC_GETFLAGS, std::ptr::from_mut(&mut flags)) } != 0 {
             return;
         }
-        flags &= !i64::from(libc::FS_IMMUTABLE_FL);
+        flags &= !FS_IMMUTABLE_FL;
         let _ = unsafe { libc::ioctl(fd, libc::FS_IOC_SETFLAGS, std::ptr::from_ref(&flags)) };
     }
-    let _ = file;
 }
 
 /// Write an authenticated EFI variable via efivarfs.
