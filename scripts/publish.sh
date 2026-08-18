@@ -12,7 +12,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/sha256.sh"
 
 GLAB="${GLAB:-glab}"
-platforms=(linux-arm64 linux-x64)
+platforms=(linux-aarch64 linux-x86_64)
 
 cleanup() {
   local status=$?
@@ -114,8 +114,8 @@ for platform in "${platforms[@]}"; do
 
   description="$(file -b "$archived_bin")"
   case "$platform" in
-    linux-arm64) expected_arch=aarch64 ;;
-    linux-x64) expected_arch=x86-64 ;;
+    linux-aarch64) expected_arch=aarch64 ;;
+    linux-x86_64) expected_arch=x86-64 ;;
   esac
   if [[ "${description,,}" != *"$expected_arch"* || \
     "$description" != *"statically linked"* ]]; then

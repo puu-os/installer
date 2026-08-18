@@ -7,7 +7,7 @@
 #   other triples — cargo-zigbuild (Zig linker)
 #
 # Platforms:
-#   linux-x64, linux-arm64 — x86_64/aarch64-unknown-linux-musl (static)
+#   linux-x86_64, linux-aarch64 — x86_64/aarch64-unknown-linux-musl (static)
 #
 # Exit 0 if every requested platform was packaged.
 # Exit 2 if a requested build fails while another succeeds.
@@ -90,8 +90,8 @@ package_target_root="${CARGO_TARGET_DIR:-$repo_root/target/package}"
 
 # platform|rust-triple|binary-name
 platforms=(
-  'linux-x64|x86_64-unknown-linux-musl|puu-installer'
-  'linux-arm64|aarch64-unknown-linux-musl|puu-installer'
+  'linux-x86_64|x86_64-unknown-linux-musl|puu-installer'
+  'linux-aarch64|aarch64-unknown-linux-musl|puu-installer'
 )
 
 requested=()
@@ -186,7 +186,7 @@ build_native() {
 needs_zigbuild=0
 for platform in "${requested[@]}"; do
   entry="$(platform_entry "$platform")" \
-    || die "unknown platform: $platform (supported: linux-x64 linux-arm64)"
+    || die "unknown platform: $platform (supported: linux-x86_64 linux-aarch64)"
   IFS='|' read -r _ triple _ <<<"$entry"
   if [[ "$(package_build_driver "$rust_host_triple" "$triple")" == zigbuild ]]; then
     needs_zigbuild=1
@@ -204,7 +204,7 @@ mkdir -p artifacts
 
 for platform in "${requested[@]}"; do
   entry="$(platform_entry "$platform")" \
-    || die "unknown platform: $platform (supported: linux-x64 linux-arm64)"
+    || die "unknown platform: $platform (supported: linux-x86_64 linux-aarch64)"
 
   IFS='|' read -r _ triple binary <<<"$entry"
 

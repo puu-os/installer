@@ -71,9 +71,6 @@ homed:
     - realtime
     - uucp
 serialConsole: {}       # map of machine name -> console
-kernel:
-  extraArm64Args:
-    - cma=256M
 ```
 
 ## External commands
@@ -101,7 +98,7 @@ release tarballs and matching `<file>.sha256` sidecars under `artifacts/`:
 
 ```sh
 make package
-make package PLATFORMS='linux-x64'
+make package PLATFORMS='linux-x86_64'
 PACKAGE_STRICT=1 make package
 ```
 
