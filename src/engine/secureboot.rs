@@ -586,6 +586,25 @@ fn authenticated_payload(
     Ok(out)
 }
 
+/// Clear FS_IMMUTABLE so an existing authenticated variable can be replaced.
+fn clear_immutable(file: &std::fs::File) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+
+        let fd = file.as_raw_fd();
+        let mut flags: libc::c_long = 0;
+        // SAFETY: ioctl on an open efivarfs fd; GETFLAGS/SETFLAGS read and write
+        // a single integer flag word.
+        if unsafe { libc::ioctl(fd, libc::FS_IOC_GETFLAGS, std::ptr::from_mut(&mut flags)) } != 0 {
+            return;
+        }
+        flags &= !i64::from(libc::FS_IMMUTABLE_FL);
+        let _ = unsafe { libc::ioctl(fd, libc::FS_IOC_SETFLAGS, std::ptr::from_ref(&flags)) };
+    }
+    let _ = file;
+}
+
 /// Write an authenticated EFI variable via efivarfs.
 fn write_auth_variable(name: &str, vendor_guid: EfiGuid, payload: &[u8]) -> Result<()> {
     use std::io::Write;
@@ -603,10 +622,10 @@ fn write_auth_variable(name: &str, vendor_guid: EfiGuid, payload: &[u8]) -> Resu
         .truncate(false)
         .open(&path)
         .map_err(|e| anyhow!("failed to open {path}: {e}"))?;
+    clear_immutable(&file);
     file.write_all(&buf)
         .map_err(|e| anyhow!("failed to write {path}: {e}"))?;
-    file.sync_all()
-        .map_err(|e| anyhow!("failed to sync {path}: {e}"))?;
+    // SetVariable runs in write(); efivarfs has no fsync, so sync_all is EINVAL.
     Ok(())
 }
 
