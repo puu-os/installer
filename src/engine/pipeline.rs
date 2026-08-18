@@ -366,9 +366,6 @@ pub fn install_kernel_args(
     if let Some(console) = serial_console {
         args.push(console);
     }
-    if machine == Arch::Aarch64 {
-        args.extend(config.kernel.extra_arm64_args.iter().cloned());
-    }
     Ok(args)
 }
 

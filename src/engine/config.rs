@@ -22,7 +22,6 @@ pub struct Config {
     pub k3s: K3s,
     pub homed: Homed,
     pub serial_console: HashMap<Arch, KernelArg>,
-    pub kernel: Kernel,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -975,22 +974,6 @@ impl Default for Homed {
             .into_iter()
             .map(|name| GroupName { value: name.into() })
             .collect(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-pub struct Kernel {
-    pub extra_arm64_args: Vec<KernelArg>,
-}
-
-impl Default for Kernel {
-    fn default() -> Self {
-        Self {
-            extra_arm64_args: vec![KernelArg {
-                value: "cma=256M".into(),
-            }],
         }
     }
 }
