@@ -249,14 +249,16 @@ const COAST_RGB: u32 = pack_rgb(85, 255, 85);
 const SEA_RGB: u32 = pack_rgb(0, 0, 170);
 const SEA_SHIMMER_RGB: u32 = pack_rgb(85, 85, 255);
 const GUIDE_RGB: u32 = pack_rgb(0, 170, 170);
-const LAND_NIGHT_RGB: u32 = pack_rgb(85, 85, 85);
-const COAST_NIGHT_RGB: u32 = pack_rgb(170, 170, 170);
+const LAND_NIGHT_RGB: u32 = pack_rgb(0, 85, 0);
+const COAST_NIGHT_RGB: u32 = pack_rgb(0, 85, 0);
 const SEA_NIGHT_RGB: u32 = pack_rgb(0, 0, 0);
-const GUIDE_NIGHT_RGB: u32 = pack_rgb(85, 85, 85);
-const TERMINATOR_RGB: u32 = pack_rgb(255, 85, 255);
+const GUIDE_NIGHT_RGB: u32 = pack_rgb(0, 0, 85);
+const LAND_TWILIGHT_RGB: u32 = pack_rgb(0, 85, 0);
+const SEA_TWILIGHT_RGB: u32 = pack_rgb(0, 0, 85);
+const GUIDE_TWILIGHT_RGB: u32 = pack_rgb(0, 85, 85);
 const ACCENT_RGB: u32 = pack_rgb(85, 255, 255);
 
-const THEME_SWATCHES: [(Color, u32); 11] = [
+const THEME_SWATCHES: [(Color, u32); 10] = [
     (theme::LAND, LAND_RGB),
     (theme::COAST, COAST_RGB),
     (theme::SEA, SEA_RGB),
@@ -266,7 +268,6 @@ const THEME_SWATCHES: [(Color, u32); 11] = [
     (theme::COAST_NIGHT, COAST_NIGHT_RGB),
     (theme::SEA_NIGHT, SEA_NIGHT_RGB),
     (theme::GUIDE_NIGHT, GUIDE_NIGHT_RGB),
-    (theme::TERMINATOR, TERMINATOR_RGB),
     (theme::ACCENT, ACCENT_RGB),
 ];
 
@@ -317,19 +318,20 @@ fn sample_pixel(coverage: f64, light: f64, lon: f64, on_parallel: bool, lon_tole
     if coverage <= 0.01 {
         let on_meridian = near_grid(lon, 30.0, lon_tolerance);
         if on_parallel && on_meridian {
-            light_rgb(GUIDE_NIGHT_RGB, TERMINATOR_RGB, ACCENT_RGB, light)
+            light_rgb(GUIDE_NIGHT_RGB, GUIDE_TWILIGHT_RGB, ACCENT_RGB, light)
         } else if on_parallel || on_meridian {
-            light_rgb(GUIDE_NIGHT_RGB, TERMINATOR_RGB, GUIDE_RGB, light)
+            light_rgb(GUIDE_NIGHT_RGB, GUIDE_TWILIGHT_RGB, GUIDE_RGB, light)
         } else {
-            light_rgb(SEA_NIGHT_RGB, SEA_SHIMMER_RGB, SEA_RGB, light)
+            light_rgb(SEA_NIGHT_RGB, SEA_TWILIGHT_RGB, SEA_RGB, light)
         }
     } else if coverage >= 0.99 {
-        light_rgb(LAND_NIGHT_RGB, TERMINATOR_RGB, LAND_RGB, light)
+        light_rgb(LAND_NIGHT_RGB, LAND_TWILIGHT_RGB, LAND_RGB, light)
     } else {
         let span = (coverage - 0.01) / 0.98;
         let day = lerp_rgb(COAST_RGB, LAND_RGB, span);
         let night = lerp_rgb(COAST_NIGHT_RGB, LAND_NIGHT_RGB, span);
-        light_rgb(night, TERMINATOR_RGB, day, light)
+        let twilight = lerp_rgb(SEA_TWILIGHT_RGB, LAND_TWILIGHT_RGB, span);
+        light_rgb(night, twilight, day, light)
     }
 }
 
@@ -897,8 +899,6 @@ fn mono_glyph(pixel: u32) -> char {
         || color == theme::ACCENT
     {
         '+'
-    } else if color == theme::TERMINATOR {
-        '*'
     } else if color == theme::SEA_NIGHT {
         '.'
     } else {
