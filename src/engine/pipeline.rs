@@ -164,6 +164,36 @@ pub struct Step {
     pub weight: u32,
 }
 
+impl Step {
+    pub const fn new(title: &'static str, fn_: StepFn) -> Self {
+        Self {
+            title,
+            fn_,
+            point_of_no_return: false,
+            requires_secure_boot: false,
+            weight: 1,
+        }
+    }
+
+    #[must_use]
+    pub const fn point_of_no_return(mut self) -> Self {
+        self.point_of_no_return = true;
+        self
+    }
+
+    #[must_use]
+    pub const fn requires_secure_boot(mut self) -> Self {
+        self.requires_secure_boot = true;
+        self
+    }
+
+    #[must_use]
+    pub const fn weight(mut self, weight: u32) -> Self {
+        self.weight = weight;
+        self
+    }
+}
+
 /// Stack of cleanup actions that run in reverse order on drop, even if a
 /// step fails partway through.
 pub(crate) struct CleanupStack(Vec<Box<dyn FnOnce()>>);
