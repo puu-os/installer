@@ -14,8 +14,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::message::Effect;
-use crate::tui::render::{Color, ColorMode, Frame, Modifier, Rect, Style, color_mode};
+use crate::tui::render::{Frame, Rect, color_mode};
 use crate::tui::state::{AppState, Route};
+use crate::tui::style::{Color, ColorMode, Style};
 use crate::tui::theme;
 
 const VIEW_LON_SPAN: f64 = 180.0;
@@ -232,106 +233,70 @@ fn lighting_factor(lat: f64, lon: f64, sun_lat: f64, sun_lon: f64) -> f64 {
     }
 }
 
-const fn pack_rgb(r: u8, g: u8, b: u8) -> u32 {
-    ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-}
-
-fn unpack_rgb(pixel: u32) -> (u8, u8, u8) {
-    (
-        ((pixel >> 16) & 0xFF) as u8,
-        ((pixel >> 8) & 0xFF) as u8,
-        (pixel & 0xFF) as u8,
-    )
-}
-
-const LAND_RGB: u32 = pack_rgb(0, 170, 0);
-const COAST_RGB: u32 = pack_rgb(85, 255, 85);
-const SEA_RGB: u32 = pack_rgb(0, 0, 170);
-const SEA_SHIMMER_RGB: u32 = pack_rgb(85, 85, 255);
-const GUIDE_RGB: u32 = pack_rgb(0, 170, 170);
-const LAND_NIGHT_RGB: u32 = pack_rgb(0, 85, 0);
-const COAST_NIGHT_RGB: u32 = pack_rgb(0, 85, 0);
-const SEA_NIGHT_RGB: u32 = pack_rgb(0, 0, 0);
-const GUIDE_NIGHT_RGB: u32 = pack_rgb(0, 0, 85);
-const LAND_TWILIGHT_RGB: u32 = pack_rgb(0, 85, 0);
-const SEA_TWILIGHT_RGB: u32 = pack_rgb(0, 0, 85);
-const GUIDE_TWILIGHT_RGB: u32 = pack_rgb(0, 85, 85);
-const ACCENT_RGB: u32 = pack_rgb(85, 255, 255);
-
-const THEME_SWATCHES: [(Color, u32); 10] = [
-    (theme::LAND, LAND_RGB),
-    (theme::COAST, COAST_RGB),
-    (theme::SEA, SEA_RGB),
-    (theme::SEA_SHIMMER, SEA_SHIMMER_RGB),
-    (theme::GUIDE, GUIDE_RGB),
-    (theme::LAND_NIGHT, LAND_NIGHT_RGB),
-    (theme::COAST_NIGHT, COAST_NIGHT_RGB),
-    (theme::SEA_NIGHT, SEA_NIGHT_RGB),
-    (theme::GUIDE_NIGHT, GUIDE_NIGHT_RGB),
-    (theme::ACCENT, ACCENT_RGB),
-];
-
 fn lerp_u8(a: u8, b: u8, t: f64) -> u8 {
     let t = t.clamp(0.0, 1.0);
     let mixed = f64::from(a) + (f64::from(b) - f64::from(a)) * t;
     mixed.round() as u8
 }
 
-fn lerp_rgb(a: u32, b: u32, t: f64) -> u32 {
-    let (ar, ag, ab) = unpack_rgb(a);
-    let (br, bg, bb) = unpack_rgb(b);
-    pack_rgb(lerp_u8(ar, br, t), lerp_u8(ag, bg, t), lerp_u8(ab, bb, t))
+fn lerp_color(a: Color, b: Color, t: f64) -> Color {
+    let (ar, ag, ab) = a.channels();
+    let (br, bg, bb) = b.channels();
+    Color::rgb(lerp_u8(ar, br, t), lerp_u8(ag, bg, t), lerp_u8(ab, bb, t))
 }
 
-fn light_rgb(night: u32, twilight: u32, day: u32, t: f64) -> u32 {
+fn light_color(night: Color, twilight: Color, day: Color, t: f64) -> Color {
     let t = t.clamp(0.0, 1.0);
     if t < 0.5 {
-        lerp_rgb(night, twilight, t * 2.0)
+        lerp_color(night, twilight, t * 2.0)
     } else {
-        lerp_rgb(twilight, day, (t - 0.5) * 2.0)
+        lerp_color(twilight, day, (t - 0.5) * 2.0)
     }
 }
 
-fn snap_theme(pixel: u32) -> Color {
-    let (r, g, b) = unpack_rgb(pixel);
-    THEME_SWATCHES
-        .iter()
-        .min_by_key(|(_, rgb)| {
-            let (pr, pg, pb) = unpack_rgb(*rgb);
-            let dr = i32::from(r) - i32::from(pr);
-            let dg = i32::from(g) - i32::from(pg);
-            let db = i32::from(b) - i32::from(pb);
-            dr * dr + dg * dg + db * db
-        })
-        .map_or(theme::SEA, |(color, _)| *color)
+fn snap_pixel(pixel: Color) -> Color {
+    pixel.quantize(color_mode())
 }
 
-fn snap_pixel(pixel: u32) -> Color {
-    let (r, g, b) = unpack_rgb(pixel);
-    match color_mode() {
-        ColorMode::Mono | ColorMode::Ansi16 => snap_theme(pixel),
-        mode => Color::from_rgb(r, g, b, mode),
-    }
-}
-
-fn sample_pixel(coverage: f64, light: f64, lon: f64, on_parallel: bool, lon_tolerance: f64) -> u32 {
+fn sample_pixel(
+    coverage: f64,
+    light: f64,
+    lon: f64,
+    on_parallel: bool,
+    lon_tolerance: f64,
+) -> Color {
     if coverage <= 0.01 {
         let on_meridian = near_grid(lon, 30.0, lon_tolerance);
         if on_parallel && on_meridian {
-            light_rgb(GUIDE_NIGHT_RGB, GUIDE_TWILIGHT_RGB, ACCENT_RGB, light)
+            light_color(
+                theme::GUIDE_NIGHT,
+                theme::GUIDE_TWILIGHT,
+                theme::ACCENT,
+                light,
+            )
         } else if on_parallel || on_meridian {
-            light_rgb(GUIDE_NIGHT_RGB, GUIDE_TWILIGHT_RGB, GUIDE_RGB, light)
+            light_color(
+                theme::GUIDE_NIGHT,
+                theme::GUIDE_TWILIGHT,
+                theme::GUIDE,
+                light,
+            )
         } else {
-            light_rgb(SEA_NIGHT_RGB, SEA_TWILIGHT_RGB, SEA_RGB, light)
+            light_color(theme::SEA_NIGHT, theme::SEA_TWILIGHT, theme::SEA, light)
         }
     } else if coverage >= 0.99 {
-        light_rgb(LAND_NIGHT_RGB, LAND_TWILIGHT_RGB, LAND_RGB, light)
+        light_color(
+            theme::LAND_NIGHT,
+            theme::LAND_TWILIGHT,
+            theme::LAND,
+            light,
+        )
     } else {
         let span = (coverage - 0.01) / 0.98;
-        let day = lerp_rgb(COAST_RGB, LAND_RGB, span);
-        let night = lerp_rgb(COAST_NIGHT_RGB, LAND_NIGHT_RGB, span);
-        let twilight = lerp_rgb(SEA_TWILIGHT_RGB, LAND_TWILIGHT_RGB, span);
-        light_rgb(night, twilight, day, light)
+        let day = lerp_color(theme::COAST, theme::LAND, span);
+        let night = lerp_color(theme::COAST_NIGHT, theme::LAND_NIGHT, span);
+        let twilight = lerp_color(theme::SEA_TWILIGHT, theme::LAND_TWILIGHT, span);
+        light_color(night, twilight, day, light)
     }
 }
 
@@ -743,7 +708,7 @@ pub(crate) struct MapCache {
     height: usize,
     /// Unix minute used when the day/night terminator was baked in.
     sun_minute: u64,
-    pixels: Vec<u32>,
+    pixels: Vec<Color>,
 }
 
 impl MapCache {
@@ -808,7 +773,7 @@ fn pixel_index(width: usize, x: usize, py: usize) -> Option<usize> {
     width.checked_mul(py).and_then(|row| row.checked_add(x))
 }
 
-fn pixel_at(pixels: &[u32], width: usize, x: usize, py: usize) -> Option<u32> {
+fn pixel_at(pixels: &[Color], width: usize, x: usize, py: usize) -> Option<Color> {
     pixel_index(width, x, py).and_then(|index| pixels.get(index).copied())
 }
 
@@ -823,7 +788,7 @@ fn build_map_cache(origin_x: f64, width: usize, height: usize, unix_secs: u64) -
     let lon_tolerance = VIEW_LON_SPAN / pixel_cols.max(1) as f64 * 0.4;
     let lat_tolerance = row_span / pixel_rows.max(1) as f64 * 0.18;
     let (sun_lat, sun_lon) = subsolar_point(unix_secs);
-    let mut pixels = vec![0; pixel_cols.saturating_mul(pixel_rows)];
+    let mut pixels = vec![Color::default(); pixel_cols.saturating_mul(pixel_rows)];
 
     for py in 0..pixel_rows {
         let top = start_y + py as f64 * pixel_height;
@@ -888,18 +853,26 @@ pub(crate) fn paint_world_map(
     draw_map_overlays(frame, rect, selected_zone, cached);
 }
 
-fn mono_glyph(pixel: u32) -> char {
-    let color = snap_theme(pixel);
-    if color == theme::LAND || color == theme::LAND_NIGHT {
+fn mono_glyph(pixel: Color) -> char {
+    let color = snap_pixel(pixel);
+    let land = theme::LAND.quantize(color_mode());
+    let land_night = theme::LAND_NIGHT.quantize(color_mode());
+    let coast = theme::COAST.quantize(color_mode());
+    let coast_night = theme::COAST_NIGHT.quantize(color_mode());
+    let guide = theme::GUIDE.quantize(color_mode());
+    let guide_night = theme::GUIDE_NIGHT.quantize(color_mode());
+    let accent = theme::ACCENT.quantize(color_mode());
+    let sea_night = theme::SEA_NIGHT.quantize(color_mode());
+    if color == land || color == land_night {
         '#'
-    } else if color == theme::COAST
-        || color == theme::COAST_NIGHT
-        || color == theme::GUIDE
-        || color == theme::GUIDE_NIGHT
-        || color == theme::ACCENT
+    } else if color == coast
+        || color == coast_night
+        || color == guide
+        || color == guide_night
+        || color == accent
     {
         '+'
-    } else if color == theme::SEA_NIGHT {
+    } else if color == sea_night {
         '.'
     } else {
         '~'
@@ -916,7 +889,7 @@ fn mono_rank(glyph: char) -> u8 {
     }
 }
 
-fn cell_quad(cache: &MapCache, x: usize, y: usize) -> Option<[u32; 4]> {
+fn cell_quad(cache: &MapCache, x: usize, y: usize) -> Option<[Color; 4]> {
     let pixel_width = cache.pixel_width();
     let px = x.saturating_mul(2);
     let py = y.saturating_mul(2);
@@ -933,7 +906,7 @@ fn cell_quad(cache: &MapCache, x: usize, y: usize) -> Option<[u32; 4]> {
     Some([tl, tr, bl, br])
 }
 
-fn half_block(quad: [u32; 4]) -> (char, Option<Color>, Option<Color>) {
+fn half_block(quad: [Color; 4]) -> (char, Option<Color>, Option<Color>) {
     let [tl, tr, bl, br] = quad;
     if color_mode() == ColorMode::Mono {
         let glyphs = [
@@ -1117,7 +1090,7 @@ fn put_marker(
     let (glyph, style) = if mono {
         let glyph = if bold { 'X' } else { '*' };
         let style = if bold {
-            Style::default().add_modifier(Modifier::BOLD)
+            Style::default().bold()
         } else {
             Style::default()
         };
@@ -1127,7 +1100,7 @@ fn put_marker(
         let bg = marker_background(cache, proj, glyph);
         let mut style = Style::default().fg(fg).bg(bg);
         if bold {
-            style = style.add_modifier(Modifier::BOLD);
+            style = style.bold();
         }
         (glyph, style)
     };

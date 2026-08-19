@@ -7,5 +7,6 @@ pub(crate) mod message;
 pub(crate) mod render;
 pub(crate) mod runtime;
 pub(crate) mod state;
+pub(crate) mod style;
 pub(crate) mod theme;
 pub(crate) mod timezone;

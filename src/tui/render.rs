@@ -19,12 +19,13 @@ use crossterm::{
 };
 
 use crate::tui::message::{expand_char, sanitize_char};
+use crate::tui::style::{Color, ColorMode, Modifier, Style};
 
 /// The 16-colour ANSI palette, as the two SGR runs that carry it: 30-37 and
 /// 90-97 for the foreground, 40-47 and 100-107 for the background.
 ///
-/// Theme colours stay on these indexes. Emit promotes them through the VGA RGB
-/// for that index when the terminal advertised 256 or 16M colours.
+/// Theme and map colours are 32-bit RGB. Emit quantizes them to these indexes
+/// when the terminal only advertised 16 colours.
 const FG_SGR: [&[u8]; 16] = [
     b"\x1b[30m",
     b"\x1b[31m",
@@ -92,88 +93,6 @@ impl CursorStyle {
         match self {
             CursorStyle::SteadyBlock => CURSOR_STEADY_BLOCK,
             CursorStyle::SteadyBar => CURSOR_STEADY_BAR,
-        }
-    }
-}
-
-/// A terminal colour: a 16-colour index, a 256-colour cube index, or RGB.
-///
-/// Theme constants stay on the 16-colour indexes so `Ansi16` still emits the
-/// short SGR form. Emit promotes those indexes through [`ANSI16_RGB`] when the
-/// terminal advertised 256 or 16M colours. Sampled map pixels carry RGB or a
-/// cube index and are quantized from the detected [`ColorMode`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Color {
-    Indexed(u8),
-    Cube(u8),
-    Rgb { r: u8, g: u8, b: u8 },
-}
-
-impl Default for Color {
-    fn default() -> Self {
-        Self::Indexed(0)
-    }
-}
-
-impl Color {
-    pub(crate) const fn indexed(index: u8) -> Self {
-        Self::Indexed(index)
-    }
-
-    pub(crate) const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Self::Rgb { r, g, b }
-    }
-
-    pub(crate) fn from_rgb(r: u8, g: u8, b: u8, mode: ColorMode) -> Self {
-        match mode {
-            ColorMode::Mono | ColorMode::Ansi16 => Self::Indexed(nearest_ansi16(r, g, b)),
-            ColorMode::Ansi256 => Self::Cube(rgb_to_ansi256(r, g, b)),
-            ColorMode::TrueColor => Self::rgb(r, g, b),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Modifier(u8);
-
-impl Modifier {
-    pub(crate) const BOLD: Self = Self(1 << 0);
-    pub(crate) const DIM: Self = Self(1 << 1);
-    pub(crate) const REVERSE: Self = Self(1 << 2);
-
-    fn contains(self, other: Self) -> bool {
-        self.0 & other.0 != 0
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Style {
-    fg: Option<Color>,
-    bg: Option<Color>,
-    modifiers: Modifier,
-}
-
-impl Style {
-    pub(crate) fn fg(mut self, color: Color) -> Self {
-        self.fg = Some(color);
-        self
-    }
-
-    pub(crate) fn bg(mut self, color: Color) -> Self {
-        self.bg = Some(color);
-        self
-    }
-
-    pub(crate) fn add_modifier(mut self, modifier: Modifier) -> Self {
-        self.modifiers.0 |= modifier.0;
-        self
-    }
-
-    fn patch(self, overlay: Self) -> Self {
-        Self {
-            fg: overlay.fg.or(self.fg),
-            bg: overlay.bg.or(self.bg),
-            modifiers: Modifier(self.modifiers.0 | overlay.modifiers.0),
         }
     }
 }
@@ -525,7 +444,7 @@ impl Widget for Border {
 
 impl Widget for Paragraph {
     fn render(self, frame: &mut Frame, rect: Rect) {
-        if self.style.bg.is_some() {
+        if self.style.has_background() {
             Block { style: self.style }.render(frame, rect);
         }
 
@@ -577,15 +496,6 @@ pub(crate) fn rendered_width(text: &str) -> u16 {
         .sum()
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum ColorMode {
-    Mono,
-    #[default]
-    Ansi16,
-    Ansi256,
-    TrueColor,
-}
-
 fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
@@ -616,81 +526,6 @@ fn detect_color_mode() -> ColorMode {
 pub(crate) fn color_mode() -> ColorMode {
     static MODE: OnceLock<ColorMode> = OnceLock::new();
     *MODE.get_or_init(detect_color_mode)
-}
-
-const ANSI16_RGB: [(u8, u8, u8); 16] = [
-    (0, 0, 0),
-    (170, 0, 0),
-    (0, 170, 0),
-    (170, 85, 0),
-    (0, 0, 170),
-    (170, 0, 170),
-    (0, 170, 170),
-    (170, 170, 170),
-    (85, 85, 85),
-    (255, 85, 85),
-    (85, 255, 85),
-    (255, 255, 85),
-    (85, 85, 255),
-    (255, 85, 255),
-    (85, 255, 255),
-    (255, 255, 255),
-];
-
-fn color_distance(r: u8, g: u8, b: u8, pr: u8, pg: u8, pb: u8) -> i32 {
-    let dr = i32::from(r) - i32::from(pr);
-    let dg = i32::from(g) - i32::from(pg);
-    let db = i32::from(b) - i32::from(pb);
-    dr * dr + dg * dg + db * db
-}
-
-fn nearest_ansi16(r: u8, g: u8, b: u8) -> u8 {
-    ANSI16_RGB
-        .iter()
-        .copied()
-        .enumerate()
-        .min_by_key(|&(_, (pr, pg, pb))| color_distance(r, g, b, pr, pg, pb))
-        .map_or(0, |(index, _)| index as u8)
-}
-
-fn cube_level(channel: u8) -> u8 {
-    if channel < 48 {
-        0
-    } else if channel < 115 {
-        1
-    } else {
-        ((u16::from(channel) - 35) / 40).min(5) as u8
-    }
-}
-
-fn cube_value(level: u8) -> u8 {
-    if level == 0 { 0 } else { 55 + 40 * level }
-}
-
-fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
-    if r == g && g == b {
-        if r < 8 {
-            return 16;
-        }
-        if r > 238 {
-            return 231;
-        }
-        return 232 + ((u16::from(r) - 8) / 10) as u8;
-    }
-    let ri = cube_level(r);
-    let gi = cube_level(g);
-    let bi = cube_level(b);
-    let cube = 16 + 36 * ri + 6 * gi + bi;
-    let cube_dist = color_distance(r, g, b, cube_value(ri), cube_value(gi), cube_value(bi));
-    let indexed = nearest_ansi16(r, g, b);
-    let Some(&(ir, ig, ib)) = ANSI16_RGB.get(indexed as usize) else {
-        return cube;
-    };
-    if color_distance(r, g, b, ir, ig, ib) <= cube_dist {
-        indexed
-    } else {
-        cube
-    }
 }
 
 /// A double-buffered terminal that writes one diffed, run-batched frame per
@@ -1019,45 +854,27 @@ fn push_move_to(bytes: &mut Vec<u8>, x: u16, y: u16) {
     bytes.push(b'H');
 }
 
-fn promote_color(color: Color, mode: ColorMode) -> Color {
-    match (color, mode) {
-        (Color::Indexed(index), ColorMode::Ansi256 | ColorMode::TrueColor) => {
-            let Some(&(r, g, b)) = ANSI16_RGB.get(usize::from(index)) else {
-                return color;
-            };
-            Color::from_rgb(r, g, b, mode)
-        }
-        _ => color,
-    }
-}
-
-fn promote_style(style: Style, mode: ColorMode) -> Style {
-    Style {
-        fg: style.fg.map(|color| promote_color(color, mode)),
-        bg: style.bg.map(|color| promote_color(color, mode)),
-        modifiers: style.modifiers,
-    }
-}
-
-fn emit_sgr_color(bytes: &mut Vec<u8>, color: Color, foreground: bool) {
-    match color {
-        Color::Indexed(index) => {
+fn emit_sgr_color(bytes: &mut Vec<u8>, color: Color, foreground: bool, mode: ColorMode) {
+    let (r, g, b) = color.channels();
+    match mode {
+        ColorMode::Mono => {}
+        ColorMode::Ansi16 => {
+            let index = color.ansi16_index();
             let table = if foreground { FG_SGR } else { BG_SGR };
-            let seq = table.get(usize::from(index)).or_else(|| table.get(15));
-            if let Some(seq) = seq {
+            if let Some(seq) = table.get(usize::from(index)).or_else(|| table.get(15)) {
                 bytes.extend_from_slice(seq);
             }
         }
-        Color::Cube(index) => {
+        ColorMode::Ansi256 => {
             bytes.extend_from_slice(if foreground {
                 b"\x1b[38;5;"
             } else {
                 b"\x1b[48;5;"
             });
-            push_num(bytes, u16::from(index));
+            push_num(bytes, u16::from(color.ansi256_index()));
             bytes.push(b'm');
         }
-        Color::Rgb { r, g, b } => {
+        ColorMode::TrueColor => {
             bytes.extend_from_slice(if foreground {
                 b"\x1b[38;2;"
             } else {
@@ -1079,19 +896,19 @@ fn emit_sgr_color(bytes: &mut Vec<u8>, color: Color, foreground: bool) {
 /// An individual attribute cannot be switched off, so dropping one costs a full
 /// SGR reset — which also drops the colours, hence the re-emit that follows.
 fn emit_style(bytes: &mut Vec<u8>, wire: &mut Style, next: Style, color_mode: ColorMode) {
-    *wire = promote_style(*wire, color_mode);
-    let next = promote_style(next, color_mode);
+    *wire = wire.quantize(color_mode);
+    let next = next.quantize(color_mode);
     if *wire == next {
         return;
     }
 
-    if wire.modifiers.0 & !next.modifiers.0 != 0 {
+    if wire.drops_modifiers(next) {
         bytes.extend_from_slice(SGR_RESET);
         *wire = Style::default();
     }
 
-    let wire_reverse = wire.modifiers.contains(Modifier::REVERSE);
-    let next_reverse = next.modifiers.contains(Modifier::REVERSE);
+    let wire_reverse = wire.has_modifier(Modifier::REVERSE);
+    let next_reverse = next.has_modifier(Modifier::REVERSE);
 
     match color_mode {
         ColorMode::Mono => {
@@ -1108,15 +925,15 @@ fn emit_style(bytes: &mut Vec<u8>, wire: &mut Style, next: Style, color_mode: Co
             }
         }
         ColorMode::Ansi16 | ColorMode::Ansi256 | ColorMode::TrueColor => {
-            if wire.fg != next.fg {
-                match next.fg {
-                    Some(color) => emit_sgr_color(bytes, color, true),
+            if wire.foreground() != next.foreground() {
+                match next.foreground() {
+                    Some(color) => emit_sgr_color(bytes, color, true, color_mode),
                     None => bytes.extend_from_slice(SGR_FG_DEFAULT),
                 }
             }
-            if wire.bg != next.bg {
-                match next.bg {
-                    Some(color) => emit_sgr_color(bytes, color, false),
+            if wire.background() != next.background() {
+                match next.background() {
+                    Some(color) => emit_sgr_color(bytes, color, false, color_mode),
                     None => bytes.extend_from_slice(SGR_BG_DEFAULT),
                 }
             }
@@ -1130,10 +947,10 @@ fn emit_style(bytes: &mut Vec<u8>, wire: &mut Style, next: Style, color_mode: Co
         }
     }
 
-    if next.modifiers.contains(Modifier::BOLD) && !wire.modifiers.contains(Modifier::BOLD) {
+    if next.has_modifier(Modifier::BOLD) && !wire.has_modifier(Modifier::BOLD) {
         bytes.extend_from_slice(SGR_BOLD);
     }
-    if next.modifiers.contains(Modifier::DIM) && !wire.modifiers.contains(Modifier::DIM) {
+    if next.has_modifier(Modifier::DIM) && !wire.has_modifier(Modifier::DIM) {
         bytes.extend_from_slice(SGR_DIM);
     }
 

@@ -20,13 +20,14 @@ use crate::engine::{block, firmware, pipeline};
 use crate::tui::app::{InstallTask, Installer, Trap};
 use crate::tui::message::{DriveInfo, Effect, Message, MouseKind, sanitize_text};
 use crate::tui::render::{
-    self, Block, Border, Color, CursorStyle, Frame, Input, Line, Modifier, Paragraph, Rect, Span,
-    Style, Terminal, install_panic_hook, mouse_kind, poll_input, tui_or_exit,
+    self, Block, Border, CursorStyle, Frame, Input, Line, Paragraph, Rect, Span, Terminal,
+    install_panic_hook, mouse_kind, poll_input, tui_or_exit,
 };
 use crate::tui::state::{
     AppState, Cyclic, IdentityDraft, IdentityField, InstallStatus, InstallStepState, LocaleChoice,
     Modal, ModalChoice, RebootChoice, ReviewChoice, Route, SecureBootChoice, WelcomeChoice,
 };
+use crate::tui::style::{Color, Style};
 use crate::tui::theme;
 use crate::tui::timezone;
 
@@ -1370,11 +1371,11 @@ fn layout_mode((width, height): (u16, u16)) -> LayoutMode {
 // ---------------------------------------------------------------------------
 
 fn bold(style: Style) -> Style {
-    style.add_modifier(Modifier::BOLD)
+    style.bold()
 }
 
 fn dim(style: Style) -> Style {
-    style.add_modifier(Modifier::DIM)
+    style.dim()
 }
 
 /// Interior body rect of a panel: below the border and two title rows.

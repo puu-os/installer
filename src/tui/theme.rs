@@ -3,33 +3,32 @@
 
 //! Shared terminal palette.
 //!
-//! Each constant is a 16-colour ANSI index carried by the offscreen renderer
-//! ([`crate::tui::render::Color`]). The indexes match the VGA RGB the map already
-//! samples. Emit keeps the short SGR form on `Ansi16` and promotes the same RGB
-//! to 256 or 16M when the terminal advertised it.
+//! Each constant is 32-bit RGB carried by the offscreen renderer
+//! ([`crate::tui::style::Color`]). The values match the VGA RGB the map already
+//! samples. Emit quantizes them to 16 or 256 colours when the terminal
+//! advertised that depth.
 
-use crate::tui::render::Color;
+use crate::tui::style::Color;
 
-const fn idx(index: u8) -> Color {
-    Color::indexed(index)
-}
-
-pub(crate) const BACKGROUND: Color = idx(0); // black
-pub(crate) const PANEL: Color = idx(8); // bright black (dark grey)
-pub(crate) const TITLE: Color = idx(12); // bright blue
-pub(crate) const TITLE_DETAIL: Color = idx(4); // blue
-pub(crate) const FOREGROUND: Color = idx(15); // bright white
-pub(crate) const MUTED: Color = idx(7); // grey
-pub(crate) const ACCENT: Color = idx(14); // bright cyan
-pub(crate) const SUCCESS: Color = idx(10); // bright green
-pub(crate) const WARNING: Color = idx(11); // bright yellow
-pub(crate) const DANGER: Color = idx(9); // bright red
-pub(crate) const LAND: Color = idx(2); // green
-pub(crate) const COAST: Color = idx(10); // bright green
-pub(crate) const SEA: Color = idx(4); // blue
-pub(crate) const SEA_SHIMMER: Color = idx(12); // bright blue
-pub(crate) const GUIDE: Color = idx(6); // cyan
-pub(crate) const LAND_NIGHT: Color = idx(2); // green, dimmed by lighting
-pub(crate) const COAST_NIGHT: Color = idx(2); // green, dimmed by lighting
-pub(crate) const SEA_NIGHT: Color = idx(0); // black
-pub(crate) const GUIDE_NIGHT: Color = idx(4); // blue, dimmed by lighting
+pub(crate) const BACKGROUND: Color = Color::rgb(0, 0, 0); // black
+pub(crate) const PANEL: Color = Color::rgb(85, 85, 85); // bright black (dark grey)
+pub(crate) const TITLE: Color = Color::rgb(85, 85, 255); // bright blue
+pub(crate) const TITLE_DETAIL: Color = Color::rgb(0, 0, 170); // blue
+pub(crate) const FOREGROUND: Color = Color::rgb(255, 255, 255); // bright white
+pub(crate) const MUTED: Color = Color::rgb(170, 170, 170); // grey
+pub(crate) const ACCENT: Color = Color::rgb(85, 255, 255); // bright cyan
+pub(crate) const SUCCESS: Color = Color::rgb(85, 255, 85); // bright green
+pub(crate) const WARNING: Color = Color::rgb(255, 255, 85); // bright yellow
+pub(crate) const DANGER: Color = Color::rgb(255, 85, 85); // bright red
+pub(crate) const LAND: Color = Color::rgb(0, 170, 0); // green
+pub(crate) const COAST: Color = Color::rgb(85, 255, 85); // bright green
+pub(crate) const SEA: Color = Color::rgb(0, 0, 170); // blue
+pub(crate) const SEA_SHIMMER: Color = Color::rgb(85, 85, 255); // bright blue
+pub(crate) const GUIDE: Color = Color::rgb(0, 170, 170); // cyan
+pub(crate) const LAND_NIGHT: Color = Color::rgb(0, 85, 0); // green, dimmed by lighting
+pub(crate) const COAST_NIGHT: Color = Color::rgb(0, 85, 0); // green, dimmed by lighting
+pub(crate) const SEA_NIGHT: Color = Color::rgb(0, 0, 0); // black
+pub(crate) const GUIDE_NIGHT: Color = Color::rgb(0, 0, 85); // blue, dimmed by lighting
+pub(crate) const LAND_TWILIGHT: Color = Color::rgb(0, 85, 0);
+pub(crate) const SEA_TWILIGHT: Color = Color::rgb(0, 0, 85);
+pub(crate) const GUIDE_TWILIGHT: Color = Color::rgb(0, 85, 85);
