@@ -137,17 +137,8 @@ enum HitAction {
 
 #[derive(Clone, Copy, Debug)]
 struct HitTarget {
-    x0: u16,
-    y0: u16,
-    x1: u16,
-    y1: u16,
+    rect: Rect,
     action: HitAction,
-}
-
-impl HitTarget {
-    fn contains(self, column: u16, row: u16) -> bool {
-        column >= self.x0 && column < self.x1 && row >= self.y0 && row < self.y1
-    }
 }
 
 /// Content frame matching `render_screen` geometry (headers + footer + padding).
@@ -176,10 +167,7 @@ fn list_row_targets(
         .map(|offset| {
             let y = first_row.saturating_add(u16::try_from(offset).unwrap_or(u16::MAX));
             HitTarget {
-                x0,
-                y0: y,
-                x1,
-                y1: y.saturating_add(1),
+                rect: Rect::from_corners(x0, y, x1, y.saturating_add(1)),
                 action: HitAction::Select(start_index.saturating_add(offset)),
             }
         })
@@ -256,10 +244,7 @@ fn modal_hit_targets(width: u16, height: u16) -> Vec<HitTarget> {
         .into_iter()
         .zip([ModalChoice::No, ModalChoice::Yes])
         .map(|(rect, choice)| HitTarget {
-            x0: rect.x,
-            y0: rect.y,
-            x1: rect.x.saturating_add(rect.width),
-            y1: rect.y.saturating_add(1),
+            rect,
             action: HitAction::ModalSelect(choice),
         })
         .collect()
@@ -280,17 +265,11 @@ fn timezone_hit_targets(
         let split = cy0 + (cy1 - cy0) * 2 / 5;
         let map_mid = list_x0 + (list_x1 - list_x0) / 2;
         targets.push(HitTarget {
-            x0: list_x0,
-            y0: cy0.saturating_add(1),
-            x1: map_mid,
-            y1: split,
+            rect: Rect::from_corners(list_x0, cy0.saturating_add(1), map_mid, split),
             action: HitAction::MapPan(MapPanDirection::Left),
         });
         targets.push(HitTarget {
-            x0: map_mid,
-            y0: cy0.saturating_add(1),
-            x1: list_x1,
-            y1: split,
+            rect: Rect::from_corners(map_mid, cy0.saturating_add(1), list_x1, split),
             action: HitAction::MapPan(MapPanDirection::Right),
         });
         // Filter row + zone rows start under the list panel title.
@@ -307,17 +286,21 @@ fn timezone_hit_targets(
         let split = cx0 + (cx1 - cx0) * 2 / 3;
         let map_mid = cx0 + (split - cx0) / 2;
         targets.push(HitTarget {
-            x0: cx0.saturating_add(1),
-            y0: cy0.saturating_add(1),
-            x1: map_mid,
-            y1: cy1.saturating_sub(1),
+            rect: Rect::from_corners(
+                cx0.saturating_add(1),
+                cy0.saturating_add(1),
+                map_mid,
+                cy1.saturating_sub(1),
+            ),
             action: HitAction::MapPan(MapPanDirection::Left),
         });
         targets.push(HitTarget {
-            x0: map_mid,
-            y0: cy0.saturating_add(1),
-            x1: split.saturating_sub(1),
-            y1: cy1.saturating_sub(1),
+            rect: Rect::from_corners(
+                map_mid,
+                cy0.saturating_add(1),
+                split.saturating_sub(1),
+                cy1.saturating_sub(1),
+            ),
             action: HitAction::MapPan(MapPanDirection::Right),
         });
         let zones_left = split.saturating_add(2);
@@ -394,10 +377,7 @@ fn build_hit_targets(state: &AppState, terminal_size: (u16, u16)) -> Vec<HitTarg
         Route::Install => {
             // Whole content region re-enables log follow on click.
             vec![HitTarget {
-                x0: cx0,
-                y0: cy0,
-                x1: cx1,
-                y1: cy1,
+                rect: Rect::from_corners(cx0, cy0, cx1, cy1),
                 action: HitAction::InstallFollow,
             }]
         }
@@ -412,7 +392,7 @@ fn hit_test(targets: &[HitTarget], column: u16, row: u16) -> Option<HitAction> {
     targets
         .iter()
         .rev()
-        .find(|target| target.contains(column, row))
+        .find(|target| target.rect.contains(column, row))
         .map(|target| target.action)
 }
 

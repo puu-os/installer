@@ -120,6 +120,23 @@ impl Rect {
             height,
         }
     }
+
+    pub(crate) const fn from_corners(x0: u16, y0: u16, x1: u16, y1: u16) -> Self {
+        Self {
+            x: x0,
+            y: y0,
+            width: x1.saturating_sub(x0),
+            height: y1.saturating_sub(y0),
+        }
+    }
+
+    /// Whether `(column, row)` falls inside the half-open rectangle.
+    pub(crate) const fn contains(self, column: u16, row: u16) -> bool {
+        column >= self.x
+            && column < self.x.saturating_add(self.width)
+            && row >= self.y
+            && row < self.y.saturating_add(self.height)
+    }
 }
 
 #[derive(Clone, Debug)]
