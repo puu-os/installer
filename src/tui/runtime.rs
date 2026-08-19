@@ -2874,14 +2874,22 @@ impl Installer {
         };
         prepare_state(&mut controller);
         let mut map_cache: Option<timezone::MapCache> = None;
+        let mut dirty = true;
 
         loop {
             controller.terminal_size = terminal_size();
             if controller.trap.is_some() {
                 break;
             }
+            if dirty {
+                let controller_ref: &UiController = &controller;
+                tui_or_exit(
+                    terminal.draw(|frame| render_screen(frame, controller_ref, &mut map_cache)),
+                    "draw",
+                );
+                dirty = false;
+            }
             let timeout = poll_interval(&controller);
-            let mut dirty = false;
             match poll_input(timeout) {
                 Some(Input::Key(key)) => {
                     dispatch(&mut controller, Message::Key(key));
@@ -2907,16 +2915,6 @@ impl Installer {
                 None => {}
             }
             dirty |= service(&mut controller);
-            if controller.trap.is_some() {
-                break;
-            }
-            if dirty {
-                let controller_ref: &UiController = &controller;
-                tui_or_exit(
-                    terminal.draw(|frame| render_screen(frame, controller_ref, &mut map_cache)),
-                    "draw",
-                );
-            }
         }
 
         if mouse {
