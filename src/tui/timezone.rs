@@ -14,10 +14,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::message::Effect;
-use crate::tui::render::{Frame, Rect, color_mode};
+use crate::tui::render::{Frame, Rect};
 use crate::tui::state::{AppState, Route};
 use crate::tui::style::{Color, ColorMode, Style};
-use crate::tui::theme;
+use crate::tui::theme::MapPalette;
 
 const VIEW_LON_SPAN: f64 = 180.0;
 const LAT_MIN: f64 = -60.0;
@@ -254,11 +254,12 @@ fn light_color(night: Color, twilight: Color, day: Color, t: f64) -> Color {
     }
 }
 
-fn snap_pixel(pixel: Color) -> Color {
-    pixel.quantize(color_mode())
+fn snap_pixel(pixel: Color, mode: ColorMode) -> Color {
+    pixel.quantize(mode)
 }
 
 fn sample_pixel(
+    palette: MapPalette,
     coverage: f64,
     light: f64,
     lon: f64,
@@ -269,33 +270,33 @@ fn sample_pixel(
         let on_meridian = near_grid(lon, 30.0, lon_tolerance);
         if on_parallel && on_meridian {
             light_color(
-                theme::GUIDE_NIGHT,
-                theme::GUIDE_TWILIGHT,
-                theme::ACCENT,
+                palette.guide_night,
+                palette.guide_twilight,
+                palette.grid_cross,
                 light,
             )
         } else if on_parallel || on_meridian {
             light_color(
-                theme::GUIDE_NIGHT,
-                theme::GUIDE_TWILIGHT,
-                theme::GUIDE,
+                palette.guide_night,
+                palette.guide_twilight,
+                palette.guide,
                 light,
             )
         } else {
-            light_color(theme::SEA_NIGHT, theme::SEA_TWILIGHT, theme::SEA, light)
+            light_color(palette.sea_night, palette.sea_twilight, palette.sea, light)
         }
     } else if coverage >= 0.99 {
         light_color(
-            theme::LAND_NIGHT,
-            theme::LAND_TWILIGHT,
-            theme::LAND,
+            palette.land_night,
+            palette.land_twilight,
+            palette.land,
             light,
         )
     } else {
         let span = (coverage - 0.01) / 0.98;
-        let day = lerp_color(theme::COAST, theme::LAND, span);
-        let night = lerp_color(theme::COAST_NIGHT, theme::LAND_NIGHT, span);
-        let twilight = lerp_color(theme::SEA_TWILIGHT, theme::LAND_TWILIGHT, span);
+        let day = lerp_color(palette.coast, palette.land, span);
+        let night = lerp_color(palette.coast_night, palette.land_night, span);
+        let twilight = lerp_color(palette.sea_twilight, palette.land_twilight, span);
         light_color(night, twilight, day, light)
     }
 }
@@ -698,16 +699,18 @@ fn near_grid(value: f64, spacing: f64, tolerance: f64) -> bool {
     (value - (value / spacing).round() * spacing).abs() <= tolerance
 }
 
-/// Cached 32-bit RGB window for one map view: four pixels per cell (2×2).
+/// Cached RGB window for one map view: four pixels per cell (2×2).
 ///
-/// Rebuilt only when the fractional origin, viewport geometry, or solar minute
-/// changes. Glyph conversion happens when the window is copied into the frame.
+/// Rebuilt only when the fractional origin, viewport geometry, solar minute,
+/// or map palette changes. Glyph conversion happens when the window is copied
+/// into the frame.
 pub(crate) struct MapCache {
     origin_x: f64,
     width: usize,
     height: usize,
     /// Unix minute used when the day/night terminator was baked in.
     sun_minute: u64,
+    palette: MapPalette,
     pixels: Vec<Color>,
 }
 
@@ -777,7 +780,13 @@ fn pixel_at(pixels: &[Color], width: usize, x: usize, py: usize) -> Option<Color
     pixel_index(width, x, py).and_then(|index| pixels.get(index).copied())
 }
 
-fn build_map_cache(origin_x: f64, width: usize, height: usize, unix_secs: u64) -> MapCache {
+fn build_map_cache(
+    origin_x: f64,
+    width: usize,
+    height: usize,
+    unix_secs: u64,
+    palette: MapPalette,
+) -> MapCache {
     let cell_width = VIEW_LON_SPAN * LON_SCALE / width as f64;
     let half_width = cell_width * 0.5;
     let row_span = LAT_MAX - LAT_MIN;
@@ -802,7 +811,7 @@ fn build_map_cache(origin_x: f64, width: usize, height: usize, unix_secs: u64) -
             let light = lighting_factor(lat, lon, sun_lat, sun_lon);
             if let Some(index) = pixel_index(pixel_cols, px, py) {
                 if let Some(slot) = pixels.get_mut(index) {
-                    *slot = sample_pixel(coverage, light, lon, on_parallel, lon_tolerance);
+                    *slot = sample_pixel(palette, coverage, light, lon, on_parallel, lon_tolerance);
                 }
             }
         }
@@ -813,21 +822,24 @@ fn build_map_cache(origin_x: f64, width: usize, height: usize, unix_secs: u64) -
         width,
         height,
         sun_minute: unix_secs / 60,
+        palette,
         pixels,
     }
 }
 
 /// Paint the world map into `rect` of the offscreen frame.
 ///
-/// The 32-bit window is cached in `cache` and only rebuilt when the fractional
-/// origin, viewport geometry, or solar minute changes. Copying the window into
-/// cells is what produces Unicode half-blocks.
+/// The RGB window is cached in `cache` and only rebuilt when the fractional
+/// origin, viewport geometry, solar minute, or map palette changes. Copying the
+/// window into cells is what produces Unicode half-blocks.
 pub(crate) fn paint_world_map(
     frame: &mut Frame,
     rect: Rect,
     cache: &mut Option<MapCache>,
     center_lon: f64,
     selected_zone: Option<&MapPoint>,
+    palette: MapPalette,
+    mode: ColorMode,
 ) {
     let width = usize::from(rect.width);
     let height = usize::from(rect.height);
@@ -842,34 +854,35 @@ pub(crate) fn paint_world_map(
             && cached.width == width
             && cached.height == height
             && cached.sun_minute == sun_minute
+            && cached.palette == palette
     });
     if !cache_matches {
-        *cache = Some(build_map_cache(origin_x, width, height, unix_secs));
+        *cache = Some(build_map_cache(origin_x, width, height, unix_secs, palette));
     }
     let Some(cached) = cache.as_ref() else {
         return;
     };
-    paint_map_cells(frame, rect, cached);
-    draw_map_overlays(frame, rect, selected_zone, cached);
+    paint_map_cells(frame, rect, cached, palette, mode);
+    draw_map_overlays(frame, rect, selected_zone, cached, palette, mode);
 }
 
-fn mono_glyph(pixel: Color) -> char {
-    let color = snap_pixel(pixel);
-    let land = theme::LAND.quantize(color_mode());
-    let land_night = theme::LAND_NIGHT.quantize(color_mode());
-    let coast = theme::COAST.quantize(color_mode());
-    let coast_night = theme::COAST_NIGHT.quantize(color_mode());
-    let guide = theme::GUIDE.quantize(color_mode());
-    let guide_night = theme::GUIDE_NIGHT.quantize(color_mode());
-    let accent = theme::ACCENT.quantize(color_mode());
-    let sea_night = theme::SEA_NIGHT.quantize(color_mode());
+fn mono_glyph(palette: MapPalette, pixel: Color, mode: ColorMode) -> char {
+    let color = snap_pixel(pixel, mode);
+    let land = palette.land.quantize(mode);
+    let land_night = palette.land_night.quantize(mode);
+    let coast = palette.coast.quantize(mode);
+    let coast_night = palette.coast_night.quantize(mode);
+    let guide = palette.guide.quantize(mode);
+    let guide_night = palette.guide_night.quantize(mode);
+    let grid_cross = palette.grid_cross.quantize(mode);
+    let sea_night = palette.sea_night.quantize(mode);
     if color == land || color == land_night {
         '#'
     } else if color == coast
         || color == coast_night
         || color == guide
         || color == guide_night
-        || color == accent
+        || color == grid_cross
     {
         '+'
     } else if color == sea_night {
@@ -906,14 +919,18 @@ fn cell_quad(cache: &MapCache, x: usize, y: usize) -> Option<[Color; 4]> {
     Some([tl, tr, bl, br])
 }
 
-fn half_block(quad: [Color; 4]) -> (char, Option<Color>, Option<Color>) {
+fn half_block(
+    palette: MapPalette,
+    quad: [Color; 4],
+    mode: ColorMode,
+) -> (char, Option<Color>, Option<Color>) {
     let [tl, tr, bl, br] = quad;
-    if color_mode() == ColorMode::Mono {
+    if mode == ColorMode::Mono {
         let glyphs = [
-            mono_glyph(tl),
-            mono_glyph(tr),
-            mono_glyph(bl),
-            mono_glyph(br),
+            mono_glyph(palette, tl, mode),
+            mono_glyph(palette, tr, mode),
+            mono_glyph(palette, bl, mode),
+            mono_glyph(palette, br, mode),
         ];
         let glyph = glyphs
             .into_iter()
@@ -921,10 +938,10 @@ fn half_block(quad: [Color; 4]) -> (char, Option<Color>, Option<Color>) {
             .unwrap_or('~');
         return (glyph, None, None);
     }
-    let top_left = snap_pixel(tl);
-    let top_right = snap_pixel(tr);
-    let bottom_left = snap_pixel(bl);
-    let bottom_right = snap_pixel(br);
+    let top_left = snap_pixel(tl, mode);
+    let top_right = snap_pixel(tr, mode);
+    let bottom_left = snap_pixel(bl, mode);
+    let bottom_right = snap_pixel(br, mode);
     if top_left == top_right && top_left == bottom_left && top_left == bottom_right {
         return ('█', Some(top_left), Some(top_left));
     }
@@ -949,7 +966,13 @@ fn half_block(quad: [Color; 4]) -> (char, Option<Color>, Option<Color>) {
     }
 }
 
-fn paint_map_cells(frame: &mut Frame, rect: Rect, cache: &MapCache) {
+fn paint_map_cells(
+    frame: &mut Frame,
+    rect: Rect,
+    cache: &MapCache,
+    palette: MapPalette,
+    mode: ColorMode,
+) {
     let mut buffer = frame.buffer_mut();
     for y in 0..cache.height {
         let Ok(row) = u16::try_from(y) else {
@@ -960,7 +983,7 @@ fn paint_map_cells(frame: &mut Frame, rect: Rect, cache: &MapCache) {
             let Some(quad) = cell_quad(cache, x, y) else {
                 continue;
             };
-            let (glyph, fg, bg) = half_block(quad);
+            let (glyph, fg, bg) = half_block(palette, quad, mode);
             let Ok(col) = u16::try_from(x) else {
                 continue;
             };
@@ -1013,39 +1036,57 @@ impl OccupiedRect {
     }
 }
 
-fn cell_quad_colors(cache: &MapCache, x: isize, y: isize) -> [Color; 4] {
+fn cell_quad_colors(
+    cache: &MapCache,
+    x: isize,
+    y: isize,
+    palette: MapPalette,
+    mode: ColorMode,
+) -> [Color; 4] {
     let Ok(x) = usize::try_from(x) else {
-        return [theme::SEA; 4];
+        return [palette.sea; 4];
     };
     let Ok(y) = usize::try_from(y) else {
-        return [theme::SEA; 4];
+        return [palette.sea; 4];
     };
     let Some([tl, tr, bl, br]) = cell_quad(cache, x, y) else {
-        return [theme::SEA; 4];
+        return [palette.sea; 4];
     };
     [
-        snap_pixel(tl),
-        snap_pixel(tr),
-        snap_pixel(bl),
-        snap_pixel(br),
+        snap_pixel(tl, mode),
+        snap_pixel(tr, mode),
+        snap_pixel(bl, mode),
+        snap_pixel(br, mode),
     ]
 }
 
-fn cell_background(cache: &MapCache, x: isize, y: isize) -> Color {
+fn cell_background(
+    cache: &MapCache,
+    x: isize,
+    y: isize,
+    palette: MapPalette,
+    mode: ColorMode,
+) -> Color {
     let Ok(x) = usize::try_from(x) else {
-        return theme::SEA;
+        return palette.sea;
     };
     let Ok(y) = usize::try_from(y) else {
-        return theme::SEA;
+        return palette.sea;
     };
     let Some(quad) = cell_quad(cache, x, y) else {
-        return theme::SEA;
+        return palette.sea;
     };
-    half_block(quad).2.unwrap_or(theme::SEA)
+    half_block(palette, quad, mode).2.unwrap_or(palette.sea)
 }
 
-fn marker_background(cache: &MapCache, proj: MapProj, glyph: char) -> Color {
-    let [tl, tr, bl, br] = cell_quad_colors(cache, proj.cell_x, proj.cell_y);
+fn marker_background(
+    cache: &MapCache,
+    proj: MapProj,
+    glyph: char,
+    palette: MapPalette,
+    mode: ColorMode,
+) -> Color {
+    let [tl, tr, bl, br] = cell_quad_colors(cache, proj.cell_x, proj.cell_y, palette, mode);
     match glyph {
         '\u{2584}' | '\u{2590}' => tl,
         '\u{258c}' => tr,
@@ -1070,6 +1111,10 @@ fn marker_glyph(frac_x: f64, frac_y: f64) -> char {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "marker painter keeps glyph, palette, and mode together"
+)]
 fn put_marker(
     frame: &mut Frame,
     cache: &MapCache,
@@ -1077,6 +1122,8 @@ fn put_marker(
     proj: MapProj,
     fg: Color,
     bold: bool,
+    palette: MapPalette,
+    mode: ColorMode,
 ) {
     let Ok(row) = u16::try_from(proj.cell_y) else {
         return;
@@ -1086,7 +1133,7 @@ fn put_marker(
     };
     let abs_y = rect.y.saturating_add(row);
     let abs_x = rect.x.saturating_add(col);
-    let mono = color_mode() == ColorMode::Mono;
+    let mono = mode == ColorMode::Mono;
     let (glyph, style) = if mono {
         let glyph = if bold { 'X' } else { '*' };
         let style = if bold {
@@ -1097,7 +1144,7 @@ fn put_marker(
         (glyph, style)
     } else {
         let glyph = marker_glyph(proj.frac_x, proj.frac_y);
-        let bg = marker_background(cache, proj, glyph);
+        let bg = marker_background(cache, proj, glyph, palette, mode);
         let mut style = Style::default().fg(fg).bg(bg);
         if bold {
             style = style.bold();
@@ -1109,6 +1156,10 @@ fn put_marker(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "label painter keeps palette and mode together"
+)]
 fn put_text(
     frame: &mut Frame,
     cache: &MapCache,
@@ -1116,6 +1167,8 @@ fn put_text(
     pos: (isize, isize),
     text: &str,
     fg: Color,
+    palette: MapPalette,
+    mode: ColorMode,
 ) {
     let (x, y) = pos;
     let Ok(row) = u16::try_from(y) else {
@@ -1130,10 +1183,10 @@ fn put_text(
         };
         let abs_x = rect.x.saturating_add(col);
         if let Some(cell) = buffer.cell_mut((abs_x, abs_y)) {
-            let style = if color_mode() == ColorMode::Mono {
+            let style = if mode == ColorMode::Mono {
                 Style::default()
             } else {
-                let cell_bg = cell_background(cache, local_x, y);
+                let cell_bg = cell_background(cache, local_x, y, palette, mode);
                 Style::default().fg(fg).bg(cell_bg)
             };
             cell.set_char(ch).set_style(style);
@@ -1147,6 +1200,8 @@ fn draw_map_overlays(
     rect: Rect,
     selected_zone: Option<&MapPoint>,
     cache: &MapCache,
+    palette: MapPalette,
+    mode: ColorMode,
 ) {
     let width = cache.width;
     let height = cache.height;
@@ -1176,7 +1231,7 @@ fn draw_map_overlays(
     let show_legend = width >= LEGEND_MIN_WIDTH && height >= LEGEND_MIN_HEIGHT;
     if show_legend {
         // Glyph key matching the overlays painted above the basemap.
-        let legend = if color_mode() == ColorMode::Mono {
+        let legend = if mode == ColorMode::Mono {
             "X pin  * city"
         } else {
             "\u{2588} pin  \u{2588} city"
@@ -1185,7 +1240,16 @@ fn draw_map_overlays(
         if legend_width <= width {
             let y = y_local(height, height as isize - 1);
             occupied.push(OccupiedRect::new(0, y, legend_width, 1));
-            put_text(frame, cache, rect, (0, y), legend, theme::MUTED);
+            put_text(
+                frame,
+                cache,
+                rect,
+                (0, y),
+                legend,
+                palette.legend,
+                palette,
+                mode,
+            );
         }
     }
 
@@ -1215,21 +1279,39 @@ fn draw_map_overlays(
                 continue;
             }
             occupied.push(placed);
-            put_marker(frame, cache, rect, proj, theme::ACCENT, false);
-            put_text(frame, cache, rect, (x + 1, y), label, theme::ACCENT);
+            put_marker(frame, cache, rect, proj, palette.city, false, palette, mode);
+            put_text(
+                frame,
+                cache,
+                rect,
+                (x + 1, y),
+                label,
+                palette.city,
+                palette,
+                mode,
+            );
         }
     }
 
     // Selection pin is painted last so it always wins over city labels.
     if let (Some(zone), Some(proj)) = (selected_zone, selected_proj) {
-        put_marker(frame, cache, rect, proj, theme::WARNING, true);
+        put_marker(frame, cache, rect, proj, palette.pin, true, palette, mode);
         let (x, y) = (proj.cell_x, proj.cell_y);
         if !zone.label.is_empty() && x + 1 < width as isize {
             let avail = (width as isize - (x + 1)) as usize;
             let mut label = String::from(" ");
             label.extend(zone.label.chars().take(avail.saturating_sub(1)));
             if label.chars().count() > 1 {
-                put_text(frame, cache, rect, (x + 1, y), &label, theme::WARNING);
+                put_text(
+                    frame,
+                    cache,
+                    rect,
+                    (x + 1, y),
+                    &label,
+                    palette.pin,
+                    palette,
+                    mode,
+                );
             }
         }
     }

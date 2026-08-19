@@ -27,8 +27,8 @@ use crate::tui::state::{
     AppState, Cyclic, IdentityDraft, IdentityField, InstallStatus, InstallStepState, LocaleChoice,
     Modal, ModalChoice, RebootChoice, ReviewChoice, Route, SecureBootChoice, WelcomeChoice,
 };
-use crate::tui::style::{Color, Style};
-use crate::tui::theme;
+use crate::tui::style::Style;
+use crate::tui::theme::Theme;
 use crate::tui::timezone;
 
 const MAX_LOG_LINES: usize = 2000;
@@ -1035,6 +1035,7 @@ fn terminal_size() -> (u16, u16) {
 struct UiController {
     ctx: crate::engine::pipeline::Context,
     state: AppState,
+    theme: Theme,
     task: Option<InstallTask>,
     drive_rx: Option<mpsc::Receiver<Message>>,
     trap: Option<Trap>,
@@ -1350,14 +1351,6 @@ fn layout_mode((width, height): (u16, u16)) -> LayoutMode {
 // the diff terminal in `render` blits the result.
 // ---------------------------------------------------------------------------
 
-fn bold(style: Style) -> Style {
-    style.bold()
-}
-
-fn dim(style: Style) -> Style {
-    style.dim()
-}
-
 /// Interior body rect of a panel: below the border and two title rows.
 fn panel_body(rect: Rect) -> Rect {
     Rect::new(
@@ -1368,33 +1361,39 @@ fn panel_body(rect: Rect) -> Rect {
     )
 }
 
-fn draw_panel(frame: &mut Frame, rect: Rect, title: &str) {
+fn draw_panel(frame: &mut Frame, theme: Theme, rect: Rect, title: &str) {
     if rect.width >= 2 && rect.height >= 2 {
-        frame.render_widget(Border::color(theme::PANEL), rect);
+        frame.render_widget(Border::style(theme.border()), rect);
     }
     if !title.is_empty() && rect.width > 2 && rect.height > 1 {
         let label = render::rendered_width(title);
         let width = label.min(rect.width.saturating_sub(2));
         frame.render_widget(
-            Paragraph::new(title.to_string()).style(bold(
-                Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND),
-            )),
+            Paragraph::new(title.to_string()).style(theme.accent().bold()),
             Rect::new(rect.x + 1, rect.y + 1, width, 1),
         );
     }
 }
 
-fn draw_selected_row(frame: &mut Frame, x: u16, y: u16, width: u16, content: &str, selected: bool) {
+fn draw_selected_row(
+    frame: &mut Frame,
+    theme: Theme,
+    x: u16,
+    y: u16,
+    width: u16,
+    content: &str,
+    selected: bool,
+) {
     let marker = if selected { ">" } else { " " };
     let marker_style = if selected {
-        bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND))
+        theme.accent().bold()
     } else {
-        Style::default().fg(theme::MUTED).bg(theme::BACKGROUND)
+        theme.muted()
     };
     let text_style = if selected {
-        bold(Style::default().fg(theme::FOREGROUND).bg(theme::BACKGROUND))
+        theme.text().bold()
     } else {
-        Style::default().fg(theme::MUTED).bg(theme::BACKGROUND)
+        theme.muted()
     };
     frame.render_widget(
         Paragraph::new(Line::new(vec![
@@ -1411,13 +1410,13 @@ fn draw_text_row(
     y: u16,
     width: u16,
     content: &str,
-    color: Color,
+    style: Style,
     weight: Weight,
 ) {
     let style = match weight {
-        Weight::Bold => bold(Style::default().fg(color).bg(theme::BACKGROUND)),
-        Weight::Light => dim(Style::default().fg(color).bg(theme::BACKGROUND)),
-        Weight::Normal => Style::default().fg(color).bg(theme::BACKGROUND),
+        Weight::Bold => style.bold(),
+        Weight::Light => style.dim(),
+        Weight::Normal => style,
     };
     frame.render_widget(
         Paragraph::new(content.to_string()).style(style),
@@ -1432,8 +1431,13 @@ enum Weight {
     Bold,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "row painter mirrors the field row arguments"
+)]
 fn draw_choice_row(
     frame: &mut Frame,
+    theme: Theme,
     x: u16,
     y: u16,
     width: u16,
@@ -1446,11 +1450,12 @@ fn draw_choice_row(
     } else {
         format!("{label:<14}{value}")
     };
-    draw_selected_row(frame, x, y, width, &body, selected);
+    draw_selected_row(frame, theme, x, y, width, &body, selected);
 }
 
 fn draw_value_well(
     frame: &mut Frame,
+    theme: Theme,
     well: Rect,
     value: &str,
     cursor: usize,
@@ -1460,10 +1465,7 @@ fn draw_value_well(
     if well.width == 0 {
         return;
     }
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme::PANEL)),
-        well,
-    );
+    frame.render_widget(Block::default().style(theme.well()), well);
     let cols = usize::from(well.width);
     let cursor = cursor.min(value.chars().count());
     let usable = if focused {
@@ -1480,16 +1482,15 @@ fn draw_value_well(
     if visible.is_empty() {
         if focused && !placeholder.is_empty() {
             frame.render_widget(
-                Paragraph::new(placeholder)
-                    .style(dim(Style::default().fg(theme::MUTED).bg(theme::PANEL))),
+                Paragraph::new(placeholder).style(theme.well_muted().dim()),
                 well,
             );
         }
     } else {
         let style = if focused {
-            bold(Style::default().fg(theme::FOREGROUND).bg(theme::PANEL))
+            theme.well_text().bold()
         } else {
-            Style::default().fg(theme::FOREGROUND).bg(theme::PANEL)
+            theme.well_text()
         };
         frame.render_widget(Paragraph::new(visible).style(style), well);
     }
@@ -1508,6 +1509,7 @@ fn draw_value_well(
 )]
 fn draw_text_input(
     frame: &mut Frame,
+    theme: Theme,
     x: u16,
     y: u16,
     width: u16,
@@ -1521,9 +1523,9 @@ fn draw_text_input(
     let prefix = format!(" {marker} {label:<14}");
     let prefix_cols = render::rendered_width(&prefix);
     let prefix_style = if selected {
-        bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND))
+        theme.accent().bold()
     } else {
-        Style::default().fg(theme::MUTED).bg(theme::BACKGROUND)
+        theme.muted()
     };
     let prefix_width = prefix_cols.min(width);
     if prefix_width > 0 {
@@ -1536,6 +1538,7 @@ fn draw_text_input(
     if well_width > 0 {
         draw_value_well(
             frame,
+            theme,
             Rect::new(x.saturating_add(prefix_cols), y, well_width, 1),
             value,
             cursor,
@@ -1545,15 +1548,21 @@ fn draw_text_input(
     }
 }
 
-fn draw_filter_input(frame: &mut Frame, x: u16, y: u16, width: u16, value: &str, focused: bool) {
+fn draw_filter_input(
+    frame: &mut Frame,
+    theme: Theme,
+    x: u16,
+    y: u16,
+    width: u16,
+    value: &str,
+    focused: bool,
+) {
     let prefix = "  Filter  ";
     let prefix_cols = render::rendered_width(prefix);
     let prefix_width = prefix_cols.min(width);
     if prefix_width > 0 {
         frame.render_widget(
-            Paragraph::new(prefix).style(bold(
-                Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND),
-            )),
+            Paragraph::new(prefix).style(theme.accent().bold()),
             Rect::new(x, y, prefix_width, 1),
         );
     }
@@ -1561,6 +1570,7 @@ fn draw_filter_input(frame: &mut Frame, x: u16, y: u16, width: u16, value: &str,
     if well_width > 0 {
         draw_value_well(
             frame,
+            theme,
             Rect::new(x.saturating_add(prefix_cols), y, well_width, 1),
             value,
             value.chars().count(),
@@ -1570,19 +1580,26 @@ fn draw_filter_input(frame: &mut Frame, x: u16, y: u16, width: u16, value: &str,
     }
 }
 
-fn draw_zone_row(frame: &mut Frame, x: u16, y: u16, width: u16, zone: &timezone::VisibleZone) {
+fn draw_zone_row(
+    frame: &mut Frame,
+    theme: Theme,
+    x: u16,
+    y: u16,
+    width: u16,
+    zone: &timezone::VisibleZone,
+) {
     let marker = if zone.selected { ">" } else { " " };
     let marker_style = if zone.selected {
-        bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND))
+        theme.accent().bold()
     } else {
-        Style::default().fg(theme::MUTED).bg(theme::BACKGROUND)
+        theme.muted()
     };
     let base = if zone.selected {
-        bold(Style::default().fg(theme::FOREGROUND).bg(theme::BACKGROUND))
+        theme.text().bold()
     } else {
-        Style::default().fg(theme::MUTED).bg(theme::BACKGROUND)
+        theme.muted()
     };
-    let match_style = bold(Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND));
+    let match_style = theme.accent().bold();
     let chars = zone.name.chars().collect::<Vec<_>>();
     let mut spans = vec![Span::styled(format!(" {marker} "), marker_style)];
     if let Some((start, end)) = zone.match_range {
@@ -1606,38 +1623,31 @@ fn draw_zone_row(frame: &mut Frame, x: u16, y: u16, width: u16, zone: &timezone:
     frame.render_widget(Paragraph::new(Line::new(spans)), Rect::new(x, y, width, 1));
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bar painter keeps geometry and fill colour together"
+)]
 fn draw_progress(
     frame: &mut Frame,
+    theme: Theme,
     x: u16,
     y: u16,
     width: u16,
     label: &str,
     percent: u16,
-    color: Color,
+    fill: Style,
 ) {
     let bar_width = usize::from(width.saturating_sub(24)).clamp(8, 52);
     let percent = percent.min(100);
     let filled = usize::from(percent) * bar_width / 100;
     let spans = vec![
-        Span::styled(
-            format!("{label:<8} ["),
-            bold(Style::default().fg(theme::FOREGROUND).bg(theme::BACKGROUND)),
-        ),
-        Span::styled(
-            "█".repeat(filled),
-            Style::default().fg(color).bg(theme::BACKGROUND),
-        ),
-        Span::styled(
-            "░".repeat(bar_width - filled),
-            Style::default().fg(theme::PANEL).bg(theme::BACKGROUND),
-        ),
-        Span::styled(
-            format!("] {percent:3}%"),
-            Style::default().fg(theme::FOREGROUND).bg(theme::BACKGROUND),
-        ),
+        Span::styled(format!("{label:<8} ["), theme.text().bold()),
+        Span::styled("█".repeat(filled), fill),
+        Span::styled("░".repeat(bar_width - filled), theme.track()),
+        Span::styled(format!("] {percent:3}%"), theme.text()),
     ];
     frame.render_widget(
-        Paragraph::new(Line::new(spans)).style(Style::default().bg(theme::BACKGROUND)),
+        Paragraph::new(Line::new(spans)).style(theme.canvas()),
         Rect::new(x, y, width, 1),
     );
 }
@@ -1657,6 +1667,7 @@ fn truncate_display(text: &str, max_chars: usize) -> String {
 
 fn draw_zone_details(
     frame: &mut Frame,
+    theme: Theme,
     x: u16,
     y: u16,
     width: u16,
@@ -1676,11 +1687,11 @@ fn draw_zone_details(
         row,
         width,
         &truncate_display(&sanitize_text(&details.name), 24),
-        theme::ACCENT,
+        theme.accent(),
         Weight::Bold,
     );
     row = row.saturating_add(1);
-    draw_text_row(frame, x, row, width, &count, theme::MUTED, Weight::Normal);
+    draw_text_row(frame, x, row, width, &count, theme.muted(), Weight::Normal);
     row = row.saturating_add(1);
     if let Some((lat, lon)) = details.coords {
         draw_text_row(
@@ -1689,7 +1700,7 @@ fn draw_zone_details(
             row,
             width,
             &format!("{lat:+07.2} {lon:+08.2}"),
-            theme::FOREGROUND,
+            theme.text(),
             Weight::Normal,
         );
     } else {
@@ -1699,7 +1710,7 @@ fn draw_zone_details(
             row,
             width,
             "No map coordinates",
-            theme::MUTED,
+            theme.muted(),
             Weight::Normal,
         );
     }
@@ -1711,7 +1722,7 @@ fn draw_zone_details(
             row,
             width,
             &truncate_display(&sanitize_text(&format!("CC {}", details.countries)), 24),
-            theme::MUTED,
+            theme.muted(),
             Weight::Normal,
         );
         row = row.saturating_add(1);
@@ -1723,14 +1734,14 @@ fn draw_zone_details(
             row,
             width,
             &truncate_display(&sanitize_text(&details.comment), 24),
-            theme::MUTED,
+            theme.muted(),
             Weight::Normal,
         );
     }
 }
 
-fn welcome_content(frame: &mut Frame, rect: Rect, state: &AppState) {
-    draw_panel(frame, rect, "Get started");
+fn welcome_content(frame: &mut Frame, theme: Theme, rect: Rect, state: &AppState) {
+    draw_panel(frame, theme, rect, "Get started");
     let body = panel_body(rect);
     draw_text_row(
         frame,
@@ -1738,7 +1749,7 @@ fn welcome_content(frame: &mut Frame, rect: Rect, state: &AppState) {
         body.y,
         body.width,
         "Install a bootc system with guided disk, identity, and security setup.",
-        theme::MUTED,
+        theme.muted(),
         Weight::Normal,
     );
     let labels = [
@@ -1749,6 +1760,7 @@ fn welcome_content(frame: &mut Frame, rect: Rect, state: &AppState) {
     for (offset, (choice, label)) in labels.into_iter().enumerate() {
         draw_selected_row(
             frame,
+            theme,
             body.x,
             body.y + 2 + offset as u16,
             body.width,
@@ -1760,7 +1772,8 @@ fn welcome_content(frame: &mut Frame, rect: Rect, state: &AppState) {
 
 fn target_content(frame: &mut Frame, rect: Rect, controller: &UiController, layout: LayoutMode) {
     let state = &controller.state;
-    draw_panel(frame, rect, "Target disks");
+    let theme = controller.theme;
+    draw_panel(frame, theme, rect, "Target disks");
     let body = panel_body(rect);
     let mut row = body.y;
     let scanning = controller.drive_rx.is_some() && state.drives.is_empty();
@@ -1771,7 +1784,7 @@ fn target_content(frame: &mut Frame, rect: Rect, controller: &UiController, layo
             row,
             body.width,
             "Scanning for target disks...",
-            theme::FOREGROUND,
+            theme.text(),
             Weight::Bold,
         );
         return;
@@ -1783,7 +1796,7 @@ fn target_content(frame: &mut Frame, rect: Rect, controller: &UiController, layo
             row,
             body.width,
             "No target disks detected",
-            theme::FOREGROUND,
+            theme.text(),
             Weight::Bold,
         );
         return;
@@ -1798,7 +1811,7 @@ fn target_content(frame: &mut Frame, rect: Rect, controller: &UiController, layo
                 "{:<18} {:<10} {:<8} {:<20} STATUS",
                 "DEVICE", "SIZE", "BUS", "MODEL"
             ),
-            theme::MUTED,
+            theme.muted(),
             Weight::Bold,
         );
         row = row.saturating_add(1);
@@ -1826,6 +1839,7 @@ fn target_content(frame: &mut Frame, rect: Rect, controller: &UiController, layo
         };
         draw_selected_row(
             frame,
+            theme,
             body.x,
             row,
             body.width,
@@ -1840,8 +1854,8 @@ fn target_content(frame: &mut Frame, rect: Rect, controller: &UiController, layo
     clippy::too_many_lines,
     reason = "one painter per identity field keeps layout local"
 )]
-fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
-    draw_panel(frame, rect, "User account");
+fn identity_content(frame: &mut Frame, theme: Theme, rect: Rect, state: &AppState) {
+    draw_panel(frame, theme, rect, "User account");
     let body = panel_body(rect);
     let Some(draft) = state.identity.as_ref() else {
         draw_text_row(
@@ -1850,7 +1864,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
             body.y,
             body.width,
             "Loading identity...",
-            theme::FOREGROUND,
+            theme.text(),
             Weight::Normal,
         );
         return;
@@ -1870,6 +1884,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
     let mut row = body.y;
     draw_choice_row(
         frame,
+        theme,
         body.x,
         row,
         body.width,
@@ -1880,6 +1895,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
     row = row.saturating_add(1);
     draw_text_input(
         frame,
+        theme,
         body.x,
         row,
         body.width,
@@ -1892,6 +1908,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
     row = row.saturating_add(1);
     draw_text_input(
         frame,
+        theme,
         body.x,
         row,
         body.width,
@@ -1904,6 +1921,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
     row = row.saturating_add(1);
     draw_text_input(
         frame,
+        theme,
         body.x,
         row,
         body.width,
@@ -1916,6 +1934,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
     row = row.saturating_add(1);
     draw_text_input(
         frame,
+        theme,
         body.x,
         row,
         body.width,
@@ -1928,6 +1947,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
     row = row.saturating_add(1);
     draw_choice_row(
         frame,
+        theme,
         body.x,
         row,
         body.width,
@@ -1943,7 +1963,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
             row,
             body.width,
             "Password reveal is on",
-            theme::WARNING,
+            theme.warning(),
             Weight::Bold,
         );
         row = row.saturating_add(1);
@@ -1955,7 +1975,7 @@ fn identity_content(frame: &mut Frame, rect: Rect, state: &AppState) {
             row,
             body.width,
             &format!("Error: {error}"),
-            theme::DANGER,
+            theme.danger(),
             Weight::Bold,
         );
     }
@@ -1967,8 +1987,9 @@ fn draw_world_map_panel(
     controller: &UiController,
     map_cache: &mut Option<timezone::MapCache>,
 ) {
+    let theme = controller.theme;
     if rect.width >= 2 && rect.height >= 2 {
-        frame.render_widget(Border::color(theme::PANEL), rect);
+        frame.render_widget(Border::style(theme.border()), rect);
     }
     let inner = Rect::new(
         rect.x + 1,
@@ -1978,14 +1999,23 @@ fn draw_world_map_panel(
     );
     let center_lon = controller.state.timezone.map_center_lon;
     let selected = timezone::selected_zone(&controller.state);
-    timezone::paint_world_map(frame, inner, map_cache, center_lon, selected.as_ref());
+    timezone::paint_world_map(
+        frame,
+        inner,
+        map_cache,
+        center_lon,
+        selected.as_ref(),
+        theme.map(),
+        render::color_mode(),
+    );
 }
 
-fn draw_timezone_list_panel(frame: &mut Frame, rect: Rect, state: &AppState) {
-    draw_panel(frame, rect, "Time zones");
+fn draw_timezone_list_panel(frame: &mut Frame, theme: Theme, rect: Rect, state: &AppState) {
+    draw_panel(frame, theme, rect, "Time zones");
     let body = panel_body(rect);
     draw_filter_input(
         frame,
+        theme,
         body.x,
         body.y,
         body.width,
@@ -2005,17 +2035,25 @@ fn draw_timezone_list_panel(frame: &mut Frame, rect: Rect, state: &AppState) {
             body.y.saturating_add(1),
             body.width,
             &message,
-            theme::MUTED,
+            theme.muted(),
             Weight::Normal,
         );
     } else {
         for (i, zone) in zones.iter().enumerate() {
-            draw_zone_row(frame, body.x, body.y + 1 + i as u16, body.width, zone);
+            draw_zone_row(
+                frame,
+                theme,
+                body.x,
+                body.y + 1 + i as u16,
+                body.width,
+                zone,
+            );
         }
     }
     if let Some(details) = timezone::selected_details(state) {
         draw_zone_details(
             frame,
+            theme,
             body.x,
             body.y + 1 + timezone::VISIBLE_ZONE_ROWS as u16,
             body.width,
@@ -2032,6 +2070,7 @@ fn timezone_content(
     layout: LayoutMode,
     map_cache: &mut Option<timezone::MapCache>,
 ) {
+    let theme = controller.theme;
     let (cx0, cy0, cx1, cy1) = (
         content.x,
         content.y,
@@ -2043,19 +2082,20 @@ fn timezone_content(
         let map_rect = Rect::new(cx0, cy0, content.width, split - cy0);
         let list_rect = Rect::new(cx0, split, content.width, cy1 - split);
         draw_world_map_panel(frame, map_rect, controller, map_cache);
-        draw_timezone_list_panel(frame, list_rect, &controller.state);
+        draw_timezone_list_panel(frame, theme, list_rect, &controller.state);
     } else {
         let split = cx0 + (cx1 - cx0) * 2 / 3;
         let map_rect = Rect::new(cx0, cy0, split - cx0, content.height);
         let list_rect = Rect::new(split, cy0, cx1 - split, content.height);
         draw_world_map_panel(frame, map_rect, controller, map_cache);
-        draw_timezone_list_panel(frame, list_rect, &controller.state);
+        draw_timezone_list_panel(frame, theme, list_rect, &controller.state);
     }
 }
 
 fn secure_boot_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
     let state = &controller.state;
-    draw_panel(frame, rect, "Secure Boot configuration");
+    let theme = controller.theme;
+    draw_panel(frame, theme, rect, "Secure Boot configuration");
     let body = panel_body(rect);
     let mut row = body.y;
     if state
@@ -2072,7 +2112,7 @@ fn secure_boot_content(frame: &mut Frame, rect: Rect, controller: &UiController)
                 "{} can enroll its own Secure Boot keys.",
                 controller.ctx.config.branding.name
             ),
-            theme::FOREGROUND,
+            theme.text(),
             Weight::Normal,
         );
         row = row.saturating_add(1);
@@ -2082,13 +2122,14 @@ fn secure_boot_content(frame: &mut Frame, rect: Rect, controller: &UiController)
             row,
             body.width,
             "This writes firmware Secure Boot variables.",
-            theme::WARNING,
+            theme.warning(),
             Weight::Bold,
         );
         row = row.saturating_add(1);
         for choice in SecureBootChoice::choices(true) {
             draw_selected_row(
                 frame,
+                theme,
                 body.x,
                 row,
                 body.width,
@@ -2108,7 +2149,7 @@ fn secure_boot_content(frame: &mut Frame, rect: Rect, controller: &UiController)
             row,
             body.width,
             message,
-            theme::WARNING,
+            theme.warning(),
             Weight::Bold,
         );
         row = row.saturating_add(1);
@@ -2123,7 +2164,7 @@ fn secure_boot_content(frame: &mut Frame, rect: Rect, controller: &UiController)
                 row,
                 body.width,
                 reason,
-                theme::DANGER,
+                theme.danger(),
                 Weight::Bold,
             );
             row = row.saturating_add(1);
@@ -2131,6 +2172,7 @@ fn secure_boot_content(frame: &mut Frame, rect: Rect, controller: &UiController)
         for choice in SecureBootChoice::choices(false) {
             draw_selected_row(
                 frame,
+                theme,
                 body.x,
                 row,
                 body.width,
@@ -2144,7 +2186,8 @@ fn secure_boot_content(frame: &mut Frame, rect: Rect, controller: &UiController)
 
 fn review_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
     let state = &controller.state;
-    draw_panel(frame, rect, "Installation summary");
+    let theme = controller.theme;
+    draw_panel(frame, theme, rect, "Installation summary");
     let body = panel_body(rect);
     let mut row = body.y;
     draw_text_row(
@@ -2153,7 +2196,7 @@ fn review_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
         row,
         body.width,
         "Review these settings carefully. Starting installation will erase the target disk.",
-        theme::WARNING,
+        theme.warning(),
         Weight::Bold,
     );
     row = row.saturating_add(2);
@@ -2166,7 +2209,7 @@ fn review_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
             "Target disk  {}",
             controller.ctx.drive_label.as_deref().unwrap_or("-")
         ),
-        theme::FOREGROUND,
+        theme.text(),
         Weight::Normal,
     );
     row = row.saturating_add(1);
@@ -2176,7 +2219,7 @@ fn review_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
         row,
         body.width,
         &format!("Hostname     {}", controller.ctx.config.identity.hostname),
-        theme::FOREGROUND,
+        theme.text(),
         Weight::Normal,
     );
     row = row.saturating_add(1);
@@ -2186,12 +2229,13 @@ fn review_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
         row,
         body.width,
         &format!("Timezone     {}", controller.ctx.config.identity.timezone),
-        theme::FOREGROUND,
+        theme.text(),
         Weight::Normal,
     );
     row = row.saturating_add(2);
     draw_selected_row(
         frame,
+        theme,
         body.x,
         row,
         body.width,
@@ -2201,6 +2245,7 @@ fn review_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
     row = row.saturating_add(1);
     draw_selected_row(
         frame,
+        theme,
         body.x,
         row,
         body.width,
@@ -2214,11 +2259,11 @@ fn format_elapsed(duration: Duration) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
-fn draw_install_steps(frame: &mut Frame, rect: Rect, state: &AppState) {
+fn draw_install_steps(frame: &mut Frame, theme: Theme, rect: Rect, state: &AppState) {
     if rect.width < 2 || rect.height < 4 {
         return;
     }
-    draw_panel(frame, rect, "Installation steps");
+    draw_panel(frame, theme, rect, "Installation steps");
     let body = panel_body(rect);
     let max_rows = usize::from(body.height);
     let current = state.install.current_step.unwrap_or(0);
@@ -2238,12 +2283,12 @@ fn draw_install_steps(frame: &mut Frame, rect: Rect, state: &AppState) {
             .get(index)
             .copied()
             .unwrap_or(InstallStepState::Pending);
-        let (marker, color, weight) = match step_state {
-            InstallStepState::Done => ("[x]", theme::SUCCESS, Weight::Bold),
-            InstallStepState::Active => ("[>]", theme::ACCENT, Weight::Bold),
-            InstallStepState::Skipped => ("[-]", theme::MUTED, Weight::Light),
-            InstallStepState::Failed => ("[!]", theme::DANGER, Weight::Bold),
-            InstallStepState::Pending => ("[ ]", theme::MUTED, Weight::Normal),
+        let (marker, style, weight) = match step_state {
+            InstallStepState::Done => ("[x]", theme.success(), Weight::Bold),
+            InstallStepState::Active => ("[>]", theme.accent(), Weight::Bold),
+            InstallStepState::Skipped => ("[-]", theme.muted(), Weight::Light),
+            InstallStepState::Failed => ("[!]", theme.danger(), Weight::Bold),
+            InstallStepState::Pending => ("[ ]", theme.muted(), Weight::Normal),
         };
         draw_text_row(
             frame,
@@ -2251,14 +2296,14 @@ fn draw_install_steps(frame: &mut Frame, rect: Rect, state: &AppState) {
             body.y + offset as u16,
             body.width,
             &format!("{marker} {:02} {}", index + 1, step.title),
-            color,
+            style,
             weight,
         );
     }
 }
 
-fn draw_install_log(frame: &mut Frame, rect: Rect, logs: &str, scroll: usize) {
-    draw_panel(frame, rect, "Live installation log");
+fn draw_install_log(frame: &mut Frame, theme: Theme, rect: Rect, logs: &str, scroll: usize) {
+    draw_panel(frame, theme, rect, "Live installation log");
     let title = if scroll == 0 {
         "Live installation log".to_string()
     } else {
@@ -2267,18 +2312,12 @@ fn draw_install_log(frame: &mut Frame, rect: Rect, logs: &str, scroll: usize) {
     if rect.width > 2 && rect.height > 1 {
         let width = render::rendered_width(&title).min(rect.width.saturating_sub(2));
         frame.render_widget(
-            Paragraph::new(title).style(bold(
-                Style::default().fg(theme::ACCENT).bg(theme::BACKGROUND),
-            )),
+            Paragraph::new(title).style(theme.accent().bold()),
             Rect::new(rect.x + 1, rect.y + 1, width, 1),
         );
     }
     let body = panel_body(rect);
-    frame.render_widget(
-        Paragraph::new(logs.to_string())
-            .style(Style::default().fg(theme::MUTED).bg(theme::BACKGROUND)),
-        body,
-    );
+    frame.render_widget(Paragraph::new(logs.to_string()).style(theme.muted()), body);
 }
 
 #[expect(
@@ -2292,6 +2331,7 @@ fn install_content(
     layout: LayoutMode,
 ) {
     let state = &controller.state;
+    let theme = controller.theme;
     let step_index = state.install.current_step.unwrap_or(0);
     let step = state
         .install
@@ -2307,10 +2347,10 @@ fn install_content(
             % 4
     });
     let spinner = ["|", "/", "-", "\\"][spinner_frame];
-    let (status, status_color) = if state.install.status.is_succeeded() {
-        ("Installation complete".to_string(), theme::SUCCESS)
+    let (status, status_style) = if state.install.status.is_succeeded() {
+        ("Installation complete".to_string(), theme.success())
     } else if state.install.status.is_failed() {
-        ("Installation failed".to_string(), theme::DANGER)
+        ("Installation failed".to_string(), theme.danger())
     } else {
         (
             format!(
@@ -2318,7 +2358,7 @@ fn install_content(
                 step_index.saturating_add(1).min(pipeline::STEPS.len()),
                 pipeline::STEPS.len()
             ),
-            theme::ACCENT,
+            theme.accent(),
         )
     };
     let elapsed = match (state.install.started, state.install.elapsed_seconds) {
@@ -2336,36 +2376,38 @@ fn install_content(
         overview,
         progress_width,
         &status_line,
-        status_color,
+        status_style,
         Weight::Bold,
     );
     draw_progress(
         frame,
+        theme,
         content.x,
         overview + 1,
         progress_width,
         "Overall",
         overall_install_progress(state),
-        theme::SUCCESS,
+        theme.success(),
     );
     draw_progress(
         frame,
+        theme,
         content.x,
         overview + 2,
         progress_width,
         "Step",
         state.install.step_fraction,
-        theme::ACCENT,
+        theme.accent(),
     );
     let committed_line = if state.install.committed {
         "Point of no return reached"
     } else {
         "Installation can still be cancelled safely"
     };
-    let committed_color = if state.install.committed {
-        theme::WARNING
+    let committed_style = if state.install.committed {
+        theme.warning()
     } else {
-        theme::MUTED
+        theme.muted()
     };
     draw_text_row(
         frame,
@@ -2373,7 +2415,7 @@ fn install_content(
         overview + 3,
         progress_width,
         committed_line,
-        committed_color,
+        committed_style,
         Weight::Light,
     );
 
@@ -2406,17 +2448,18 @@ fn install_content(
             content.width.saturating_sub(steps_w + 1),
             panels_h,
         );
-        draw_install_steps(frame, steps_rect, state);
-        draw_install_log(frame, log_rect, &logs, state.scroll.install_log);
+        draw_install_steps(frame, theme, steps_rect, state);
+        draw_install_log(frame, theme, log_rect, &logs, state.scroll.install_log);
     } else {
         let log_rect = Rect::new(content.x, panels_top, content.width, panels_h);
-        draw_install_log(frame, log_rect, &logs, state.scroll.install_log);
+        draw_install_log(frame, theme, log_rect, &logs, state.scroll.install_log);
     }
 }
 
 fn reboot_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
     let state = &controller.state;
-    draw_panel(frame, rect, "Installation complete");
+    let theme = controller.theme;
+    draw_panel(frame, theme, rect, "Installation complete");
     let body = panel_body(rect);
     draw_text_row(
         frame,
@@ -2427,7 +2470,7 @@ fn reboot_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
             "Target  {}",
             controller.ctx.drive_label.as_deref().unwrap_or("-")
         ),
-        theme::FOREGROUND,
+        theme.text(),
         Weight::Normal,
     );
     draw_text_row(
@@ -2439,11 +2482,12 @@ fn reboot_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
             "Automatic reboot in {} seconds",
             state.reboot.remaining_seconds.unwrap_or(0)
         ),
-        theme::ACCENT,
+        theme.accent(),
         Weight::Bold,
     );
     draw_selected_row(
         frame,
+        theme,
         body.x,
         body.y + 3,
         body.width,
@@ -2452,6 +2496,7 @@ fn reboot_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
     );
     draw_selected_row(
         frame,
+        theme,
         body.x,
         body.y + 4,
         body.width,
@@ -2460,7 +2505,7 @@ fn reboot_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
     );
 }
 
-fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
+fn draw_modal(frame: &mut Frame, theme: Theme, state: &AppState, width: u16, height: u16) {
     let Some(modal) = state.active_modal() else {
         return;
     };
@@ -2487,16 +2532,16 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
             "The installer will stop and clean up mounts.".to_string(),
         ),
     };
-    let modal_color = if modal == Modal::Failure {
-        theme::DANGER
+    let (modal_border, modal_title) = if modal == Modal::Failure {
+        (theme.danger(), theme.well_danger())
     } else {
-        theme::WARNING
+        (theme.warning(), theme.well_warning())
     };
     let dialog = modal_dialog_rect(width, height);
     if dialog.width < 2 || dialog.height < 2 {
         return;
     }
-    frame.render_widget(Border::color(modal_color), dialog);
+    frame.render_widget(Border::style(modal_border), dialog);
     let fill = Rect::new(
         dialog.x.saturating_add(1),
         dialog.y.saturating_add(1),
@@ -2506,10 +2551,7 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
     if fill.width == 0 || fill.height == 0 {
         return;
     }
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme::PANEL)),
-        fill,
-    );
+    frame.render_widget(Block::default().style(theme.well()), fill);
     let inner = Rect::new(
         fill.x.saturating_add(1),
         fill.y,
@@ -2520,7 +2562,7 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
         return;
     }
     frame.render_widget(
-        Paragraph::new(title).style(bold(Style::default().fg(modal_color).bg(theme::PANEL))),
+        Paragraph::new(title).style(modal_title.bold()),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     if inner.height > 3 {
@@ -2532,8 +2574,7 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
             .collect::<Vec<_>>();
         if !shown.is_empty() {
             frame.render_widget(
-                Paragraph::new(shown.join("\n"))
-                    .style(Style::default().fg(theme::FOREGROUND).bg(theme::PANEL)),
+                Paragraph::new(shown.join("\n")).style(theme.well_text()),
                 Rect::new(inner.x, inner.y.saturating_add(2), inner.width, body_height),
             );
         }
@@ -2546,9 +2587,9 @@ fn draw_modal(frame: &mut Frame, state: &AppState, width: u16, height: u16) {
         }
         let focused = state.selection.modal == choice;
         let style = if focused {
-            bold(Style::default().fg(theme::BACKGROUND).bg(theme::ACCENT))
+            theme.inverse().bold()
         } else {
-            Style::default().fg(theme::MUTED).bg(theme::PANEL)
+            theme.well_muted()
         };
         let pad = rect.width.saturating_sub(render::rendered_width(label)) / 2;
         let text = format!("{:>width$}{label}", "", width = usize::from(pad));
@@ -2669,28 +2710,25 @@ fn fit_footer_chips(chips: &[KeyChip], max_width: usize) -> Vec<KeyChip> {
     body
 }
 
-fn draw_footer(frame: &mut Frame, chips: &[KeyChip], width: u16, height: u16) {
+fn draw_footer(frame: &mut Frame, theme: Theme, chips: &[KeyChip], width: u16, height: u16) {
     let max_width = usize::from(width.saturating_sub(1));
     let fitted = fit_footer_chips(chips, max_width);
     let mut spans = vec![Span::raw(" ")];
     for chip in &fitted {
         spans.push(Span::styled(
             format!(" [{}]", chip.key),
-            bold(Style::default().fg(theme::ACCENT).bg(theme::PANEL)),
+            theme.well_accent().bold(),
         ));
         spans.push(Span::styled(
             format!(" {}", chip.action),
-            Style::default().fg(theme::MUTED).bg(theme::PANEL),
+            theme.well_muted(),
         ));
     }
     if fitted.is_empty() {
-        spans.push(Span::styled(
-            " ",
-            Style::default().fg(theme::MUTED).bg(theme::PANEL),
-        ));
+        spans.push(Span::styled(" ", theme.well_muted()));
     }
     frame.render_widget(
-        Paragraph::new(Line::new(spans)).style(Style::default().bg(theme::PANEL)),
+        Paragraph::new(Line::new(spans)).style(theme.well()),
         Rect::new(0, height.saturating_sub(1), width, 1),
     );
 }
@@ -2739,39 +2777,33 @@ fn render_screen(
         return;
     }
     let state = &controller.state;
+    let theme = controller.theme;
 
     // Background fill so blank cells and borders carry the installer background.
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme::BACKGROUND)),
-        area,
-    );
+    frame.render_widget(Block::default().style(theme.canvas()), area);
 
     // Title + subtitle bars.
     frame.render_widget(
-        Paragraph::new(screen_title(controller)).style(bold(
-            Style::default().fg(theme::FOREGROUND).bg(theme::TITLE),
-        )),
+        Paragraph::new(screen_title(controller)).style(theme.title().bold()),
         Rect::new(0, 0, width, 1),
     );
     frame.render_widget(
-        Paragraph::new(screen_subtitle(state.route)).style(bold(
-            Style::default().fg(theme::ACCENT).bg(theme::TITLE_DETAIL),
-        )),
+        Paragraph::new(screen_subtitle(state.route)).style(theme.subtitle().bold()),
         Rect::new(0, 1, width, 1),
     );
 
     // Footer chip bar.
     let chips = route_footer_chips(state);
-    draw_footer(frame, &chips, width, height);
+    draw_footer(frame, theme, &chips, width, height);
 
     // Content panel area (matches hit-testing geometry in content_frame).
     let (cx0, cy0, cx1, cy1) = content_frame(width, height);
     let content = Rect::new(cx0, cy0, cx1.saturating_sub(cx0), cy1.saturating_sub(cy0));
     let layout = layout_mode((width, height));
     match state.route {
-        Route::Welcome => welcome_content(frame, content, state),
+        Route::Welcome => welcome_content(frame, theme, content, state),
         Route::Target => target_content(frame, content, controller, layout),
-        Route::Identity => identity_content(frame, content, state),
+        Route::Identity => identity_content(frame, theme, content, state),
         Route::Timezone => timezone_content(frame, content, controller, layout, map_cache),
         Route::SecureBoot => secure_boot_content(frame, content, controller),
         Route::Review => review_content(frame, content, controller),
@@ -2781,7 +2813,7 @@ fn render_screen(
 
     // Modal overlay sits on top of everything.
     if state.active_modal().is_some() {
-        draw_modal(frame, state, width, height);
+        draw_modal(frame, theme, state, width, height);
     }
 }
 
@@ -2799,6 +2831,7 @@ impl Installer {
         let mut controller = UiController {
             ctx: std::mem::take(&mut self.ctx),
             state: std::mem::take(&mut self.state),
+            theme: Theme::INSTALLER,
             task: None,
             drive_rx: None,
             trap: None,

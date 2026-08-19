@@ -258,12 +258,12 @@ impl Block {
 /// A single-line box border drawn in CP437 box-drawing glyphs.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Border {
-    color: Color,
+    style: Style,
 }
 
 impl Border {
-    pub(crate) fn color(color: Color) -> Self {
-        Self { color }
+    pub(crate) fn style(style: Style) -> Self {
+        Self { style }
     }
 }
 
@@ -419,7 +419,7 @@ impl Widget for Border {
         if rect.width == 0 || rect.height == 0 {
             return;
         }
-        let style = Style::default().fg(self.color);
+        let style = self.style;
         let right = rect.x + rect.width - 1;
         let bottom = rect.y + rect.height - 1;
         let ul = '\u{250c}';
