@@ -10,6 +10,46 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Shared boilerplate of a validated string wrapper: the `as_str` accessor,
+/// `AsRef<str>`/`Display` bridges, fallible conversion from `String`, and
+/// lossless conversion back to `String`.
+macro_rules! string_newtype {
+    ($name:ident $(<const $limit:ident: usize>)?) => {
+        impl $(<const $limit: usize>)? $name $(<$limit>)? {
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.value
+            }
+        }
+
+        impl $(<const $limit: usize>)? AsRef<str> for $name $(<$limit>)? {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl $(<const $limit: usize>)? fmt::Display for $name $(<$limit>)? {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl $(<const $limit: usize>)? From<$name $(<$limit>)?> for String {
+            fn from(wrapper: $name $(<$limit>)?) -> Self {
+                wrapper.value
+            }
+        }
+
+        impl $(<const $limit: usize>)? TryFrom<String> for $name $(<$limit>)? {
+            type Error = anyhow::Error;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+    };
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
@@ -254,35 +294,19 @@ impl FromStr for K3sRole {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub struct Hostname {
     value: String,
 }
 
-impl Hostname {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.value
-    }
-}
+string_newtype!(Hostname);
 
 impl Default for Hostname {
     fn default() -> Self {
         Self {
             value: "puu".into(),
         }
-    }
-}
-
-impl AsRef<str> for Hostname {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for Hostname {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -309,39 +333,12 @@ impl FromStr for Hostname {
     }
 }
 
-impl<'de> Deserialize<'de> for Hostname {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Username {
     value: String,
 }
 
-impl Username {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.value
-    }
-}
-
-impl AsRef<str> for Username {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for Username {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+string_newtype!(Username);
 
 impl FromStr for Username {
     type Err = anyhow::Error;
@@ -364,29 +361,13 @@ impl FromStr for Username {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct GroupName {
     value: String,
 }
 
-impl GroupName {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.value
-    }
-}
-
-impl AsRef<str> for GroupName {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for GroupName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+string_newtype!(GroupName);
 
 impl FromStr for GroupName {
     type Err = anyhow::Error;
@@ -409,36 +390,14 @@ impl FromStr for GroupName {
     }
 }
 
-impl<'de> Deserialize<'de> for GroupName {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
-impl Serialize for GroupName {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Digest {
     value: String,
 }
 
-impl Digest {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.value
-    }
+string_newtype!(Digest);
 
+impl Digest {
     /// Path of this digest's blob inside an OCI archive (`blobs/sha256/<hex>`).
     #[must_use]
     pub fn oci_blob_path(&self) -> PathBuf {
@@ -447,29 +406,15 @@ impl Digest {
     }
 }
 
-impl AsRef<str> for Digest {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for Digest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub struct ImageRef {
     value: String,
 }
 
-impl ImageRef {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.value
-    }
+string_newtype!(ImageRef);
 
+impl ImageRef {
     #[must_use]
     pub fn dir(path: &Path) -> Self {
         Self {
@@ -493,18 +438,6 @@ impl Default for ImageRef {
         Self {
             value: "quay.io/puu/puu:latest".into(),
         }
-    }
-}
-
-impl AsRef<str> for ImageRef {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for ImageRef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -551,16 +484,6 @@ impl FromStr for ImageRef {
     }
 }
 
-impl<'de> Deserialize<'de> for ImageRef {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
 impl FromStr for Digest {
     type Err = anyhow::Error;
 
@@ -590,29 +513,13 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub struct KernelArg {
     value: String,
 }
 
-impl KernelArg {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.value
-    }
-}
-
-impl AsRef<str> for KernelArg {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for KernelArg {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+string_newtype!(KernelArg);
 
 impl FromStr for KernelArg {
     type Err = anyhow::Error;
@@ -627,39 +534,13 @@ impl FromStr for KernelArg {
     }
 }
 
-impl<'de> Deserialize<'de> for KernelArg {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub struct BrandName {
     value: String,
 }
 
-impl BrandName {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.value
-    }
-}
-
-impl AsRef<str> for BrandName {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for BrandName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+string_newtype!(BrandName);
 
 impl FromStr for BrandName {
     type Err = anyhow::Error;
@@ -679,39 +560,13 @@ impl FromStr for BrandName {
     }
 }
 
-impl<'de> Deserialize<'de> for BrandName {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub struct SingleLine {
     value: String,
 }
 
-impl SingleLine {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.value
-    }
-}
-
-impl AsRef<str> for SingleLine {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for SingleLine {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+string_newtype!(SingleLine);
 
 impl FromStr for SingleLine {
     type Err = anyhow::Error;
@@ -726,39 +581,13 @@ impl FromStr for SingleLine {
     }
 }
 
-impl<'de> Deserialize<'de> for SingleLine {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub struct Timezone {
     value: String,
 }
 
-impl Timezone {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.value
-    }
-}
-
-impl AsRef<str> for Timezone {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for Timezone {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+string_newtype!(Timezone);
 
 impl FromStr for Timezone {
     type Err = anyhow::Error;
@@ -780,39 +609,12 @@ impl FromStr for Timezone {
     }
 }
 
-impl<'de> Deserialize<'de> for Timezone {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerUrl {
     value: String,
 }
 
-impl ServerUrl {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.value
-    }
-}
-
-impl AsRef<str> for ServerUrl {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for ServerUrl {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+string_newtype!(ServerUrl);
 
 impl FromStr for ServerUrl {
     type Err = anyhow::Error;
@@ -827,29 +629,13 @@ impl FromStr for ServerUrl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub struct VolumeLabel<const MAX: usize> {
     value: String,
 }
 
-impl<const MAX: usize> VolumeLabel<MAX> {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.value
-    }
-}
-
-impl<const MAX: usize> AsRef<str> for VolumeLabel<MAX> {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl<const MAX: usize> fmt::Display for VolumeLabel<MAX> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+string_newtype!(VolumeLabel<const MAX: usize>);
 
 impl<const MAX: usize> FromStr for VolumeLabel<MAX> {
     type Err = anyhow::Error;
@@ -867,16 +653,6 @@ impl<const MAX: usize> FromStr for VolumeLabel<MAX> {
         Ok(Self {
             value: s.to_string(),
         })
-    }
-}
-
-impl<'de, const MAX: usize> Deserialize<'de> for VolumeLabel<MAX> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
     }
 }
 
