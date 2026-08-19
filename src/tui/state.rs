@@ -159,6 +159,7 @@ pub(crate) struct TimezoneDraft {
 pub(crate) enum Modal {
     WipeConfirmation,
     RebootConfirmation,
+    SetupModeRequired,
     Failure,
     Cancellation,
 }
@@ -217,7 +218,7 @@ impl Cyclic for RebootChoice {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum SecureBootChoice {
     Back,
-    Enroll,
+    Enable,
     #[default]
     Continue,
     Reboot,
@@ -226,7 +227,7 @@ pub(crate) enum SecureBootChoice {
 impl SecureBootChoice {
     pub(crate) const fn default_for(setup_mode_on: bool) -> Self {
         if setup_mode_on {
-            Self::Enroll
+            Self::Enable
         } else {
             Self::Continue
         }
@@ -234,9 +235,9 @@ impl SecureBootChoice {
 
     pub(crate) fn choices(setup_mode_on: bool) -> &'static [Self] {
         if setup_mode_on {
-            &[Self::Back, Self::Enroll]
+            &[Self::Back, Self::Enable]
         } else {
-            &[Self::Back, Self::Continue, Self::Reboot]
+            &[Self::Back, Self::Enable, Self::Continue, Self::Reboot]
         }
     }
 
@@ -260,7 +261,7 @@ impl SecureBootChoice {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Back => "[ Back ]",
-            Self::Enroll => "[ Enroll keys ]",
+            Self::Enable => "[ Enable Secure Boot ]",
             Self::Continue => "[ Continue without Secure Boot ]",
             Self::Reboot => "[ Reboot ]",
         }

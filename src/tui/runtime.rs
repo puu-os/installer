@@ -371,8 +371,8 @@ fn build_hit_targets(state: &AppState, terminal_size: (u16, u16)) -> Vec<HitTarg
             list_row_targets(list_x0, list_x1, first, count, 0)
         }
         Route::Review => {
-            // warning, blank, 3 summary lines, then two buttons
-            list_row_targets(list_x0, list_x1, rows_top.saturating_add(5), 2, 0)
+            // warning, blank, 4 summary lines, then two buttons
+            list_row_targets(list_x0, list_x1, rows_top.saturating_add(6), 2, 0)
         }
         Route::Install => {
             // Whole content region re-enables log follow on click.
@@ -597,7 +597,9 @@ fn update_modal(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
             state.selection.modal = ModalChoice::No;
             match (modal, confirmed) {
                 (Modal::WipeConfirmation, true) => state.route = Route::Identity,
-                (Modal::RebootConfirmation, true) => return vec![Effect::Reboot],
+                (Modal::RebootConfirmation | Modal::SetupModeRequired, true) => {
+                    return vec![Effect::Reboot];
+                }
                 (Modal::Cancellation, true) => return vec![Effect::CancelPipeline],
                 _ => {}
             }
@@ -814,9 +816,12 @@ fn update_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
                     }
                     match state.selection.secure_boot {
                         SecureBootChoice::Back => state.route = Route::Timezone,
-                        SecureBootChoice::Enroll => {
-                            state.route = Route::Review;
-                            return vec![Effect::SetSecureBoot(SecureBootMode::Enroll)];
+                        SecureBootChoice::Enable => {
+                            if setup_on {
+                                state.route = Route::Review;
+                                return vec![Effect::SetSecureBoot(SecureBootMode::Enroll)];
+                            }
+                            state.push_modal(Modal::SetupModeRequired);
                         }
                         SecureBootChoice::Continue => {
                             state.route = Route::Review;
@@ -2232,6 +2237,23 @@ fn review_content(frame: &mut Frame, rect: Rect, controller: &UiController) {
         theme.text(),
         Weight::Normal,
     );
+    row = row.saturating_add(1);
+    draw_text_row(
+        frame,
+        body.x,
+        row,
+        body.width,
+        &format!(
+            "Secure Boot  {}",
+            if controller.ctx.secure_boot == SecureBootMode::Enroll {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+        ),
+        theme.text(),
+        Weight::Normal,
+    );
     row = row.saturating_add(2);
     draw_selected_row(
         frame,
@@ -2518,6 +2540,11 @@ fn draw_modal(frame: &mut Frame, theme: Theme, state: &AppState, width: u16, hei
             "Reboot now?",
             "The machine will reboot immediately.".to_string(),
         ),
+        Modal::SetupModeRequired => (
+            "Enable Secure Boot?",
+            "Custom keys can only be enrolled while firmware Setup Mode is on. Reboot into firmware settings and enable Setup Mode (typically by clearing Secure Boot keys), then run the installer again."
+                .to_string(),
+        ),
         Modal::Failure => (
             "Installation failed",
             state
@@ -2580,7 +2607,11 @@ fn draw_modal(frame: &mut Frame, theme: Theme, state: &AppState, width: u16, hei
         }
     }
     let buttons = modal_button_rects(dialog);
-    let labels = [(ModalChoice::No, "No"), (ModalChoice::Yes, "Yes")];
+    let labels = if modal == Modal::SetupModeRequired {
+        [(ModalChoice::No, "Back"), (ModalChoice::Yes, "Reboot")]
+    } else {
+        [(ModalChoice::No, "No"), (ModalChoice::Yes, "Yes")]
+    };
     for (rect, (choice, label)) in buttons.into_iter().zip(labels) {
         if rect.width == 0 {
             continue;
