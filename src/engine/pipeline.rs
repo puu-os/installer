@@ -7,7 +7,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use nix::mount::MsFlags;
 use nix::sched::{CloneFlags, unshare};
 use uuid::Uuid;
@@ -374,28 +374,25 @@ const PART_WAIT_INTERVAL_MS: u64 = 500;
 
 pub fn wait_for_block_device(part: impl AsRef<Path>) -> Result<()> {
     let part = part.as_ref();
-    let deadline = std::time::Instant::now() + Duration::from_secs(PART_WAIT_TIMEOUT_S);
-    loop {
-        if part.exists() && std::fs::OpenOptions::new().read(true).open(part).is_ok() {
-            std::thread::sleep(Duration::from_millis(PART_WAIT_INTERVAL_MS));
-            if part.exists() && std::fs::OpenOptions::new().read(true).open(part).is_ok() {
-                return Ok(());
+    let mut was_ready = false;
+    crate::engine::util::wait_until(
+        Duration::from_secs(PART_WAIT_TIMEOUT_S),
+        Duration::from_millis(PART_WAIT_INTERVAL_MS),
+        || {
+            let ready = part.exists() && std::fs::OpenOptions::new().read(true).open(part).is_ok();
+            let stable = ready && was_ready;
+            was_ready = ready;
+            if !ready {
+                tracing::info!(
+                    target: crate::engine::INSTALLATION_LOG_TARGET,
+                    "waiting for {} to appear...",
+                    part.display()
+                );
             }
-        }
-        if std::time::Instant::now() >= deadline {
-            bail!(
-                "partition {} did not appear within {PART_WAIT_TIMEOUT_S}s \
-                 after writing the partition table",
-                part.display()
-            );
-        }
-        tracing::info!(
-            target: crate::engine::INSTALLATION_LOG_TARGET,
-            "waiting for {} to appear...",
-            part.display()
-        );
-        std::thread::sleep(Duration::from_millis(PART_WAIT_INTERVAL_MS));
-    }
+            stable
+        },
+    )
+    .with_context(|| format!("partition {} did not appear", part.display()))
 }
 
 pub fn mount_bootc_vartmp() -> Result<()> {

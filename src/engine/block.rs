@@ -5,8 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,15 +453,8 @@ pub fn drive_size_bytes(drive: impl AsRef<Path>) -> Result<u64> {
 
 /// Wait until `/run/udev/queue` is gone, replacing `udevadm settle`.
 pub fn wait_for_udev_settle(timeout: std::time::Duration) -> Result<()> {
-    let queue = Path::new("/run/udev/queue");
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        if !queue.exists() {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            bail!("udev settle timed out after {}s", timeout.as_secs());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    crate::engine::util::wait_until(timeout, Duration::from_millis(100), || {
+        !Path::new("/run/udev/queue").exists()
+    })
+    .context("waiting for udev to settle")
 }

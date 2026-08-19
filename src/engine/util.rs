@@ -4,6 +4,7 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -22,6 +23,25 @@ pub(crate) fn sync_all() {
 /// Whether the current process has superuser privileges.
 pub(crate) fn running_as_root() -> bool {
     nix::unistd::Uid::effective().is_root()
+}
+
+/// Poll `ready` at `interval` granularity until it succeeds or `timeout`
+/// elapses.
+pub(crate) fn wait_until(
+    timeout: Duration,
+    interval: Duration,
+    mut ready: impl FnMut() -> bool,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if ready() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out after {}s", timeout.as_secs());
+        }
+        std::thread::sleep(interval);
+    }
 }
 
 /// Format a byte count as a human-readable string (e.g. "1.5 GiB").
