@@ -111,4 +111,5 @@ sha256sum -c puu-installer-<version>-<platform>.tar.gz.sha256
 
 ## Licensing
 
-GPL-2.0-or-later. Copyright (C) Opinsys Oy 2026.
+This project is licensed with GPL-2.0+, unless otherwise stated in the source
+files. See [`LICENSE`](LICENSE) for details.
