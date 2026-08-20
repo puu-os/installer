@@ -9,21 +9,13 @@ Standalone installer for bootc-based OSs.
 
 ## Configuration
 
-The installer reads a YAML configuration file. Its path is taken from
-`--config-path`, or from the `PUU_INSTALLER_CONFIG` environment variable when
-`--config-path` is not given. `--config-path` takes precedence over the environment
-variable. Either `--config-path` or `PUU_INSTALLER_CONFIG` must be provided.
+Configuration is provided via `--config-path` or the `PUU_INSTALLER_CONFIG`
+environment variable (`--config-path` takes precedence).
 
-The k3s cluster token is the only k3s setting passed on the command line, via
-`--k3s-token-file` (the file's first line is used). All other k3s settings live
-in the configuration file.
+The k3s cluster token is passed via `--k3s-token-file`. All other settings are
+defined in the configuration file.
 
-To rebrand the installer for a different bootc OS, set `branding.name` (the
-product name shown in the TUI and written as the EFI firmware boot-entry
-description) and the `labels` (the on-disk root/home filesystem labels). Boot
-relies on UUIDs, so the labels are cosmetic.
-
-The defaults configuration is the following:
+Default configuration:
 
 ```yaml
 branding:
@@ -37,7 +29,7 @@ labels:
   home: puu-home
 image:
   targetImgRef: quay.io/puu/puu:latest
-  expectedDigest: ""       # required for local sources: sha256 of raw OCI manifest
+  expectedDigest: ""       # sha256 of raw OCI manifest for local sources
   sourceLabel: PAYLOAD
   sourceMount: /run/puu-installer/payload
 identity:
@@ -49,6 +41,10 @@ flatpak:
   manifestPath: /usr/share/puu/flatpaks.list
   syncHelper: /usr/libexec/puu/flatpak-sync
   liveStore: /var/lib/flatpak
+models:
+  manifestPath: /usr/share/puu/models.list
+  syncHelper: /usr/libexec/puu/model-sync
+  liveStore: /var/lib/vllm/models
 k3s:
   helper: /usr/libexec/puu/configure-k3s-cluster
   role: server          # "server" or "agent"
@@ -76,25 +72,20 @@ serialConsole: {}       # map of machine name -> console
 ## External commands
 
 - **`bootc`**: installs the bootc image to the target filesystem.
-- **`mkfs.fat`, `mkfs.xfs` and `mke2fs`**: create the target filesystems.
+- **`mkfs.fat`, `mkfs.xfs`, `mke2fs`**: create target filesystems.
 - **`configure-k3s-cluster`**: stages k3s cluster configuration (chrooted).
-- **`flatpak-sync`**: pre-seeds system Flatpaks (chrooted into the target).
+- **`flatpak-sync`**: pre-seeds system Flatpaks (chrooted).
+- **`model-sync`**: pre-seeds vLLM models (chrooted).
 
 ## Development
-
-Run the same checks used before a release. On non-Linux hosts this
-builds and lints `x86_64-unknown-linux-musl` via `cargo-zigbuild`:
 
 ```sh
 make ci
 ```
 
-`make package` archives `HEAD` and cross-compiles static musl binaries with
-[`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild). Host-native
-triples use plain `cargo`; other triples use Zig as the linker. Requires
-`cargo-zigbuild`, `zig`, and the matching `rustup` targets
-(`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`). Staging writes
-release tarballs and matching `<file>.sha256` sidecars under `artifacts/`:
+`make package` cross-compiles static musl binaries with
+[`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) and writes
+release tarballs with `.sha256` sidecars under `artifacts/`:
 
 ```sh
 make package
@@ -104,9 +95,6 @@ PACKAGE_STRICT=1 make package
 
 ## Release
 
-Create the version commit and signed tag, push them, then package `HEAD` and
-publish the GitLab release:
-
 ```sh
 scripts/release.sh <version>
 git push --atomic origin main <version>
@@ -115,8 +103,7 @@ PACKAGE_STRICT=1 make package
 make publish
 ```
 
-`make publish` creates or updates the GitLab release with `glab`, including
-each tarball and its `<file>.sha256` sidecar. Verify a download with:
+Verify download:
 
 ```sh
 sha256sum -c puu-installer-<version>-<platform>.tar.gz.sha256
@@ -124,6 +111,4 @@ sha256sum -c puu-installer-<version>-<platform>.tar.gz.sha256
 
 ## Licensing
 
-`puu-installer` is licensed under the `GPL-2.0-or-later` license.
-
-Copyright (C) Opinsys Oy 2026
+GPL-2.0-or-later. Copyright (C) Opinsys Oy 2026.
