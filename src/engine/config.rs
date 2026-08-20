@@ -59,6 +59,7 @@ pub struct Config {
     pub image: Image,
     pub identity: Identity,
     pub flatpak: Flatpak,
+    pub models: Models,
     pub k3s: K3s,
     pub homed: Homed,
     pub serial_console: HashMap<Arch, KernelArg>,
@@ -203,9 +204,27 @@ pub struct Flatpak {
 impl Default for Flatpak {
     fn default() -> Self {
         Self {
-            manifest_path: "/usr/share/puu/flatpaks.list".into(),
-            sync_helper: "/usr/libexec/puu/flatpak-sync".into(),
+            manifest_path: "/usr/share/puu-os/flatpaks.list".into(),
+            sync_helper: "/usr/libexec/puu-os/flatpak-sync".into(),
             live_store: "/var/lib/flatpak".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct Models {
+    pub catalog_dir: PathBuf,
+    pub sync_helper: PathBuf,
+    pub live_store: PathBuf,
+}
+
+impl Default for Models {
+    fn default() -> Self {
+        Self {
+            catalog_dir: "/usr/share/puu-os/vllm/catalog.d".into(),
+            sync_helper: "/usr/libexec/puu-os/preseed-vllm-models".into(),
+            live_store: "/var/lib/vllm/models".into(),
         }
     }
 }
@@ -726,7 +745,7 @@ pub struct K3s {
 impl Default for K3s {
     fn default() -> Self {
         Self {
-            helper: "/usr/libexec/puu/configure-k3s-cluster".into(),
+            helper: "/usr/libexec/puu-os/configure-k3s-cluster".into(),
             role: K3sRole::Server,
             server_url: None,
             node_name: None,

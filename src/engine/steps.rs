@@ -692,6 +692,65 @@ fn step_flatpak_seed(r: &mut Runner) -> Result<()> {
     Ok(())
 }
 
+fn step_models_seed(r: &mut Runner) -> Result<()> {
+    let catalog_path = r.ctx.config.models.catalog_dir.as_path();
+    let catalog =
+        Path::new(TARGET_MOUNT).join(catalog_path.strip_prefix("/").unwrap_or(catalog_path));
+    if !catalog.is_dir() {
+        tracing::info!(
+            target: crate::engine::INSTALLATION_LOG_TARGET,
+            "models-seed: no model catalog found"
+        );
+        return Ok(());
+    }
+
+    let live_models_dir = r.ctx.config.models.live_store.as_path();
+    if live_models_dir.is_dir() {
+        let has_models = std::fs::read_dir(live_models_dir).is_ok_and(|mut it| it.next().is_some());
+        if has_models {
+            let deployment = pipeline::deployment_root()?;
+            let ostree_deploy_dir =
+                deployment.parent().and_then(Path::parent).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "deployment root has unexpected path: {}",
+                        deployment.display()
+                    )
+                })?;
+            let target_models_dir = ostree_deploy_dir.join("var/lib/vllm/models");
+            pipeline::copy_tree(live_models_dir, &target_models_dir)?;
+            tracing::info!(
+                target: crate::engine::INSTALLATION_LOG_TARGET,
+                "models-seed: copied pre-seeded models from live image"
+            );
+        }
+    }
+
+    let helper = r.ctx.config.models.sync_helper.clone();
+    let sync = Path::new(TARGET_MOUNT).join(helper.strip_prefix("/").unwrap_or(&helper));
+    if sync.is_file() {
+        tracing::info!(
+            target: crate::engine::INSTALLATION_LOG_TARGET,
+            "models-seed: synchronizing model catalog metadata"
+        );
+        let mounted = pipeline::mount_chroot_binds()?;
+        let result = Command::new(helper.as_os_str())
+            .chroot(TARGET_MOUNT)
+            .heartbeat(
+                Duration::from_secs(30),
+                "model pre-seed still running; verifying catalog",
+            )
+            .run();
+        pipeline::unmount_chroot_binds(&mounted)?;
+        result?;
+    }
+
+    tracing::info!(
+        target: crate::engine::INSTALLATION_LOG_TARGET,
+        "models-seed: model catalog pre-seeded"
+    );
+    Ok(())
+}
+
 fn step_install_bootloader(r: &mut Runner) -> Result<()> {
     mount_efi(r)?;
     let source = systemd_boot_source()?;
@@ -975,6 +1034,7 @@ pub static STEPS: &[Step] = &[
     Step::new("Configure k3s cluster", step_configure_k3s_cluster),
     Step::new("Stage homed user identity", step_stage_homed_identity),
     Step::new("Pre-stage Flatpak refs", step_flatpak_seed).weight(15),
+    Step::new("Pre-stage model catalog", step_models_seed).weight(15),
     Step::new("Install systemd-boot", step_install_bootloader),
     Step::new("Stage ESP boot files", step_stage_esp_boot),
     Step::new("Sign EFI binaries", step_sign).requires_secure_boot(),
