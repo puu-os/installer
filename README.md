@@ -1,21 +1,16 @@
 <!-- SPDX-License-Identifier: GPL-2.0-or-later -->
 <!-- Copyright (C) Opinsys Oy 2026 -->
 
-# puu-installer
+# Puu OS installer
 
-<img alt="Puu installing bootc image" src="screenshot.png" width="800">
+Puu OS installer is a standalone installer for bootc based operating systems.
 
-Standalone installer for bootc-based OSs.
+## Deployment configuration
 
-## Configuration
+A deployment configuration must be provided either via `--config-path` or
+`PUU_INSTALLER_CONFIG`.
 
-Configuration is provided via `--config-path` or the `PUU_INSTALLER_CONFIG`
-environment variable (`--config-path` takes precedence).
-
-The k3s cluster token is passed via `--k3s-token-file`. All other settings are
-defined in the configuration file.
-
-Default configuration:
+This is the default configuration:
 
 ```yaml
 branding:
@@ -68,48 +63,14 @@ homed:
     - uucp
 serialConsole: {}       # map of machine name -> console
 ```
-
-## External commands
-
-- **`bootc`**: installs the bootc image to the target filesystem.
-- **`mkfs.fat`, `mkfs.xfs`, `mke2fs`**: create target filesystems.
-- **`configure-k3s-cluster`**: stages k3s cluster configuration (chrooted).
-- **`flatpak-sync`**: pre-seeds system Flatpaks (chrooted).
-- **`model-sync`**: pre-seeds vLLM models (chrooted).
+Optional K3s token must be passed via `--k3s-token-file`.
 
 ## Development
 
-```sh
-make ci
-```
-
-`make package` cross-compiles static musl binaries with
-[`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) and writes
-release tarballs with `.sha256` sidecars under `artifacts/`:
-
-```sh
-make package
-make package PLATFORMS='linux-x86_64'
-PACKAGE_STRICT=1 make package
-```
-
-## Release
-
-```sh
-scripts/release.sh <version>
-git push --atomic origin main <version>
-make ci
-PACKAGE_STRICT=1 make package
-make publish
-```
-
-Verify download:
-
-```sh
-sha256sum -c puu-installer-<version>-<platform>.tar.gz.sha256
-```
+- Follow [Google C++ Style Guide](https://google.github.io/styleguide/cppguide.html).
+- Use [Meson WrapDB](https://mesonbuild.com/Wrapdb-projects.html) as much as possible.
 
 ## Licensing
 
-This project is licensed with GPL-2.0+, unless otherwise stated in the source
-files. See [`LICENSE`](LICENSE) for details.
+Puu OS installer has been licensed with the GNU General Public License 2.0, or
+under any newer version published by the [Free Software Foundation](https://www.fsf.org/).
