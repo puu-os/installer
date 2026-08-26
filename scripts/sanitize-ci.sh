@@ -16,10 +16,10 @@ BUILDDIR="${SANITIZE_BUILDDIR:-build-sanitize}"
 NO_ABLSAN='-Dabseil-cpp:b_sanitize=none'
 if [[ -d "$BUILDDIR" ]]; then
   "$MESON" setup --reconfigure "$BUILDDIR" -Db_sanitize=address,undefined \
-    -Dtests=enabled "$NO_ABLSAN" >/dev/null
+    "$NO_ABLSAN" >/dev/null
 else
   "$MESON" setup "$BUILDDIR" -Db_sanitize=address,undefined \
-    -Dtests=enabled "$NO_ABLSAN" >/dev/null
+    "$NO_ABLSAN" >/dev/null
 fi
 
 ninja -C "$BUILDDIR"
