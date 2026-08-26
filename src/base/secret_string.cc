@@ -20,7 +20,7 @@ SecretString::SecretString(SecretString&& other) : value_(other.value_) {
 SecretString& SecretString::operator=(SecretString&& other) {
   if (this != &other) {
     Clear();
-    value_ = other.value_;
+    value_ = std::move(other.value_);
     other.Clear();
   }
   return *this;
