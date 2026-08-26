@@ -25,7 +25,7 @@ cleanup() {
 trap cleanup EXIT
 
 workdir="$(mktemp -d)"
-asset="puu-installer-0.0.0-linux-x86_64.tar.gz"
+asset="puu-installer-0.0.0.tar.xz"
 printf 'payload\n' >"$workdir/$asset"
 write_sha256_sidecar "$workdir/$asset"
 

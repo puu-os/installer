@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 #
-# Publish a GitLab release from locally packaged static binaries.
-# Run `make package` (or PACKAGE_STRICT=1 make package) first.
+# Publishes a GitLab release consisting of the source tarball and its checksum.
+# Run `make package` first.
 
 set -euo pipefail
 
@@ -12,7 +12,6 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/sha256.sh"
 
 GLAB="${GLAB:-glab}"
-platforms=(linux-aarch64 linux-x86_64)
 
 cleanup() {
   local status=$?
@@ -45,7 +44,7 @@ latest_semver_tag() {
   return 1
 }
 
-for command in file git tar; do
+for command in git tar xz; do
   require_command "$command"
 done
 if ! command -v sha256sum >/dev/null 2>&1 && \
@@ -67,12 +66,12 @@ if [[ -z "$version" ]]; then
 fi
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid version: $version"
 
-cargo_version="$(
-  sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/p' \
-    Cargo.toml | head -1
+project_version="$(
+  sed -n "s/^[[:space:]]*version:[[:space:]]*'\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)'.*/\1/p" \
+    meson.build | head -1
 )"
-[[ "$cargo_version" == "$version" ]] \
-  || die "Cargo.toml version $cargo_version does not match $version"
+[[ "$project_version" == "$version" ]] \
+  || die "meson.build version $project_version does not match $version"
 
 tag_commit="$(git rev-parse "$version^{commit}" 2>/dev/null)" \
   || die "tag $version does not exist"
@@ -88,64 +87,47 @@ remote_tag="${remote_output%%$'\t'*}"
 [[ -n "$remote_tag" && "$remote_tag" == "$local_tag" ]] \
   || die "push tag $version to origin before publishing"
 
+asset="puu-installer-$version.tar.xz"
+asset_path="artifacts/$asset"
+asset_checksum="$asset_path.sha256"
+[[ -f "$asset_path" && -f "$asset_checksum" ]] \
+  || die "missing $asset_path or its checksum; run 'make package' first"
+
+read -r expected_digest _ <"$asset_checksum"
+actual_digest="$(sha256_digest "$asset_path")"
+[[ "$actual_digest" == "$expected_digest" ]] \
+  || die "checksum mismatch for $asset; rerun make package"
+
+# The tarball must correspond to the tag it is published under, otherwise the
+# published checksum would attest to a different tree.
+# The whole listing is captured first: `tar | head` would SIGPIPE tar under
+# pipefail and kill the release for any archive large enough to fill the pipe.
+tar_listing="$(tar -tf "$asset_path")" || die "$asset is not a readable tar archive"
+read -r first_entry <<<"$tar_listing"
+[[ "$first_entry" == "puu-installer-$version/" ]] \
+  || die "$asset does not unpack into puu-installer-$version/"
+
 workdir="$(mktemp -d)"
 mkdir -p "$workdir/release"
-missing=()
-for platform in "${platforms[@]}"; do
-  asset="puu-installer-$version-$platform.tar.gz"
-  asset_path="artifacts/$asset"
-  asset_checksum="$asset_path.sha256"
-  digest_file="artifacts/puu-installer-$version-$platform.bin.sha256"
-  if [[ ! -f "$asset_path" || ! -f "$asset_checksum" || ! -f "$digest_file" ]]; then
-    missing+=("$platform release asset or checksum")
-    continue
-  fi
-
-  read -r expected_asset_digest _ <"$asset_checksum"
-  actual_asset_digest="$(sha256_digest "$asset_path")"
-  [[ "$actual_asset_digest" == "$expected_asset_digest" ]] \
-    || die "release asset checksum mismatch for $platform; rerun make package"
-
-  archived_bin="$workdir/$platform-puu-installer"
-  tar -xOf "$asset_path" puu-installer >"$archived_bin" \
-    || die "release asset for $platform does not contain puu-installer"
-  [[ "$(sha256_digest "$archived_bin")" == "$(<"$digest_file")" ]] \
-    || die "release asset binary mismatch for $platform; rerun make package"
-
-  description="$(file -b "$archived_bin")"
-  case "$platform" in
-    linux-aarch64) expected_arch=aarch64 ;;
-    linux-x86_64) expected_arch=x86-64 ;;
-  esac
-  if [[ "${description,,}" != *"$expected_arch"* || \
-    "$description" != *"statically linked"* ]]; then
-    die "invalid $platform binary: $description"
-  fi
-
-  cp "$asset_path" "$asset_checksum" "$workdir/release/"
-done
-
-if ((${#missing[@]} > 0)); then
-  printf 'missing platform release inputs:\n' >&2
-  printf '  %s\n' "${missing[@]}" >&2
-  die "run 'PACKAGE_STRICT=1 make package' before publish"
-fi
+cp "$asset_path" "$asset_checksum" "$workdir/release/"
 
 notes="$workdir/release-notes.md"
 git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' \
   "refs/tags/$version" >"$notes"
+
 if command -v "$GLAB" >/dev/null 2>&1; then
   if "$GLAB" release view "$version" >/dev/null 2>&1; then
-    "$GLAB" release upload "$version" "$workdir"/release/*.tar.gz \
+    "$GLAB" release upload "$version" "$workdir"/release/*.tar.xz \
       "$workdir"/release/*.sha256 --clobber
   else
-    "$GLAB" release create "$version" "$workdir"/release/*.tar.gz \
-      "$workdir"/release/*.sha256 --name "puu-installer $version" --notes-file "$notes"
+    "$GLAB" release create "$version" "$workdir"/release/*.tar.xz \
+      "$workdir"/release/*.sha256 --name "puu-installer $version" \
+      --notes-file "$notes"
   fi
 else
   printf 'glab not found; copying release assets to artifacts/release\n'
   mkdir -p artifacts/release
-  cp "$workdir"/release/*.tar.gz "$workdir"/release/*.sha256 artifacts/release/
+  cp "$workdir"/release/*.tar.xz "$workdir"/release/*.sha256 artifacts/release/
 fi
 
 printf 'published puu-installer %s\n' "$version"
