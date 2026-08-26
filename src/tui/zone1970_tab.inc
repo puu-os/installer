@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: CC0-1.0
+// Embedded fallback zone1970.tab table.
+
+namespace puu::tui {
+namespace {
+
+constexpr std::string_view kEmbeddedZone1970Tab = R"(
 # tzdb timezone descriptions
 #
 # This file is in the public domain.
@@ -373,3 +380,7 @@ ZA,LS,SZ	-2615+02800	Africa/Johannesburg
 #@CY,TR	Asia/,Europe/
 #@SJ	Arctic/
 #@CC,CX,KM,MG,YT	Indian/
+)";
+
+}  // namespace
+}  // namespace puu::tui
