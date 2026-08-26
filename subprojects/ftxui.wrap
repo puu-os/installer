@@ -1,0 +1,13 @@
+[wrap-file]
+directory = FTXUI-6.1.9
+source_url = https://github.com/ArthurSonzogni/FTXUI/archive/refs/tags/v6.1.9.tar.gz
+source_filename = FTXUI-6.1.9.tar.gz
+source_hash = 45819c1e54914783d4a1ca5633885035d74146778a1f74e1213cdb7b76340e71
+source_fallback_url = https://github.com/mesonbuild/wrapdb/releases/download/ftxui_6.1.9-1/FTXUI-6.1.9.tar.gz
+patch_filename = ftxui_6.1.9-1_patch.zip
+patch_url = https://wrapdb.mesonbuild.com/v2/ftxui_6.1.9-1/get_patch
+patch_hash = ee32408847f6ad055025fe52dba30e096e1aaf70991f4c1edfb6b10ba2964c98
+wrapdb_version = 6.1.9-1
+
+[provide]
+dependency_names = ftxui-screen, ftxui-dom, ftxui-component

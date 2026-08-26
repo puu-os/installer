@@ -1,4 +1,4 @@
-/target/
-/artifacts/
-/.readseek
-!/todo.txt
+/build/
+/subprojects/*
+!/subprojects/packagefiles/
+!/subprojects/*.wrap

@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) Opinsys Oy 2026
+---
+BasedOnStyle: Google
+Language: Cpp
+Standard: c++20
+ColumnLimit: 80
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Regroup
+# Google order: related header, C system, C++ standard library, other
+# libraries, project. Third-party roots are listed explicitly because their
+# headers are indistinguishable from C system headers by shape alone.
+IncludeCategories:
+  - Regex: '^<(absl|argtable3|blkid|fmt|ftxui|gtest|libudev|nlohmann|openssl|spdlog|yaml-cpp)[/.]'
+    Priority: 4
+  - Regex: '^<.*\.(h|hpp)>$'
+    Priority: 2
+  - Regex: '^<.*>$'
+    Priority: 3
+  - Regex: '^".*"$'
+    Priority: 5
