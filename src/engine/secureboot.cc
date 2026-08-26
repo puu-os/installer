@@ -3,11 +3,6 @@
 
 #include "engine/secureboot.h"
 
-#include <fcntl.h>
-#include <sys/ioctl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -16,9 +11,7 @@
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
-#include <fstream>
 #include <initializer_list>
-#include <iterator>
 #include <memory>
 #include <optional>
 #include <span>
@@ -28,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include <absl/status/status.h>
 #include <fmt/format.h>
 #include <openssl/asn1.h>
 #include <openssl/bio.h>
@@ -37,6 +31,8 @@
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/pkcs7.h>
+#include <openssl/rsa.h>
+#include <openssl/safestack.h>
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
 
@@ -137,7 +133,9 @@ struct KeyAndCert {
 std::vector<uint8_t> Concat(
     std::initializer_list<std::span<const uint8_t>> parts) {
   size_t total = 0;
-  for (const auto& part : parts) total += part.size();
+  for (const auto& part : parts) {
+    total += part.size();
+  }
   std::vector<uint8_t> out;
   out.reserve(total);
   for (const auto& part : parts) {
@@ -246,7 +244,9 @@ StatusOr<AuthenticodeLayout> ComputeAuthenticodeLayout(
 StatusOr<std::vector<uint8_t>> CertificateDer(const X509* certificate) {
   uint8_t* raw = nullptr;
   const int length = i2d_X509(certificate, &raw);
-  if (length <= 0 || raw == nullptr) return OpensslError("i2d_X509");
+  if (length <= 0 || raw == nullptr) {
+    return OpensslError("i2d_X509");
+  }
   const OpensslBytesPtr owned(raw);
   return std::vector<uint8_t>(raw, raw + length);
 }
@@ -261,7 +261,9 @@ StatusOr<KeyAndCert> LoadKeyAndCert(const KeyPair& pair) {
                                      &pair]() -> StatusOr<EvpPkeyPtr> {
     const BioPtr key_bio(
         BIO_new_mem_buf(key_pem.data(), static_cast<int>(key_pem.size())));
-    if (key_bio == nullptr) return OpensslError("BIO_new_mem_buf");
+    if (key_bio == nullptr) {
+      return OpensslError("BIO_new_mem_buf");
+    }
     EvpPkeyPtr key(
         PEM_read_bio_PrivateKey(key_bio.get(), nullptr, nullptr, nullptr));
     if (key == nullptr) {
@@ -279,7 +281,9 @@ StatusOr<KeyAndCert> LoadKeyAndCert(const KeyPair& pair) {
 
   const BioPtr cert_bio(
       BIO_new_mem_buf(cert_pem.data(), static_cast<int>(cert_pem.size())));
-  if (cert_bio == nullptr) return OpensslError("BIO_new_mem_buf");
+  if (cert_bio == nullptr) {
+    return OpensslError("BIO_new_mem_buf");
+  }
   X509Ptr certificate(
       PEM_read_bio_X509(cert_bio.get(), nullptr, nullptr, nullptr));
   if (certificate == nullptr) {
@@ -294,7 +298,9 @@ StatusOr<KeyAndCert> LoadKeyAndCert(const KeyPair& pair) {
 StatusOr<X509Ptr> LoadCertificate(const std::filesystem::path& path) {
   PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> pem, ReadFileBytes(path));
   const BioPtr bio(BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())));
-  if (bio == nullptr) return OpensslError("BIO_new_mem_buf");
+  if (bio == nullptr) {
+    return OpensslError("BIO_new_mem_buf");
+  }
   X509Ptr certificate(PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr));
   if (certificate == nullptr) {
     return WithContext(OpensslError("PEM_read_bio_X509"),
@@ -371,13 +377,15 @@ StatusOr<std::vector<uint8_t>> BuildPkcs7(std::span<const uint8_t> digest,
 
   std::array<std::vector<uint8_t>, 2> attributes = {content_type_attr,
                                                     message_digest_attr};
-  std::sort(attributes.begin(), attributes.end());
+  std::ranges::sort(attributes);
   const std::vector<uint8_t> attribute_contents =
       Concat({attributes[0], attributes[1]});
 
   const std::vector<uint8_t> to_sign = der::Tlv(0x31, attribute_contents);
   const EvpMdCtxPtr md_ctx(EVP_MD_CTX_new());
-  if (md_ctx == nullptr) return OpensslError("EVP_MD_CTX_new");
+  if (md_ctx == nullptr) {
+    return OpensslError("EVP_MD_CTX_new");
+  }
   if (EVP_DigestSignInit(md_ctx.get(), nullptr, EVP_sha256(), nullptr, key) !=
       1) {
     return OpensslError("EVP_DigestSignInit");
@@ -471,12 +479,16 @@ StatusOr<std::array<uint8_t, 32>> AuthenticodeSha256(
                        ComputeAuthenticodeLayout(image));
 
   const EvpMdCtxPtr ctx(EVP_MD_CTX_new());
-  if (ctx == nullptr) return OpensslError("EVP_MD_CTX_new");
+  if (ctx == nullptr) {
+    return OpensslError("EVP_MD_CTX_new");
+  }
   if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
     return OpensslError("EVP_DigestInit_ex");
   }
   const auto update = [&ctx](std::span<const uint8_t> data) -> Status {
-    if (data.empty()) return absl::OkStatus();
+    if (data.empty()) {
+      return absl::OkStatus();
+    }
     if (EVP_DigestUpdate(ctx.get(), data.data(), data.size()) != 1) {
       return OpensslError("EVP_DigestUpdate");
     }
@@ -503,7 +515,7 @@ StatusOr<std::array<uint8_t, 32>> AuthenticodeSha256(
     PUU_ASSIGN_OR_RETURN(const uint32_t size, ReadU32Le(image, header + 16));
     ranges.emplace_back(pointer, static_cast<size_t>(pointer) + size);
   }
-  std::sort(ranges.begin(), ranges.end(), [](const auto& lhs, const auto& rhs) {
+  std::ranges::sort(ranges, [](const auto& lhs, const auto& rhs) {
     return lhs.first < rhs.first;
   });
 
@@ -539,7 +551,9 @@ StatusOr<std::vector<std::span<const uint8_t>>> AttributeCertificates(
     std::span<const uint8_t> image) {
   PUU_ASSIGN_OR_RETURN(const auto table, CertificateTableRange(image));
   std::vector<std::span<const uint8_t>> out;
-  if (!table.has_value()) return out;
+  if (!table.has_value()) {
+    return out;
+  }
 
   const auto [table_start, table_end] = *table;
   size_t position = table_start;
@@ -573,7 +587,9 @@ StatusOr<std::vector<std::span<const uint8_t>>> AttributeCertificates(
 StatusOr<std::vector<uint8_t>> SignPeImage(std::span<const uint8_t> image,
                                            const KeyAndCert& signer) {
   const EvpPkeyPtr public_key(X509_get_pubkey(signer.certificate.get()));
-  if (public_key == nullptr) return OpensslError("X509_get_pubkey");
+  if (public_key == nullptr) {
+    return OpensslError("X509_get_pubkey");
+  }
   if (EVP_PKEY_eq(public_key.get(), signer.key.get()) != 1) {
     return FailedPreconditionError(
         "Secure Boot private key does not match its certificate");
@@ -584,12 +600,16 @@ StatusOr<std::vector<uint8_t>> SignPeImage(std::span<const uint8_t> image,
   PUU_ASSIGN_OR_RETURN(const auto table, CertificateTableRange(image));
 
   std::vector<uint8_t> out(image.begin(), image.end());
-  if (table.has_value()) out.resize(table->first);
+  if (table.has_value()) {
+    out.resize(table->first);
+  }
   std::fill_n(
       out.begin() + static_cast<std::ptrdiff_t>(layout.security_dir_offset), 8,
       uint8_t{0});
 
-  while (out.size() % 8 != 0) out.push_back(0);
+  while (out.size() % 8 != 0) {
+    out.push_back(0);
+  }
 
   PUU_ASSIGN_OR_RETURN(const auto digest, AuthenticodeSha256(out));
   PUU_ASSIGN_OR_RETURN(
@@ -622,9 +642,8 @@ StatusOr<std::vector<uint8_t>> SignPeImage(std::span<const uint8_t> image,
   std::vector<uint8_t> directory;
   AppendLe<uint32_t>(directory, static_cast<uint32_t>(certificate_offset));
   AppendLe<uint32_t>(directory, static_cast<uint32_t>(entry.size()));
-  std::copy(
-      directory.begin(), directory.end(),
-      out.begin() + static_cast<std::ptrdiff_t>(layout.security_dir_offset));
+  std::ranges::copy(directory, out.begin() + static_cast<std::ptrdiff_t>(
+                                                 layout.security_dir_offset));
   return out;
 }
 
@@ -635,12 +654,16 @@ StatusOr<bool> VerifyPeImage(std::span<const uint8_t> image,
   PUU_ASSIGN_OR_RETURN(const auto expected, AuthenticodeSha256(image));
 
   const X509StackPtr certificates(sk_X509_new_null());
-  if (certificates == nullptr) return OpensslError("sk_X509_new_null");
+  if (certificates == nullptr) {
+    return OpensslError("sk_X509_new_null");
+  }
   if (sk_X509_push(certificates.get(), certificate) <= 0) {
     return OpensslError("sk_X509_push");
   }
   const X509StorePtr store(X509_STORE_new());
-  if (store == nullptr) return OpensslError("X509_STORE_new");
+  if (store == nullptr) {
+    return OpensslError("X509_STORE_new");
+  }
 
   const int flags = PKCS7_BINARY | PKCS7_NOINTERN | PKCS7_NOVERIFY;
   PUU_ASSIGN_OR_RETURN(const std::vector<std::span<const uint8_t>> blobs,
@@ -648,7 +671,9 @@ StatusOr<bool> VerifyPeImage(std::span<const uint8_t> image,
   for (const std::span<const uint8_t> blob : blobs) {
     const std::optional<der::EmbeddedSignature> parsed =
         der::ParseAuthenticode(blob);
-    if (!parsed.has_value()) continue;
+    if (!parsed.has_value()) {
+      continue;
+    }
     if (!std::equal(parsed->digest.begin(), parsed->digest.end(),
                     expected.begin(), expected.end())) {
       continue;
@@ -680,7 +705,7 @@ std::vector<uint8_t> AuthMessage(std::string_view name, const EfiGuid& guid,
   for (const char c : name) {
     AppendLe<uint16_t>(message, static_cast<uint16_t>(static_cast<uint8_t>(c)));
   }
-  message.insert(message.end(), guid.bytes().begin(), guid.bytes().end());
+  message.insert(message.end(), guid.Bytes().begin(), guid.Bytes().end());
   AppendLe<uint32_t>(message, kAuthVariableAttributes);
 
   message.insert(message.end(), 16, 0);
@@ -692,16 +717,24 @@ StatusOr<std::vector<uint8_t>> SignDetachedPkcs7(
     std::span<const uint8_t> message, EVP_PKEY* key, X509* certificate) {
   const BioPtr bio(
       BIO_new_mem_buf(message.data(), static_cast<int>(message.size())));
-  if (bio == nullptr) return OpensslError("BIO_new_mem_buf");
+  if (bio == nullptr) {
+    return OpensslError("BIO_new_mem_buf");
+  }
   const X509StackPtr certificates(sk_X509_new_null());
-  if (certificates == nullptr) return OpensslError("sk_X509_new_null");
+  if (certificates == nullptr) {
+    return OpensslError("sk_X509_new_null");
+  }
   const Pkcs7Ptr pkcs7(
       PKCS7_sign(certificate, key, certificates.get(), bio.get(),
                  PKCS7_DETACHED | PKCS7_BINARY | PKCS7_NOATTR));
-  if (pkcs7 == nullptr) return OpensslError("PKCS7_sign");
+  if (pkcs7 == nullptr) {
+    return OpensslError("PKCS7_sign");
+  }
   uint8_t* raw = nullptr;
   const int length = i2d_PKCS7(pkcs7.get(), &raw);
-  if (length <= 0 || raw == nullptr) return OpensslError("i2d_PKCS7");
+  if (length <= 0 || raw == nullptr) {
+    return OpensslError("i2d_PKCS7");
+  }
   const OpensslBytesPtr owned(raw);
   return std::vector<uint8_t>(raw, raw + length);
 }
@@ -743,7 +776,9 @@ StatusOr<std::string> RandomUuidText() {
   bytes[8] = static_cast<uint8_t>((bytes[8] & 0x3fU) | 0x80U);
   std::string text;
   for (size_t i = 0; i < bytes.size(); ++i) {
-    if (i == 4 || i == 6 || i == 8 || i == 10) text.push_back('-');
+    if (i == 4 || i == 6 || i == 8 || i == 10) {
+      text.push_back('-');
+    }
     text += fmt::format("{:02x}", bytes[i]);
   }
   return text;
@@ -753,7 +788,9 @@ StatusOr<EfiGuid> ParseEfiGuid(std::string_view text) {
   std::array<uint8_t, 16> big_endian{};
   size_t nibble = 0;
   for (const char c : text) {
-    if (c == '-') continue;
+    if (c == '-') {
+      continue;
+    }
     uint8_t value = 0;
     if (c >= '0' && c <= '9') {
       value = static_cast<uint8_t>(c - '0');
@@ -775,7 +812,9 @@ StatusOr<EfiGuid> ParseEfiGuid(std::string_view text) {
     }
     ++nibble;
   }
-  if (nibble != 32) return InvalidArgumentError("UUID '{}' is too short", text);
+  if (nibble != 32) {
+    return InvalidArgumentError("UUID '{}' is too short", text);
+  }
 
   std::array<uint8_t, 16> mixed{};
   mixed[0] = big_endian[3];
@@ -794,10 +833,14 @@ Status GenerateKeyPair(std::string_view common_name,
                        const std::filesystem::path& key_path,
                        const std::filesystem::path& certificate_path) {
   const EvpPkeyPtr key(EVP_RSA_gen(2048));
-  if (key == nullptr) return OpensslError("EVP_RSA_gen");
+  if (key == nullptr) {
+    return OpensslError("EVP_RSA_gen");
+  }
 
   const X509NamePtr name(X509_NAME_new());
-  if (name == nullptr) return OpensslError("X509_NAME_new");
+  if (name == nullptr) {
+    return OpensslError("X509_NAME_new");
+  }
   const std::string cn{common_name};
   if (X509_NAME_add_entry_by_txt(
           name.get(), "CN", MBSTRING_ASC,
@@ -806,20 +849,26 @@ Status GenerateKeyPair(std::string_view common_name,
   }
 
   const X509Ptr certificate(X509_new());
-  if (certificate == nullptr) return OpensslError("X509_new");
+  if (certificate == nullptr) {
+    return OpensslError("X509_new");
+  }
 
   if (X509_set_version(certificate.get(), 2) != 1) {
     return OpensslError("X509_set_version");
   }
 
   const BignumPtr serial(BN_new());
-  if (serial == nullptr) return OpensslError("BN_new");
+  if (serial == nullptr) {
+    return OpensslError("BN_new");
+  }
 
   if (BN_rand(serial.get(), 159, BN_RAND_TOP_ANY, BN_RAND_BOTTOM_ANY) != 1) {
     return OpensslError("BN_rand");
   }
   const Asn1IntegerPtr serial_asn1(BN_to_ASN1_INTEGER(serial.get(), nullptr));
-  if (serial_asn1 == nullptr) return OpensslError("BN_to_ASN1_INTEGER");
+  if (serial_asn1 == nullptr) {
+    return OpensslError("BN_to_ASN1_INTEGER");
+  }
   if (X509_set_serialNumber(certificate.get(), serial_asn1.get()) != 1) {
     return OpensslError("X509_set_serialNumber");
   }
@@ -846,13 +895,17 @@ Status GenerateKeyPair(std::string_view common_name,
   }
 
   const BioPtr key_bio(BIO_new(BIO_s_mem()));
-  if (key_bio == nullptr) return OpensslError("BIO_new");
+  if (key_bio == nullptr) {
+    return OpensslError("BIO_new");
+  }
   if (PEM_write_bio_PKCS8PrivateKey(key_bio.get(), key.get(), nullptr, nullptr,
                                     0, nullptr, nullptr) != 1) {
     return OpensslError("PEM_write_bio_PKCS8PrivateKey");
   }
   const BioPtr cert_bio(BIO_new(BIO_s_mem()));
-  if (cert_bio == nullptr) return OpensslError("BIO_new");
+  if (cert_bio == nullptr) {
+    return OpensslError("BIO_new");
+  }
   if (PEM_write_bio_X509(cert_bio.get(), certificate.get()) != 1) {
     return OpensslError("PEM_write_bio_X509");
   }
@@ -860,7 +913,9 @@ Status GenerateKeyPair(std::string_view common_name,
   const auto bio_bytes = [](BIO* bio) -> std::span<const uint8_t> {
     char* data = nullptr;
     const auto length = static_cast<int64_t>(BIO_get_mem_data(bio, &data));
-    if (data == nullptr || length <= 0) return {};
+    if (data == nullptr || length <= 0) {
+      return {};
+    }
     return {reinterpret_cast<const uint8_t*>(data),
             static_cast<size_t>(length)};
   };
@@ -912,7 +967,7 @@ std::vector<uint8_t> BuildSignatureList(std::span<const uint8_t> cert_der,
   AppendLe<uint32_t>(out, static_cast<uint32_t>(list_size));
   AppendLe<uint32_t>(out, 0);
   AppendLe<uint32_t>(out, static_cast<uint32_t>(signature_size));
-  out.insert(out.end(), owner.bytes().begin(), owner.bytes().end());
+  out.insert(out.end(), owner.Bytes().begin(), owner.Bytes().end());
   out.insert(out.end(), cert_der.begin(), cert_der.end());
   return out;
 }
@@ -1060,7 +1115,9 @@ StatusOr<bool> VerifyPeBinary(const std::filesystem::path& binary,
   PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> image, ReadFileBytes(binary));
   StatusOr<X509Ptr> certificate = LoadCertificate(key.certificate_path);
 
-  if (!certificate.ok()) return false;
+  if (!certificate.ok()) {
+    return false;
+  }
   StatusOr<bool> verified = VerifyPeImage(image, certificate->get());
   if (!verified.ok()) {
     return WithContext(
@@ -1086,16 +1143,20 @@ StatusOr<std::vector<std::filesystem::path>> TargetEfiBinaries(
                            error.message());
     }
     std::string extension = it->path().extension().string();
-    std::transform(
-        extension.begin(), extension.end(), extension.begin(),
-        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::ranges::transform(extension, extension.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
 
     const std::string name = it->path().filename().string();
-    if (extension != ".efi" && !name.starts_with("vmlinuz")) continue;
-    if (!std::filesystem::is_regular_file(it->path(), error)) continue;
+    if (extension != ".efi" && !name.starts_with("vmlinuz")) {
+      continue;
+    }
+    if (!std::filesystem::is_regular_file(it->path(), error)) {
+      continue;
+    }
     found.push_back(it->path());
   }
-  std::sort(found.begin(), found.end());
+  std::ranges::sort(found);
   return found;
 }
 

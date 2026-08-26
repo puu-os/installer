@@ -23,18 +23,18 @@ class SecretString {
 
   SecretString(const SecretString&) = delete;
   SecretString& operator=(const SecretString&) = delete;
-  SecretString(SecretString&& other);
-  SecretString& operator=(SecretString&& other);
+  SecretString(SecretString&& other) noexcept;
+  SecretString& operator=(SecretString&& other) noexcept;
 
   ~SecretString();
 
   // Borrowed view; invalidated by any mutation or by destruction.
-  std::string_view value() const { return value_; }
-  bool empty() const { return value_.empty(); }
-  size_t size() const { return value_.size(); }
+  [[nodiscard]] std::string_view Value() const { return value_; }
+  [[nodiscard]] bool Empty() const { return value_.empty(); }
+  [[nodiscard]] size_t Size() const { return value_.size(); }
 
   // Explicit because secrets must never be copied accidentally.
-  SecretString Clone() const;
+  [[nodiscard]] SecretString Clone() const;
 
   void Assign(std::string_view text);
 

@@ -11,19 +11,26 @@
 #include <cctype>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <type_traits>
+#include <vector>
 
 #include <blkid/blkid.h>
+#include <fmt/format.h>
 #include <libudev.h>
 
+#include "base/status.h"
 #include "engine/util.h"
 
 namespace puu::engine {
@@ -63,10 +70,10 @@ using BlkidProbePtr =
     std::unique_ptr<std::remove_pointer_t<blkid_probe>, BlkidProbeDeleter>;
 
 bool IsVirtualBlock(std::string_view sysname) {
-  return std::any_of(kVirtualPrefixes.begin(), kVirtualPrefixes.end(),
-                     [sysname](std::string_view prefix) {
-                       return sysname.starts_with(prefix);
-                     });
+  return std::ranges::any_of(kVirtualPrefixes,
+                             [sysname](std::string_view prefix) {
+                               return sysname.starts_with(prefix);
+                             });
 }
 
 std::optional<std::string> SysfsAttr(std::string_view sysname,
@@ -74,20 +81,28 @@ std::optional<std::string> SysfsAttr(std::string_view sysname,
   const std::filesystem::path path =
       std::filesystem::path(kSysBlock) / sysname / attribute;
   const StatusOr<std::string> line = ReadFirstLine(path);
-  if (!line.ok()) return std::nullopt;
+  if (!line.ok()) {
+    return std::nullopt;
+  }
   const std::string_view value = Trim(*line);
-  if (value.empty()) return std::nullopt;
+  if (value.empty()) {
+    return std::nullopt;
+  }
   return std::string(value);
 }
 
 std::optional<uint64_t> SysfsSizeBytes(std::string_view sysname) {
   const std::optional<std::string> value = SysfsAttr(sysname, "size");
-  if (!value.has_value()) return std::nullopt;
+  if (!value.has_value()) {
+    return std::nullopt;
+  }
   uint64_t sectors = 0;
   const char* begin = value->data();
   const char* end = begin + value->size();
   const auto [stop, error] = std::from_chars(begin, end, sectors);
-  if (error != std::errc() || stop != end) return std::nullopt;
+  if (error != std::errc() || stop != end) {
+    return std::nullopt;
+  }
   if (sectors > std::numeric_limits<uint64_t>::max() / kSysfsSectorBytes) {
     return std::nullopt;
   }
@@ -96,9 +111,13 @@ std::optional<uint64_t> SysfsSizeBytes(std::string_view sysname) {
 
 std::optional<std::string> UdevProperty(udev_device* device, const char* key) {
   const char* value = udev_device_get_property_value(device, key);
-  if (value == nullptr) return std::nullopt;
+  if (value == nullptr) {
+    return std::nullopt;
+  }
   const std::string_view trimmed = Trim(value);
-  if (trimmed.empty()) return std::nullopt;
+  if (trimmed.empty()) {
+    return std::nullopt;
+  }
   return std::string(trimmed);
 }
 
@@ -119,7 +138,9 @@ std::string DiskTransport(udev_device* device, std::string_view sysname) {
     return *bus;
   }
 
-  if (sysname.starts_with("nvme")) return "NVME";
+  if (sysname.starts_with("nvme")) {
+    return "NVME";
+  }
   return {};
 }
 
@@ -143,7 +164,9 @@ StatusOr<std::vector<std::string>> PartitionSysnames(std::string_view disk) {
         return FilesystemError(
             marker_error, fmt::format("inspect {}", entry->path().string()));
       }
-      if (partition) partitions.push_back(name);
+      if (partition) {
+        partitions.push_back(name);
+      }
     }
     entry.increment(error);
     if (error) {
@@ -177,14 +200,20 @@ StatusOr<std::set<std::filesystem::path>> SwapDevices() {
       devices.insert(Canonical(std::filesystem::path(source)));
     }
   }
-  if (file.bad()) return InternalError("failed to parse {}", kSwapsPath);
+  if (file.bad()) {
+    return InternalError("failed to parse {}", kSwapsPath);
+  }
   return devices;
 }
 
 BusyReason HolderReason(std::string_view holder) {
   const std::string uuid = SysfsAttr(holder, "dm/uuid").value_or(std::string());
-  if (uuid.starts_with("CRYPT-")) return BusyReason::kCrypt;
-  if (uuid.starts_with("LVM-")) return BusyReason::kLvm;
+  if (uuid.starts_with("CRYPT-")) {
+    return BusyReason::kCrypt;
+  }
+  if (uuid.starts_with("LVM-")) {
+    return BusyReason::kLvm;
+  }
   if (holder.starts_with("md") || uuid.find("raid") != std::string::npos) {
     return BusyReason::kRaid;
   }
@@ -196,11 +225,15 @@ StatusOr<std::optional<std::string>> FirstHolder(std::string_view sysname) {
   const std::filesystem::path holders =
       std::filesystem::path(kSysBlock) / sysname / "holders";
   const std::filesystem::directory_iterator entry(holders, error);
-  if (error == std::errc::no_such_file_or_directory) return std::nullopt;
+  if (error == std::errc::no_such_file_or_directory) {
+    return std::nullopt;
+  }
   if (error) {
     return FilesystemError(error, fmt::format("list {}", holders.string()));
   }
-  if (entry == std::filesystem::directory_iterator()) return std::nullopt;
+  if (entry == std::filesystem::directory_iterator()) {
+    return std::nullopt;
+  }
   return entry->path().filename().string();
 }
 
@@ -232,7 +265,9 @@ StatusOr<std::string> ProbeValue(const std::filesystem::path& device,
 
 bool OpensSuccessfully(const std::filesystem::path& path) {
   const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-  if (fd < 0) return false;
+  if (fd < 0) {
+    return false;
+  }
   ::close(fd);
   return true;
 }
@@ -282,15 +317,23 @@ StatusOr<std::vector<Device>> ListDisks() {
   udev_list_entry_foreach(entry,
                           udev_enumerate_get_list_entry(enumerate.get())) {
     const char* syspath = udev_list_entry_get_name(entry);
-    if (syspath == nullptr) continue;
+    if (syspath == nullptr) {
+      continue;
+    }
     const UdevDevicePtr device(
         udev_device_new_from_syspath(context.get(), syspath));
-    if (device == nullptr) continue;
+    if (device == nullptr) {
+      continue;
+    }
 
     const char* devtype = udev_device_get_devtype(device.get());
-    if (devtype == nullptr || std::string_view(devtype) != "disk") continue;
+    if (devtype == nullptr || std::string_view(devtype) != "disk") {
+      continue;
+    }
     const char* sysname = udev_device_get_sysname(device.get());
-    if (sysname == nullptr || IsVirtualBlock(sysname)) continue;
+    if (sysname == nullptr || IsVirtualBlock(sysname)) {
+      continue;
+    }
 
     const char* devnode = udev_device_get_devnode(device.get());
     const std::filesystem::path path =
@@ -313,10 +356,9 @@ StatusOr<std::vector<Device>> ListDisks() {
     });
   }
 
-  std::sort(disks.begin(), disks.end(),
-            [](const Device& left, const Device& right) {
-              return left.path < right.path;
-            });
+  std::ranges::sort(disks, [](const Device& left, const Device& right) {
+    return left.path < right.path;
+  });
   return disks;
 }
 
@@ -342,18 +384,26 @@ StatusOr<std::optional<BusyReason>> DiskBusy(const std::filesystem::path& drive,
   for (const std::string& node : nodes) {
     const std::filesystem::path devnode = std::filesystem::path("/dev") / node;
     const std::filesystem::path canonical = Canonical(devnode);
-    if (sources.mounts.contains(canonical)) return BusyReason::kMounted;
-    if (sources.swaps.contains(canonical)) return BusyReason::kSwap;
+    if (sources.mounts.contains(canonical)) {
+      return BusyReason::kMounted;
+    }
+    if (sources.swaps.contains(canonical)) {
+      return BusyReason::kSwap;
+    }
     PUU_ASSIGN_OR_RETURN(const std::optional<std::string> holder,
                          FirstHolder(node));
-    if (holder.has_value()) return HolderReason(*holder);
+    if (holder.has_value()) {
+      return HolderReason(*holder);
+    }
     const int fd = ::open(devnode.c_str(), O_RDONLY | O_EXCL | O_CLOEXEC);
     if (fd >= 0) {
       ::close(fd);
       continue;
     }
     const int error = errno;
-    if (error == EBUSY) return BusyReason::kInUse;
+    if (error == EBUSY) {
+      return BusyReason::kInUse;
+    }
     return ErrnoToStatus(error,
                          fmt::format("open {} exclusively", devnode.string()));
   }

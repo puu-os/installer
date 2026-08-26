@@ -1,11 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
+#include <array>
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "base/status.h"
+#include "engine/context.h"
+#include "engine/le_bytes.h"
 #include "engine/partition.cc"
+#include "engine/partition.h"
 #include "engine/passwd.cc"
+#include "engine/passwd.h"
 #include "engine/secureboot.cc"
 
 namespace puu::engine {
@@ -84,7 +94,7 @@ void CheckAuthenticodeSkippedRanges() {
 }
 
 void CheckSha512Crypt() {
-  assert(kSha512CryptRounds == 5000);
+  static_assert(kSha512CryptRounds == 5000);
 
   const StatusOr<std::string> hashed =
       Sha512Crypt("Hello world!", "saltstring");

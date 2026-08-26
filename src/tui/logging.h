@@ -4,6 +4,7 @@
 #ifndef PUU_TUI_LOGGING_H_
 #define PUU_TUI_LOGGING_H_
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <vector>

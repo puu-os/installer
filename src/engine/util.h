@@ -104,7 +104,7 @@ class UniqueFd {
   UniqueFd(UniqueFd&& other) noexcept;
   UniqueFd& operator=(UniqueFd&& other) noexcept;
 
-  int get() const { return fd_; }
+  [[nodiscard]] int Get() const { return fd_; }
 
  private:
   int fd_ = -1;
@@ -117,15 +117,15 @@ class Mounts {
 
   // True when `path` is itself a mount point. Paths are canonicalised before
   // comparison.
-  bool IsMountPoint(const std::filesystem::path& path) const;
+  [[nodiscard]] bool IsMountPoint(const std::filesystem::path& path) const;
 
   // Mount points below `root`, deepest first, so they can be unmounted in
   // order.
-  std::vector<std::filesystem::path> Below(
+  [[nodiscard]] std::vector<std::filesystem::path> Below(
       const std::filesystem::path& root) const;
 
   // All mount points, in mountinfo order.
-  const std::vector<std::filesystem::path>& mount_points() const {
+  [[nodiscard]] const std::vector<std::filesystem::path>& MountPoints() const {
     return mount_points_;
   }
 

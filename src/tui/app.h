@@ -4,13 +4,14 @@
 #ifndef PUU_TUI_APP_H_
 #define PUU_TUI_APP_H_
 
+#include <cstdint>
 #include <memory>
 
 #include "engine/context.h"
 
 namespace puu::tui {
 
-enum class Trap { kQuit, kReboot, kShell };
+enum class Trap : std::uint8_t { kQuit, kReboot, kShell };
 
 class Installer {
  public:

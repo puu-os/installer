@@ -43,7 +43,7 @@ class DiskWriteProgress : public ProgressSource {
   std::optional<double> Fraction() override;
 
  private:
-  std::optional<uint64_t> AvailableBytes() const;
+  [[nodiscard]] std::optional<uint64_t> AvailableBytes() const;
 
   std::filesystem::path mount_point_;
   uint64_t expected_bytes_ = 0;

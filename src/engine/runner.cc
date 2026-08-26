@@ -3,11 +3,10 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <memory>
+#include <exception>
 #include <span>
-#include <string>
 
-#include <spdlog/spdlog.h>
+#include <absl/status/status.h>
 
 #include "base/status.h"
 #include "engine/context.h"
@@ -28,7 +27,9 @@ Status Runner::Execute(std::span<const Step> steps) {
     }
     if (step.requires_secure_boot &&
         context_.secure_boot == SecureBootMode::kSkip) {
-      if (skip_callback_) skip_callback_(index);
+      if (skip_callback_) {
+        skip_callback_(index);
+      }
       continue;
     }
 
@@ -64,7 +65,9 @@ Status Runner::RunStep(const Step& step, size_t index) {
 }
 
 void Runner::ReportProgress(double fraction) const {
-  if (!progress_callback_) return;
+  if (!progress_callback_) {
+    return;
+  }
   progress_callback_(current_step_, std::clamp(fraction, 0.0, 1.0));
 }
 

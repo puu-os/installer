@@ -4,6 +4,7 @@
 #ifndef PUU_CLI_H_
 #define PUU_CLI_H_
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 
@@ -24,7 +25,7 @@ struct CommandLine {
   std::optional<std::filesystem::path> k3s_token_file;
 };
 
-enum class ParseOutcome {
+enum class ParseOutcome : std::uint8_t {
   kRun,
   kExitSuccess,
   kExitFailure,

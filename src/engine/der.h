@@ -8,6 +8,7 @@
 #ifndef PUU_ENGINE_DER_H_
 #define PUU_ENGINE_DER_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>

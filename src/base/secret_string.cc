@@ -3,6 +3,7 @@
 
 #include "base/secret_string.h"
 
+#include <string_view>
 #include <utility>
 
 #include <openssl/crypto.h>
@@ -13,11 +14,12 @@ SecretString::SecretString(std::string_view text) : value_(text) {}
 
 SecretString::~SecretString() { Wipe(); }
 
-SecretString::SecretString(SecretString&& other) : value_(other.value_) {
+SecretString::SecretString(SecretString&& other) noexcept
+    : value_(std::move(other.value_)) {
   other.Clear();
 }
 
-SecretString& SecretString::operator=(SecretString&& other) {
+SecretString& SecretString::operator=(SecretString&& other) noexcept {
   if (this != &other) {
     Clear();
     value_ = std::move(other.value_);

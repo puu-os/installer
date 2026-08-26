@@ -2,7 +2,6 @@
 // Copyright (C) Opinsys Oy 2026
 
 #include <sys/reboot.h>
-#include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +12,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "base/secret_string.h"
 #include "base/status.h"
 #include "cli.h"
 #include "config.h"
@@ -28,7 +28,9 @@ namespace puu {
 namespace {
 
 StatusOr<std::filesystem::path> ResolveConfigPath(const CommandLine& options) {
-  if (options.config_path.has_value()) return *options.config_path;
+  if (options.config_path.has_value()) {
+    return *options.config_path;
+  }
 
   const char* from_env = std::getenv("PUU_INSTALLER_CONFIG");
   if (from_env != nullptr && *from_env != '\0') {
@@ -45,7 +47,9 @@ StatusOr<engine::Context> BuildContext(const CommandLine& options) {
                        ResolveConfigPath(options));
   PUU_ASSIGN_OR_RETURN(Config config, Config::Load(config_path));
 
-  if (options.k3s_role.has_value()) config.k3s.role = *options.k3s_role;
+  if (options.k3s_role.has_value()) {
+    config.k3s.role = *options.k3s_role;
+  }
 
   std::optional<std::filesystem::path> source_image = options.source_image;
   if (!source_image.has_value()) {
@@ -56,7 +60,7 @@ StatusOr<engine::Context> BuildContext(const CommandLine& options) {
     return FailedPreconditionError(
         "no local bootc source image found; expected "
         "/dev/disk/by-label/{} or --source-image",
-        config.image.source_label.value());
+        config.image.source_label.Value());
   }
 
   SecretString k3s_token;
@@ -66,7 +70,7 @@ StatusOr<engine::Context> BuildContext(const CommandLine& options) {
   }
 
   if (config.k3s.role == K3sRole::kAgent &&
-      (!config.k3s.server_url.has_value() || k3s_token.empty())) {
+      (!config.k3s.server_url.has_value() || k3s_token.Empty())) {
     return InvalidArgumentError(
         "k3s agent role requires k3s.serverUrl and --k3s-token-file");
   }

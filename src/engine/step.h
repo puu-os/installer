@@ -8,6 +8,7 @@
 #include <functional>
 #include <span>
 #include <string_view>
+#include <utility>
 
 #include "base/status.h"
 #include "engine/context.h"
@@ -55,19 +56,19 @@ class Runner {
 
   explicit Runner(Context context) : context_(std::move(context)) {}
 
-  Context& context() { return context_; }
-  const Context& context() const { return context_; }
+  Context& GetContext() { return context_; }
+  [[nodiscard]] const Context& GetContext() const { return context_; }
 
-  void set_progress_callback(ProgressCallback callback) {
+  void SetProgressCallback(ProgressCallback callback) {
     progress_callback_ = std::move(callback);
   }
-  void set_skip_callback(SkipCallback callback) {
+  void SetSkipCallback(SkipCallback callback) {
     skip_callback_ = std::move(callback);
   }
-  void set_cancel_callback(CancelCallback callback) {
+  void SetCancelCallback(CancelCallback callback) {
     cancel_callback_ = std::move(callback);
   }
-  void set_commit_callback(CommitCallback callback) {
+  void SetCommitCallback(CommitCallback callback) {
     commit_callback_ = std::move(callback);
   }
 
@@ -77,7 +78,7 @@ class Runner {
 
   void ReportProgress(double fraction) const;
 
-  bool committed() const { return committed_; }
+  [[nodiscard]] bool Committed() const { return committed_; }
 
  private:
   Status RunStep(const Step& step, size_t index);

@@ -12,22 +12,27 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <ios>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
+#include <absl/status/status.h>
 #include <absl/strings/match.h>
 #include <blkid/blkid.h>
+#include <fmt/format.h>
 #include <nlohmann/json.hpp>
-#include <openssl/evp.h>
 
 #include "base/status.h"
+#include "config.h"
 #include "engine/pipeline.h"
 #include "engine/util.h"
 
@@ -68,9 +73,13 @@ StatusOr<nlohmann::json> ParseJson(std::span<const uint8_t> data,
 }
 
 const nlohmann::json* Member(const nlohmann::json& json, std::string_view key) {
-  if (!json.is_object()) return nullptr;
+  if (!json.is_object()) {
+    return nullptr;
+  }
   const auto found = json.find(key);
-  if (found == json.end()) return nullptr;
+  if (found == json.end()) {
+    return nullptr;
+  }
   return &*found;
 }
 
@@ -112,11 +121,15 @@ StatusOr<uint64_t> ParseDecimal(std::string_view text, std::string_view what) {
 StatusOr<uint64_t> ParseOctalField(std::string_view field,
                                    std::string_view what) {
   const size_t start = field.find_first_not_of(' ');
-  if (start == std::string_view::npos) return uint64_t{0};
+  if (start == std::string_view::npos) {
+    return uint64_t{0};
+  }
   uint64_t value = 0;
   for (size_t index = start; index < field.size(); ++index) {
     const char ch = field[index];
-    if (ch == '\0' || ch == ' ') break;
+    if (ch == '\0' || ch == ' ') {
+      break;
+    }
     if (ch < '0' || ch > '7') {
       return InvalidArgumentError("tar header has a malformed {} field", what);
     }
@@ -132,7 +145,9 @@ StatusOr<uint64_t> ParseOctalField(std::string_view field,
 StatusOr<uint64_t> ParseEntrySize(const TarBlock& block) {
   const std::string_view field(&block[kTarSizeOffset], kTarSizeWidth);
   const auto first = static_cast<uint8_t>(field.front());
-  if ((first & 0x80) == 0) return ParseOctalField(field, "size");
+  if ((first & 0x80) == 0) {
+    return ParseOctalField(field, "size");
+  }
 
   if ((first & 0x7f) != 0) {
     return InvalidArgumentError("tar entry is larger than 2^64 bytes");
@@ -178,7 +193,9 @@ std::string EntryName(const TarBlock& block) {
   std::string path =
       prefix.empty() ? std::string(name) : fmt::format("{}/{}", prefix, name);
 
-  if (path.starts_with("./")) path.erase(0, 2);
+  if (path.starts_with("./")) {
+    path.erase(0, 2);
+  }
   return path;
 }
 
@@ -193,7 +210,9 @@ StatusOr<std::optional<std::vector<uint8_t>>> ReadArchiveEntry(
   while (true) {
     TarBlock block = {};
     file.read(block.data(), static_cast<std::streamsize>(block.size()));
-    if (file.gcount() == 0 && file.eof()) return std::nullopt;
+    if (file.gcount() == 0 && file.eof()) {
+      return std::nullopt;
+    }
     if (file.bad()) {
       const int error = errno;
       return ErrnoToStatus(error, fmt::format("read {}", archive.string()));
@@ -203,8 +222,7 @@ StatusOr<std::optional<std::vector<uint8_t>>> ReadArchiveEntry(
                                   archive.string());
     }
 
-    if (std::all_of(block.begin(), block.end(),
-                    [](char ch) { return ch == '\0'; })) {
+    if (std::ranges::all_of(block, [](char ch) { return ch == '\0'; })) {
       return std::nullopt;
     }
 
@@ -294,7 +312,7 @@ StatusOr<std::string> ManifestBlobPath(
   }
   PUU_ASSIGN_OR_RETURN(const Digest parsed,
                        Digest::Parse(digest->get<std::string>()));
-  return fmt::format("blobs/sha256/{}", parsed.hex());
+  return fmt::format("blobs/sha256/{}", parsed.Hex());
 }
 
 StatusOr<std::optional<std::filesystem::path>> FindByLabel(
@@ -302,7 +320,9 @@ StatusOr<std::optional<std::filesystem::path>> FindByLabel(
   const std::string wanted(label);
 
   char* device = blkid_evaluate_tag("LABEL", wanted.c_str(), nullptr);
-  if (device == nullptr) return std::nullopt;
+  if (device == nullptr) {
+    return std::nullopt;
+  }
   const std::unique_ptr<char, decltype(&free)> owned(device, &free);
   return std::filesystem::path(owned.get());
 }
@@ -345,7 +365,9 @@ StatusOr<uint64_t> LayerTotalBytes(std::span<const uint8_t> raw_manifest,
   uint64_t total = 0;
   for (const nlohmann::json& layer : *layers) {
     const nlohmann::json* size = Member(layer, "size");
-    if (size == nullptr || !size->is_number_unsigned()) continue;
+    if (size == nullptr || !size->is_number_unsigned()) {
+      continue;
+    }
     const auto bytes = size->get<uint64_t>();
     if (total > std::numeric_limits<uint64_t>::max() - bytes) {
       return InvalidArgumentError("image manifest in {} has absurd layer sizes",
@@ -367,7 +389,9 @@ StatusOr<ImageManifest> LoadImageManifest(
   ImageManifest manifest;
   PUU_ASSIGN_OR_RETURN(const std::optional<nlohmann::json> json,
                        ReadSidecar(source_image));
-  if (!json.has_value()) return manifest;
+  if (!json.has_value()) {
+    return manifest;
+  }
 
   const std::filesystem::path sidecar =
       source_image.parent_path() / kManifestFilename;
@@ -382,7 +406,9 @@ StatusOr<ImageManifest> LoadImageManifest(
   if (const nlohmann::json* version = Member(*json, "version");
       version != nullptr && version->is_string()) {
     std::string text = version->get<std::string>();
-    if (!text.empty()) manifest.version = std::move(text);
+    if (!text.empty()) {
+      manifest.version = std::move(text);
+    }
   }
 
   if (const nlohmann::json* size = Member(*json, "installSize");
@@ -405,7 +431,9 @@ StatusOr<ImageManifest> LoadImageManifest(
       imgref != nullptr && imgref->is_string()) {
     std::string_view name = imgref->get_ref<const std::string&>();
 
-    if (name.starts_with("oci:")) name.remove_prefix(4);
+    if (name.starts_with("oci:")) {
+      name.remove_prefix(4);
+    }
     if (!name.empty()) {
       PUU_ASSIGN_OR_RETURN(ImageRef parsed, ImageRef::Parse(fmt::format(
                                                 "oci-archive:{}:{}",
@@ -424,21 +452,25 @@ StatusOr<std::optional<std::filesystem::path>> DefaultSourceImage(
   std::filesystem::path image = mount_point / kImageFilename;
 
   std::error_code error;
-  if (std::filesystem::is_regular_file(image, error)) return image;
+  if (std::filesystem::is_regular_file(image, error)) {
+    return image;
+  }
 
   PUU_ASSIGN_OR_RETURN(const Mounts mounts, Mounts::Read());
   if (mounts.IsMountPoint(mount_point)) {
     PUU_RETURN_IF_ERROR(Unmount(mount_point));
   }
 
-  if (RunningInContainer()) return std::nullopt;
+  if (RunningInContainer()) {
+    return std::nullopt;
+  }
 
   PUU_ASSIGN_OR_RETURN(const std::optional<std::filesystem::path> device,
-                       FindByLabel(config.image.source_label.value()));
+                       FindByLabel(config.image.source_label.Value()));
   if (!device.has_value()) {
     return NotFoundError(
         "no filesystem labelled \"{}\" holds the install image",
-        config.image.source_label.value());
+        config.image.source_label.Value());
   }
   PUU_ASSIGN_OR_RETURN(const std::string filesystem_type,
                        ProbeFilesystemType(*device));
@@ -466,8 +498,12 @@ StatusOr<std::optional<std::filesystem::path>> DefaultSourceImage(
 
 StatusOr<ImageRef> LoadTargetImgRef(const ImageManifest& manifest,
                                     const Config& config) {
-  if (!config.image.target_imgref.empty()) return config.image.target_imgref;
-  if (manifest.target_imgref.has_value()) return *manifest.target_imgref;
+  if (!config.image.target_imgref.Empty()) {
+    return config.image.target_imgref;
+  }
+  if (manifest.target_imgref.has_value()) {
+    return *manifest.target_imgref;
+  }
   return InvalidArgumentError("target image reference is empty");
 }
 
@@ -488,7 +524,9 @@ StatusOr<std::vector<uint8_t>> RawManifest(
     }
     PUU_ASSIGN_OR_RETURN(std::optional<std::vector<uint8_t>> legacy_manifest,
                          ReadArchiveEntry(source_image, "manifest.json"));
-    if (legacy_manifest.has_value()) return *std::move(legacy_manifest);
+    if (legacy_manifest.has_value()) {
+      return *std::move(legacy_manifest);
+    }
     return InvalidArgumentError("{} has neither index.json nor manifest.json",
                                 source_image.string());
   }
@@ -506,7 +544,9 @@ StatusOr<std::vector<uint8_t>> RawManifest(
 
 StatusOr<uint64_t> EstimatedInstallBytes(
     const std::filesystem::path& source_image, const ImageManifest& manifest) {
-  if (manifest.install_size.has_value()) return *manifest.install_size;
+  if (manifest.install_size.has_value()) {
+    return *manifest.install_size;
+  }
 
   PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> raw,
                        RawManifest(source_image, manifest));
@@ -524,11 +564,11 @@ Status VerifyImageDigest(const std::filesystem::path& source_image,
   PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> raw,
                        RawManifest(source_image, manifest));
   PUU_ASSIGN_OR_RETURN(const std::string actual, Sha256Hex(raw));
-  if (!absl::EqualsIgnoreCase(actual, expected.hex())) {
+  if (!absl::EqualsIgnoreCase(actual, expected.Hex())) {
     return FailedPreconditionError(
         "image manifest digest mismatch for {}: expected sha256:{}, got "
         "sha256:{}",
-        source_image.string(), expected.hex(), actual);
+        source_image.string(), expected.Hex(), actual);
   }
   return absl::OkStatus();
 }

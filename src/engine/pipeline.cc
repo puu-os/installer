@@ -3,25 +3,35 @@
 
 #include "engine/pipeline.h"
 
+#include <fcntl.h>
 #include <sched.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/xattr.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cstddef>
+#include <exception>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
 
+#include <absl/status/status.h>
+#include <fmt/format.h>
+#include <spdlog/logger.h>
 #include <spdlog/spdlog.h>
 
+#include "base/status.h"
 #include "config.h"
 #include "engine/util.h"
 
@@ -38,11 +48,15 @@ constexpr std::array<std::string_view, 5> kFixedKernelArgs = {
 
 std::string_view FstabMountPoint(std::string_view line) {
   size_t position = line.find_first_not_of(" \t");
-  if (position == std::string_view::npos || line[position] == '#') return {};
+  if (position == std::string_view::npos || line[position] == '#') {
+    return {};
+  }
   std::string_view field;
   for (int index = 0; index < 2; ++index) {
     position = line.find_first_not_of(" \t", position);
-    if (position == std::string_view::npos) return {};
+    if (position == std::string_view::npos) {
+      return {};
+    }
     const size_t end = line.find_first_of(" \t", position);
     field = line.substr(position, end == std::string_view::npos
                                       ? std::string_view::npos
@@ -76,7 +90,9 @@ Status CopyXattrs(const std::filesystem::path& source,
   if (size < 0) {
     const int error = errno;
 
-    if (error == ENOTSUP) return absl::OkStatus();
+    if (error == ENOTSUP) {
+      return absl::OkStatus();
+    }
     return ErrnoToStatus(error, fmt::format("listxattr {}", source.string()));
   }
   std::string names(static_cast<size_t>(size), '\0');
@@ -93,12 +109,16 @@ Status CopyXattrs(const std::filesystem::path& source,
         names.substr(start, end == std::string::npos ? end : end - start);
     start = end == std::string::npos ? names.size() : end + 1;
 
-    if (!name.starts_with("user.")) continue;
+    if (!name.starts_with("user.")) {
+      continue;
+    }
 
     ssize_t value_size = ::getxattr(source.c_str(), name.c_str(), nullptr, 0);
     if (value_size < 0) {
       const int error = errno;
-      if (error == ENODATA) continue;
+      if (error == ENODATA) {
+        continue;
+      }
       return ErrnoToStatus(
           error, fmt::format("getxattr {} {}", source.string(), name));
     }
@@ -107,7 +127,9 @@ Status CopyXattrs(const std::filesystem::path& source,
         ::getxattr(source.c_str(), name.c_str(), value.data(), value.size());
     if (value_size < 0) {
       const int error = errno;
-      if (error == ENODATA) continue;
+      if (error == ENODATA) {
+        continue;
+      }
       return ErrnoToStatus(
           error, fmt::format("getxattr {} {}", source.string(), name));
     }
@@ -210,7 +232,9 @@ Status CopyRegularFile(const std::filesystem::path& source,
   PUU_RETURN_IF_ERROR(
       SetPermissions(destination, PermissionBits(info.st_mode)));
   PUU_RETURN_IF_ERROR(CopyXattrs(source, destination));
-  if (info.st_nlink > 1) hard_links->emplace(key, destination);
+  if (info.st_nlink > 1) {
+    hard_links->emplace(key, destination);
+  }
   return absl::OkStatus();
 }
 
@@ -225,7 +249,9 @@ Status CopyTreeEntry(const std::filesystem::path& source,
   if (S_ISDIR(info.st_mode)) {
     return CopyDirectory(source, destination, info, hard_links);
   }
-  if (S_ISLNK(info.st_mode)) return CopySymlink(source, destination);
+  if (S_ISLNK(info.st_mode)) {
+    return CopySymlink(source, destination);
+  }
   if (S_ISREG(info.st_mode)) {
     return CopyRegularFile(source, destination, info, hard_links);
   }
@@ -343,7 +369,9 @@ Status MountChrootBinds() {
     const std::filesystem::path target =
         std::filesystem::path(kTargetMount) / relative;
     PUU_RETURN_IF_ERROR(CreateDirectories(target));
-    if (mounts.IsMountPoint(target)) continue;
+    if (mounts.IsMountPoint(target)) {
+      continue;
+    }
     PUU_RETURN_IF_ERROR(BindMount(std::filesystem::path(source), target));
   }
   return absl::OkStatus();
@@ -356,7 +384,9 @@ Status CleanupMounts() {
   for (const std::filesystem::path& point : points) {
     InstallationLogger()->info("unmounting {}", point.string());
     const Status status = Unmount(point);
-    if (!status.ok() && first_error.ok()) first_error = status;
+    if (!status.ok() && first_error.ok()) {
+      first_error = status;
+    }
   }
   return first_error;
 }
@@ -365,7 +395,9 @@ void Rollback() {
   try {
     const StatusOr<std::vector<std::filesystem::path>> points =
         TeardownMountPoints();
-    if (!points.ok()) return;
+    if (!points.ok()) {
+      return;
+    }
     for (const std::filesystem::path& point : *points) {
       InstallationLogger()->info("rollback: unmounting {}", point.string());
 
@@ -406,9 +438,10 @@ std::string MergeFstab(std::string_view existing, std::string_view efi_partuuid,
     std::string_view line = existing.substr(0, newline);
     existing = newline == std::string_view::npos ? std::string_view()
                                                  : existing.substr(newline + 1);
-    if (line.ends_with('\r')) line.remove_suffix(1);
-    if (std::find(kManaged.begin(), kManaged.end(), FstabMountPoint(line)) !=
-        kManaged.end()) {
+    if (line.ends_with('\r')) {
+      line.remove_suffix(1);
+    }
+    if (std::ranges::find(kManaged, FstabMountPoint(line)) != kManaged.end()) {
       continue;
     }
     merged.append(line).push_back('\n');
@@ -439,7 +472,7 @@ StatusOr<std::vector<KernelArg>> InstallKernelArgs(std::string_view root_uuid,
     return args;
   }
 
-  const std::string_view fallback = machine == Arch::kX86_64
+  const std::string_view fallback = machine == Arch::kX8664
                                         ? "console=ttyS0,115200"
                                         : "console=ttyAMA0,115200";
   PUU_ASSIGN_OR_RETURN(KernelArg console, KernelArg::Parse(fallback));
@@ -468,13 +501,19 @@ StatusOr<std::filesystem::path> DeploymentRoot(
     std::error_code skipped;
     std::filesystem::directory_iterator deployments(
         os_entries->path() / "deploy", skipped);
-    if (skipped) continue;
+    if (skipped) {
+      continue;
+    }
     for (; deployments != end && !skipped; deployments.increment(skipped)) {
       const std::filesystem::path path = deployments->path();
       std::error_code kind_error;
-      if (!std::filesystem::is_directory(path, kind_error)) continue;
+      if (!std::filesystem::is_directory(path, kind_error)) {
+        continue;
+      }
 
-      if (path.filename().string().ends_with(".origin")) continue;
+      if (path.filename().string().ends_with(".origin")) {
+        continue;
+      }
       found.push_back(path);
     }
   }
@@ -483,7 +522,7 @@ StatusOr<std::filesystem::path> DeploymentRoot(
         "ostree did not report the installed deployment root under {}",
         deploy.string());
   }
-  std::sort(found.begin(), found.end());
+  std::ranges::sort(found);
   return found.front();
 }
 
@@ -504,9 +543,13 @@ StatusOr<std::vector<std::string>> FlatpakManifestRefs(
   while (std::getline(file, line)) {
     std::string_view value(line);
     const size_t comment = value.find('#');
-    if (comment != std::string_view::npos) value = value.substr(0, comment);
+    if (comment != std::string_view::npos) {
+      value = value.substr(0, comment);
+    }
     const size_t start = value.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) continue;
+    if (start == std::string_view::npos) {
+      continue;
+    }
     const size_t last = value.find_last_not_of(" \t\r\n");
     refs.emplace_back(value.substr(start, last - start + 1));
   }

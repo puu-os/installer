@@ -6,7 +6,6 @@
 
 #include <cstdint>
 #include <filesystem>
-#include <optional>
 
 #include "base/status.h"
 #include "config.h"

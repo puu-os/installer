@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <linux/fs.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -20,6 +21,12 @@
 #include <string_view>
 #include <vector>
 
+#include <absl/status/status.h>
+#include <fmt/format.h>
+
+#include "base/status.h"
+#include "config.h"
+#include "engine/context.h"
 #include "engine/le_bytes.h"
 #include "engine/util.h"
 
@@ -52,7 +59,7 @@ constexpr Guid GuidBytes(uint32_t first, uint16_t second, uint16_t third,
   PutLe<uint32_t>(guid, 0, first);
   PutLe<uint16_t>(guid, 4, second);
   PutLe<uint16_t>(guid, 6, third);
-  std::copy(rest.begin(), rest.end(), guid.begin() + 8);
+  std::ranges::copy(rest, guid.begin() + 8);
   return guid;
 }
 
@@ -79,7 +86,7 @@ constexpr size_t kOffAttributes = 48;
 constexpr size_t kOffName = 56;
 
 uint64_t DivCeil(uint64_t value, uint64_t divisor) {
-  return value / divisor + (value % divisor == 0 ? 0 : 1);
+  return (value / divisor) + (value % divisor == 0 ? 0 : 1);
 }
 
 uint64_t AlignUp(uint64_t value, uint64_t alignment) {
@@ -103,7 +110,7 @@ StatusOr<UniqueFd> OpenDrive(const std::filesystem::path& drive, int flags) {
 StatusOr<uint32_t> SectorSize(const UniqueFd& drive,
                               const std::filesystem::path& path) {
   int sector_size = 0;
-  if (::ioctl(drive.get(), BLKSSZGET, &sector_size) != 0) {
+  if (::ioctl(drive.Get(), BLKSSZGET, &sector_size) != 0) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("BLKSSZGET {}", path.string()));
   }
@@ -117,7 +124,7 @@ StatusOr<uint32_t> SectorSize(const UniqueFd& drive,
 StatusOr<uint64_t> DriveBytes(const UniqueFd& drive,
                               const std::filesystem::path& path) {
   uint64_t bytes = 0;
-  if (::ioctl(drive.get(), BLKGETSIZE64, &bytes) != 0) {
+  if (::ioctl(drive.Get(), BLKGETSIZE64, &bytes) != 0) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("BLKGETSIZE64 {}", path.string()));
   }
@@ -129,11 +136,13 @@ Status WriteAt(const UniqueFd& drive, std::span<const uint8_t> data,
   size_t written = 0;
   while (written < data.size()) {
     const ssize_t count =
-        ::pwrite(drive.get(), data.data() + written, data.size() - written,
+        ::pwrite(drive.Get(), data.data() + written, data.size() - written,
                  static_cast<off_t>(offset + written));
     if (count < 0) {
       const int error = errno;
-      if (error == EINTR) continue;
+      if (error == EINTR) {
+        continue;
+      }
       return ErrnoToStatus(error, "write the partition table");
     }
     if (count == 0) {
@@ -149,11 +158,13 @@ Status ReadAt(const UniqueFd& drive, std::span<uint8_t> buffer,
   size_t read = 0;
   while (read < buffer.size()) {
     const ssize_t count =
-        ::pread(drive.get(), buffer.data() + read, buffer.size() - read,
+        ::pread(drive.Get(), buffer.data() + read, buffer.size() - read,
                 static_cast<off_t>(offset + read));
     if (count < 0) {
       const int error = errno;
-      if (error == EINTR) continue;
+      if (error == EINTR) {
+        continue;
+      }
       return ErrnoToStatus(error, "read the partition table");
     }
     if (count == 0) {
@@ -197,8 +208,8 @@ void WriteEntry(std::span<uint8_t> entries, uint32_t number, const Guid& type,
                 std::string_view name) {
   const std::span<uint8_t> entry =
       entries.subspan(static_cast<size_t>(number - 1) * kEntrySize, kEntrySize);
-  std::copy(type.begin(), type.end(), entry.begin() + kOffTypeGuid);
-  std::copy(unique.begin(), unique.end(), entry.begin() + kOffUniqueGuid);
+  std::ranges::copy(type, entry.begin() + kOffTypeGuid);
+  std::ranges::copy(unique, entry.begin() + kOffUniqueGuid);
   PutLe<uint64_t>(entry, kOffFirstLba, first_lba);
   PutLe<uint64_t>(entry, kOffLastLba, last_lba);
   PutLe<uint64_t>(entry, kOffAttributes, 0);
@@ -210,14 +221,14 @@ std::vector<uint8_t> BuildHeader(uint32_t sector_size, uint64_t my_lba,
                                  uint64_t first_usable, uint64_t last_usable,
                                  const Guid& disk_guid, uint32_t entries_crc) {
   std::vector<uint8_t> block(sector_size, 0);
-  std::copy(kGptSignature.begin(), kGptSignature.end(), block.begin());
+  std::ranges::copy(kGptSignature, block.begin());
   PutLe<uint32_t>(block, 8, kGptRevision);
   PutLe<uint32_t>(block, 12, kHeaderSize);
   PutLe<uint64_t>(block, kOffMyLba, my_lba);
   PutLe<uint64_t>(block, kOffAlternateLba, alternate_lba);
   PutLe<uint64_t>(block, kOffFirstUsable, first_usable);
   PutLe<uint64_t>(block, kOffLastUsable, last_usable);
-  std::copy(disk_guid.begin(), disk_guid.end(), block.begin() + kOffDiskGuid);
+  std::ranges::copy(disk_guid, block.begin() + kOffDiskGuid);
   PutLe<uint64_t>(block, kOffEntriesLba, entries_lba);
   PutLe<uint32_t>(block, kOffEntryCount, kEntryCount);
   PutLe<uint32_t>(block, kOffEntrySize, kEntrySize);
@@ -228,7 +239,7 @@ std::vector<uint8_t> BuildHeader(uint32_t sector_size, uint64_t my_lba,
 }
 
 uint32_t Crc32(std::span<const uint8_t> data) {
-  static const std::array<uint32_t, 256> kTable = [] {
+  static const std::array<uint32_t, 256> k_table = [] {
     std::array<uint32_t, 256> table{};
     for (uint32_t index = 0; index < table.size(); ++index) {
       uint32_t value = index;
@@ -242,16 +253,18 @@ uint32_t Crc32(std::span<const uint8_t> data) {
 
   uint32_t crc = 0xFFFF'FFFF;
   for (const uint8_t byte : data) {
-    crc = kTable[(crc ^ byte) & 0xFF] ^ (crc >> 8);
+    crc = k_table[(crc ^ byte) & 0xFF] ^ (crc >> 8);
   }
   return crc ^ 0xFFFF'FFFF;
 }
 
 void EncodePartitionName(std::string_view name, std::span<uint8_t> field) {
-  std::fill(field.begin(), field.end(), uint8_t{0});
-  if (field.size() < 4) return;
+  std::ranges::fill(field, uint8_t{0});
+  if (field.size() < 4) {
+    return;
+  }
 
-  const size_t limit = field.size() / 2 - 1;
+  const size_t limit = (field.size() / 2) - 1;
   for (size_t i = 0; i < name.size() && i < limit; ++i) {
     const auto character = static_cast<unsigned char>(name[i]);
     field[2 * i] = character < 0x80 ? character : uint8_t{'?'};
@@ -362,8 +375,8 @@ StatusOr<EfiPartitionLayout> PartitionDrive(const std::filesystem::path& drive,
 
   PUU_ASSIGN_OR_RETURN(
       const auto layout,
-      ComputeGptLayout(disk_sectors, sector_size, config.partitions.efi.bytes(),
-                       config.partitions.home.bytes()));
+      ComputeGptLayout(disk_sectors, sector_size, config.partitions.efi.Bytes(),
+                       config.partitions.home.Bytes()));
 
   const Guid linux_type =
       GuidBytes(0x0FC6'3DAF, 0x8483, 0x4772,
@@ -417,11 +430,11 @@ StatusOr<EfiPartitionLayout> PartitionDrive(const std::filesystem::path& drive,
   PUU_RETURN_IF_ERROR(WriteAt(file, primary, kPrimaryHeaderLba * sector_size));
   PUU_RETURN_IF_ERROR(WriteAt(file, backup, backup_header_lba * sector_size));
 
-  if (::fsync(file.get()) != 0) {
+  if (::fsync(file.Get()) != 0) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("fsync {}", drive.string()));
   }
-  if (::ioctl(file.get(), BLKRRPART) != 0) {
+  if (::ioctl(file.Get(), BLKRRPART) != 0) {
     const int error = errno;
     return ErrnoToStatus(
         error, fmt::format("reread the partition table on {}", drive.string()));
@@ -447,21 +460,21 @@ StatusOr<EfiPartitionLayout> LoadPartitionLayout(
     return NotFoundError("no GPT on {}", drive.string());
   }
 
-  const uint32_t header_size = ReadLe<uint32_t>(header, 12);
+  const auto header_size = ReadLe<uint32_t>(header, 12);
   if (header_size < kHeaderSize || header_size > sector_size) {
     return InternalError("GPT on {} has an invalid header size of {}",
                          drive.string(), header_size);
   }
-  const uint32_t stored_crc = ReadLe<uint32_t>(header, kOffCrc);
+  const auto stored_crc = ReadLe<uint32_t>(header, kOffCrc);
   PutLe<uint32_t>(header, kOffCrc, 0);
   if (Crc32(std::span<const uint8_t>(header).first(header_size)) !=
       stored_crc) {
     return InternalError("GPT header on {} fails its checksum", drive.string());
   }
 
-  const uint64_t entries_lba = ReadLe<uint64_t>(header, kOffEntriesLba);
-  const uint32_t entry_count = ReadLe<uint32_t>(header, kOffEntryCount);
-  const uint32_t entry_size = ReadLe<uint32_t>(header, kOffEntrySize);
+  const auto entries_lba = ReadLe<uint64_t>(header, kOffEntriesLba);
+  const auto entry_count = ReadLe<uint32_t>(header, kOffEntryCount);
+  const auto entry_size = ReadLe<uint32_t>(header, kOffEntrySize);
   if (entry_size < kEntrySize || entry_size > 4096 || entry_size % 8 != 0 ||
       entry_count == 0 || entry_count > kEntryCount * 8) {
     return InternalError("GPT on {} has an unusable entry array ({} x {})",
@@ -493,8 +506,8 @@ StatusOr<EfiPartitionLayout> LoadPartitionLayout(
                     entry.begin() + kOffTypeGuid)) {
       continue;
     }
-    const uint64_t start = ReadLe<uint64_t>(entry, kOffFirstLba);
-    const uint64_t end = ReadLe<uint64_t>(entry, kOffLastLba);
+    const auto start = ReadLe<uint64_t>(entry, kOffFirstLba);
+    const auto end = ReadLe<uint64_t>(entry, kOffLastLba);
     if (start == 0 || end < start || end >= disk_sectors) {
       return InternalError("EFI partition on {} has an invalid range",
                            drive.string());

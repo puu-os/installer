@@ -7,7 +7,11 @@
 
 #include <algorithm>
 #include <charconv>
-#include <string>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <optional>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -18,16 +22,22 @@ constexpr std::string_view kProgressMarker = "PUU_PROGRESS";
 
 std::optional<double> ParseMarker(std::string_view line) {
   const size_t marker = line.find(kProgressMarker);
-  if (marker == std::string_view::npos) return std::nullopt;
+  if (marker == std::string_view::npos) {
+    return std::nullopt;
+  }
 
   std::string_view rest = line.substr(marker + kProgressMarker.size());
   const size_t start = rest.find_first_not_of(" \t");
-  if (start == std::string_view::npos) return std::nullopt;
+  if (start == std::string_view::npos) {
+    return std::nullopt;
+  }
   rest.remove_prefix(start);
   rest = rest.substr(0, rest.find_first_of(" \t"));
 
   const size_t slash = rest.find('/');
-  if (slash == std::string_view::npos) return std::nullopt;
+  if (slash == std::string_view::npos) {
+    return std::nullopt;
+  }
 
   const auto number = [](std::string_view text) -> std::optional<double> {
     double value = 0.0;
@@ -41,7 +51,9 @@ std::optional<double> ParseMarker(std::string_view line) {
 
   const std::optional<double> done = number(rest.substr(0, slash));
   const std::optional<double> total = number(rest.substr(slash + 1));
-  if (!done || !total || *total <= 0.0) return std::nullopt;
+  if (!done || !total || *total <= 0.0) {
+    return std::nullopt;
+  }
   return std::clamp(*done / *total, 0.0, ProgressSource::kMaxFraction);
 }
 
@@ -53,17 +65,25 @@ DiskWriteProgress::DiskWriteProgress(std::filesystem::path mount_point,
 
 std::optional<uint64_t> DiskWriteProgress::AvailableBytes() const {
   struct statvfs stat = {};
-  if (::statvfs(mount_point_.c_str(), &stat) != 0) return std::nullopt;
+  if (::statvfs(mount_point_.c_str(), &stat) != 0) {
+    return std::nullopt;
+  }
   return static_cast<uint64_t>(stat.f_bavail) *
          static_cast<uint64_t>(stat.f_frsize);
 }
 
 std::optional<double> DiskWriteProgress::Fraction() {
-  if (expected_bytes_ == 0) return std::nullopt;
+  if (expected_bytes_ == 0) {
+    return std::nullopt;
+  }
   const std::optional<uint64_t> available = AvailableBytes();
-  if (!available) return std::nullopt;
+  if (!available) {
+    return std::nullopt;
+  }
 
-  if (!baseline_available_) baseline_available_ = available;
+  if (!baseline_available_) {
+    baseline_available_ = available;
+  }
 
   const uint64_t written =
       *baseline_available_ > *available ? *baseline_available_ - *available : 0;

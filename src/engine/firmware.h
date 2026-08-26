@@ -10,7 +10,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include "base/status.h"
 #include "config.h"
@@ -29,8 +28,8 @@ class EfiGuid {
   // The image security database namespace, used for "db" and "dbx".
   static EfiGuid ImageSecurityDatabase();
 
-  const std::array<uint8_t, 16>& bytes() const { return bytes_; }
-  std::string ToString() const;
+  [[nodiscard]] const std::array<uint8_t, 16>& Bytes() const { return bytes_; }
+  [[nodiscard]] std::string ToString() const;
 
  private:
   std::array<uint8_t, 16> bytes_{};

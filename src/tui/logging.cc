@@ -5,6 +5,7 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -18,7 +19,10 @@
 #include <vector>
 
 #include <absl/base/no_destructor.h>
+#include <absl/status/status.h>
+#include <spdlog/common.h>
 #include <spdlog/details/log_msg.h>
+#include <spdlog/logger.h>
 #include <spdlog/sinks/base_sink.h>
 #include <spdlog/spdlog.h>
 
@@ -28,7 +32,9 @@
 namespace puu::tui {
 
 std::string TruncateUtf8(std::string_view text, size_t max_bytes) {
-  if (text.size() <= max_bytes) return std::string(text);
+  if (text.size() <= max_bytes) {
+    return std::string(text);
+  }
   size_t end = max_bytes;
   while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0U) == 0x80U) {
     --end;
@@ -55,7 +61,9 @@ class LineBuffer {
   void Push(std::string line) {
     const std::lock_guard<std::mutex> lock(mutex_);
     lines_.push_back(std::move(line));
-    if (lines_.size() > kMaxLines) lines_.pop_front();
+    if (lines_.size() > kMaxLines) {
+      lines_.pop_front();
+    }
   }
 
   std::vector<std::string> Snapshot() {
@@ -73,7 +81,9 @@ class DescriptorSink final : public spdlog::sinks::base_sink<std::mutex> {
   explicit DescriptorSink(int descriptor) : descriptor_(descriptor) {}
 
   ~DescriptorSink() override {
-    if (descriptor_ >= 0) ::close(descriptor_);
+    if (descriptor_ >= 0) {
+      ::close(descriptor_);
+    }
   }
 
   DescriptorSink(const DescriptorSink&) = delete;
@@ -93,7 +103,9 @@ class DescriptorSink final : public spdlog::sinks::base_sink<std::mutex> {
     while (descriptor_ >= 0 && !text.empty()) {
       const ssize_t written = ::write(descriptor_, text.data(), text.size());
       if (written < 0) {
-        if (errno == EINTR) continue;
+        if (errno == EINTR) {
+          continue;
+        }
 
         ::close(descriptor_);
         descriptor_ = -1;
@@ -111,15 +123,23 @@ class ScreenSink final : public spdlog::sinks::base_sink<std::mutex> {
   void sink_it_(const spdlog::details::log_msg& message) override {
     const std::string_view logger(message.logger_name.data(),
                                   message.logger_name.size());
-    if (logger != engine::kInstallationLogTarget) return;
-    if (message.level < spdlog::level::info) return;
+    if (logger != engine::kInstallationLogTarget) {
+      return;
+    }
+    if (message.level < spdlog::level::info) {
+      return;
+    }
     std::string_view payload(message.payload.data(), message.payload.size());
     while (!payload.empty()) {
       const size_t newline = payload.find('\n');
       std::string_view line = payload.substr(0, newline);
-      if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+      if (!line.empty() && line.back() == '\r') {
+        line.remove_suffix(1);
+      }
       LineBuffer::Instance().Push(TruncateUtf8(line, kMaxLineBytes));
-      if (newline == std::string_view::npos) break;
+      if (newline == std::string_view::npos) {
+        break;
+      }
       payload.remove_prefix(newline + 1);
     }
   }

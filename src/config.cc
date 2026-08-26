@@ -12,22 +12,34 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <functional>
+#include <ios>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include <absl/base/no_destructor.h>
+#include <absl/status/status.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_split.h>
 #include <fmt/format.h>
-#include <yaml-cpp/yaml.h>
+#include <yaml-cpp/exceptions.h>
+#include <yaml-cpp/node/convert.h>
+#include <yaml-cpp/node/detail/impl.h>
+#include <yaml-cpp/node/impl.h>
+#include <yaml-cpp/node/iterator.h>
+#include <yaml-cpp/node/node.h>
+#include <yaml-cpp/node/parse.h>
 
 #include "base/status.h"
 
@@ -54,21 +66,31 @@ bool IsAsciiAlphanumeric(char ch) {
 std::optional<char32_t> DecodeUtf8(std::string_view text, size_t& index) {
   const auto lead = static_cast<unsigned char>(text[index]);
 
-  if (lead >= 0xf8) return std::nullopt;
+  if (lead >= 0xf8) {
+    return std::nullopt;
+  }
   const size_t extra =
       lead < 0x80 ? 0 : static_cast<size_t>(std::countl_one(lead)) - 1;
   char32_t code_point = extra == 0 ? lead : lead & (0xff >> (extra + 1));
-  if (index + extra >= text.size()) return std::nullopt;
+  if (index + extra >= text.size()) {
+    return std::nullopt;
+  }
   for (size_t offset = 1; offset <= extra; ++offset) {
     const auto byte = static_cast<unsigned char>(text[index + offset]);
-    if ((byte & 0xc0) != 0x80) return std::nullopt;
+    if ((byte & 0xc0) != 0x80) {
+      return std::nullopt;
+    }
     code_point = static_cast<char32_t>((code_point << 6) |
                                        static_cast<char32_t>(byte & 0x3f));
   }
   index += extra + 1;
   constexpr std::array<char32_t, 4> kShortestForm = {0, 0x80, 0x800, 0x10000};
-  if (code_point < kShortestForm[extra]) return std::nullopt;
-  if (code_point >= 0xd800 && code_point <= 0xdfff) return std::nullopt;
+  if (code_point < kShortestForm[extra]) {
+    return std::nullopt;
+  }
+  if (code_point >= 0xd800 && code_point <= 0xdfff) {
+    return std::nullopt;
+  }
   return code_point;
 }
 
@@ -145,9 +167,11 @@ Status Digest::Validate(std::string_view text) {
   return absl::OkStatus();
 }
 
-std::string_view Digest::hex() const {
+std::string_view Digest::Hex() const {
   const std::string_view text = value_;
-  if (text.size() < kDigestPrefix.size()) return {};
+  if (text.size() < kDigestPrefix.size()) {
+    return {};
+  }
   return text.substr(kDigestPrefix.size());
 }
 
@@ -163,10 +187,12 @@ Status ImageRef::Validate(std::string_view text) {
   constexpr std::array<std::string_view, 3> kTransports = {
       "dir:", "oci-archive:", "oci:"};
   for (const std::string_view transport : kTransports) {
-    if (text.substr(0, transport.size()) != transport) continue;
+    if (text.substr(0, transport.size()) != transport) {
+      continue;
+    }
     if (text.size() == transport.size()) {
       return InvalidArgumentError(
-          "image reference \"{}\" is missing a path after \"{}\"", text,
+          R"(image reference "{}" is missing a path after "{}")", text,
           transport);
     }
     return absl::OkStatus();
@@ -175,7 +201,9 @@ Status ImageRef::Validate(std::string_view text) {
     return InvalidArgumentError("invalid image reference: \"{}\"", text);
   }
   for (const char ch : text) {
-    if (IsAsciiAlphanumeric(ch)) return absl::OkStatus();
+    if (IsAsciiAlphanumeric(ch)) {
+      return absl::OkStatus();
+    }
   }
   return InvalidArgumentError("invalid image reference: \"{}\"", text);
 }
@@ -267,7 +295,9 @@ StatusOr<VolumeLabel> VolumeLabel::Parse(std::string_view text,
 
 StatusOr<PartitionSize> PartitionSize::Parse(std::string_view text) {
   std::string_view rest = text;
-  if (!rest.empty() && rest.front() == '+') rest.remove_prefix(1);
+  if (!rest.empty() && rest.front() == '+') {
+    rest.remove_prefix(1);
+  }
 
   if (rest.size() < 2) {
     return InvalidArgumentError("unsupported partition size: \"{}\"", text);
@@ -293,7 +323,7 @@ StatusOr<PartitionSize> PartitionSize::Parse(std::string_view text) {
       multiplier = uint64_t{1} << 50;
       break;
     default:
-      return InvalidArgumentError("unsupported partition unit \"{}\" in \"{}\"",
+      return InvalidArgumentError(R"(unsupported partition unit "{}" in "{}")",
                                   unit, text);
   }
 
@@ -329,14 +359,18 @@ StatusOr<Arch> HostArch() {
 }
 
 StatusOr<Arch> ParseArch(std::string_view text) {
-  if (text == "x86_64") return Arch::kX86_64;
-  if (text == "aarch64") return Arch::kAarch64;
+  if (text == "x86_64") {
+    return Arch::kX8664;
+  }
+  if (text == "aarch64") {
+    return Arch::kAarch64;
+  }
   return InvalidArgumentError("unsupported architecture: \"{}\"", text);
 }
 
 std::string_view ArchName(Arch arch) {
   switch (arch) {
-    case Arch::kX86_64:
+    case Arch::kX8664:
       return "x86_64";
     case Arch::kAarch64:
       return "aarch64";
@@ -346,7 +380,7 @@ std::string_view ArchName(Arch arch) {
 
 std::string_view ArchEfiSuffix(Arch arch) {
   switch (arch) {
-    case Arch::kX86_64:
+    case Arch::kX8664:
       return "x64";
     case Arch::kAarch64:
       return "aa64";
@@ -355,10 +389,14 @@ std::string_view ArchEfiSuffix(Arch arch) {
 }
 
 StatusOr<K3sRole> ParseK3sRole(std::string_view text) {
-  if (text == "server") return K3sRole::kServer;
-  if (text == "agent") return K3sRole::kAgent;
+  if (text == "server") {
+    return K3sRole::kServer;
+  }
+  if (text == "agent") {
+    return K3sRole::kAgent;
+  }
   return InvalidArgumentError(
-      "k3s role must be \"server\" or \"agent\", got \"{}\"", text);
+      R"(k3s role must be "server" or "agent", got "{}")", text);
 }
 
 std::string_view K3sRoleName(K3sRole role) {
@@ -384,7 +422,9 @@ std::string_view UserShellPath(UserShell shell) {
 namespace {
 
 std::string JoinPath(std::string_view path, std::string_view key) {
-  if (path.empty()) return std::string(key);
+  if (path.empty()) {
+    return std::string(key);
+  }
   return fmt::format("{}.{}", path, key);
 }
 
@@ -409,7 +449,9 @@ template <typename T>
 Status ParseInto(std::string_view path, const YAML::Node& node, T* out) {
   PUU_ASSIGN_OR_RETURN(const std::string text, ScalarText(path, node));
   StatusOr<T> parsed = T::Parse(text);
-  if (!parsed.ok()) return FieldError(path, text, parsed.status());
+  if (!parsed.ok()) {
+    return FieldError(path, text, parsed.status());
+  }
   *out = *std::move(parsed);
   return absl::OkStatus();
 }
@@ -430,7 +472,9 @@ Status ParseInto(std::string_view path, const YAML::Node& node,
 Status ParseInto(std::string_view path, const YAML::Node& node, K3sRole* out) {
   PUU_ASSIGN_OR_RETURN(const std::string text, ScalarText(path, node));
   StatusOr<K3sRole> role = ParseK3sRole(text);
-  if (!role.ok()) return FieldError(path, text, role.status());
+  if (!role.ok()) {
+    return FieldError(path, text, role.status());
+  }
   *out = *role;
   return absl::OkStatus();
 }
@@ -439,7 +483,9 @@ Status ParseLabelInto(std::string_view path, const YAML::Node& node,
                       size_t max_bytes, VolumeLabel* out) {
   PUU_ASSIGN_OR_RETURN(const std::string text, ScalarText(path, node));
   StatusOr<VolumeLabel> label = VolumeLabel::Parse(text, max_bytes);
-  if (!label.ok()) return FieldError(path, text, label.status());
+  if (!label.ok()) {
+    return FieldError(path, text, label.status());
+  }
   *out = *std::move(label);
   return absl::OkStatus();
 }
@@ -458,7 +504,9 @@ Status ParseOptionalInto(std::string_view path, const YAML::Node& node,
     return absl::OkStatus();
   }
   StatusOr<T> parsed = T::Parse(trimmed);
-  if (!parsed.ok()) return FieldError(path, trimmed, parsed.status());
+  if (!parsed.ok()) {
+    return FieldError(path, trimmed, parsed.status());
+  }
   *out = *std::move(parsed);
   return absl::OkStatus();
 }
@@ -466,7 +514,9 @@ Status ParseOptionalInto(std::string_view path, const YAML::Node& node,
 template <typename Handler>
 Status ForEachKey(std::string_view path, const YAML::Node& node,
                   Handler handler) {
-  if (!node.IsDefined() || node.IsNull()) return absl::OkStatus();
+  if (!node.IsDefined() || node.IsNull()) {
+    return absl::OkStatus();
+  }
   if (!node.IsMap()) {
     return InvalidArgumentError("{} must be a mapping",
                                 path.empty() ? "configuration" : path);
@@ -586,67 +636,90 @@ struct SectionEntry {
 
   void ApplyDefaults(Config* out) const {
     for (const FieldEntry<Struct>& field : fields) {
-      if (field.def.empty()) continue;
+      if (field.def.empty()) {
+        continue;
+      }
 
       const Status status = field.handle(
           "defaults", YAML::Load(std::string(field.def)), &(out->*section));
-      if (!status.ok()) std::abort();
+      if (!status.ok()) {
+        std::abort();
+      }
     }
   }
 };
 
 const auto& Sections() {
   static const absl::NoDestructor sections(std::tuple{
-      SectionEntry{"branding", &Config::branding,
-                   std::array{BindField("name", &BrandingConfig::name, "Puu")}},
+      SectionEntry{.key = "branding",
+                   .section = &Config::branding,
+                   .fields = std::array{BindField("name", &BrandingConfig::name,
+                                                  "Puu")}},
       SectionEntry{
-          "partitions", &Config::partitions,
-          std::array{BindField("efi", &PartitionsConfig::efi, "512M"),
-                     BindField("rootMin", &PartitionsConfig::root_min, "64G"),
-                     BindField("home", &PartitionsConfig::home, "256G")}},
-      SectionEntry{"labels", &Config::labels,
-                   std::array{BindField<kXfsLabelMax>(
-                                  "root", &LabelsConfig::root, "puu-root"),
-                              BindField<kExt4LabelMax>(
-                                  "home", &LabelsConfig::home, "puu-home")}},
+          .key = "partitions",
+          .section = &Config::partitions,
+          .fields =
+              std::array{
+                  BindField("efi", &PartitionsConfig::efi, "512M"),
+                  BindField("rootMin", &PartitionsConfig::root_min, "64G"),
+                  BindField("home", &PartitionsConfig::home, "256G")}},
       SectionEntry{
-          "image", &Config::image,
-          std::array{BindField("targetImgRef", &ImageConfig::target_imgref,
-                               "quay.io/puu/puu:latest"),
-                     BindField("expectedDigest", &ImageConfig::expected_digest),
-                     BindField<kExt4LabelMax>(
-                         "sourceLabel", &ImageConfig::source_label, "PAYLOAD"),
-                     BindField("sourceMount", &ImageConfig::source_mount,
-                               "/run/puu-installer/payload")}},
+          .key = "labels",
+          .section = &Config::labels,
+          .fields = std::array{BindField<kXfsLabelMax>(
+                                   "root", &LabelsConfig::root, "puu-root"),
+                               BindField<kExt4LabelMax>(
+                                   "home", &LabelsConfig::home, "puu-home")}},
       SectionEntry{
-          "identity", &Config::identity,
-          std::array{BindField("keymap", &IdentityConfig::keymap, "us"),
-                     BindField("locale", &IdentityConfig::locale, "C.UTF-8"),
-                     BindField("timezone", &IdentityConfig::timezone, "UTC"),
-                     BindField("hostname", &IdentityConfig::hostname, "puu")}},
+          .key = "image",
+          .section = &Config::image,
+          .fields =
+              std::array{
+                  BindField("targetImgRef", &ImageConfig::target_imgref,
+                            "quay.io/puu/puu:latest"),
+                  BindField("expectedDigest", &ImageConfig::expected_digest),
+                  BindField<kExt4LabelMax>(
+                      "sourceLabel", &ImageConfig::source_label, "PAYLOAD"),
+                  BindField("sourceMount", &ImageConfig::source_mount,
+                            "/run/puu-installer/payload")}},
       SectionEntry{
-          "flatpak", &Config::flatpak,
-          std::array{BindField("syncHelper", &FlatpakConfig::sync_helper,
-                               "/usr/libexec/puu-os/flatpak-sync"),
-                     BindField("liveStore", &FlatpakConfig::live_store,
-                               "/var/lib/flatpak")}},
+          .key = "identity",
+          .section = &Config::identity,
+          .fields =
+              std::array{
+                  BindField("keymap", &IdentityConfig::keymap, "us"),
+                  BindField("locale", &IdentityConfig::locale, "C.UTF-8"),
+                  BindField("timezone", &IdentityConfig::timezone, "UTC"),
+                  BindField("hostname", &IdentityConfig::hostname, "puu")}},
       SectionEntry{
-          "models", &Config::models,
-          std::array{BindField("syncHelper", &ModelsConfig::sync_helper,
-                               "/usr/libexec/puu-os/preseed-vllm-models"),
-                     BindField("liveStore", &ModelsConfig::live_store,
-                               "/var/lib/vllm/models")}},
+          .key = "flatpak",
+          .section = &Config::flatpak,
+          .fields =
+              std::array{BindField("syncHelper", &FlatpakConfig::sync_helper,
+                                   "/usr/libexec/puu-os/flatpak-sync"),
+                         BindField("liveStore", &FlatpakConfig::live_store,
+                                   "/var/lib/flatpak")}},
       SectionEntry{
-          "k3s", &Config::k3s,
-          std::array{BindField("helper", &K3sConfig::helper,
-                               "/usr/libexec/puu-os/configure-k3s-cluster"),
-                     BindField("role", &K3sConfig::role, "server"),
-                     BindField("serverUrl", &K3sConfig::server_url),
-                     BindField("nodeName", &K3sConfig::node_name)}},
+          .key = "models",
+          .section = &Config::models,
+          .fields =
+              std::array{BindField("syncHelper", &ModelsConfig::sync_helper,
+                                   "/usr/libexec/puu-os/preseed-vllm-models"),
+                         BindField("liveStore", &ModelsConfig::live_store,
+                                   "/var/lib/vllm/models")}},
       SectionEntry{
-          "homed",
-          &Config::homed,
-          std::array{BindField(
+          .key = "k3s",
+          .section = &Config::k3s,
+          .fields =
+              std::array{BindField("helper", &K3sConfig::helper,
+                                   "/usr/libexec/puu-os/configure-k3s-cluster"),
+                         BindField("role", &K3sConfig::role, "server"),
+                         BindField("serverUrl", &K3sConfig::server_url),
+                         BindField("nodeName", &K3sConfig::node_name)}},
+      SectionEntry{
+          .key = "homed",
+          .section = &Config::homed,
+          .fields = std::array{BindField(
               "groups", &HomedConfig::groups,
               "[adm, audio, cdrom, dip, input, lpadmin, netdev, "
               "plugdev, render, sudo, video, wheel, realtime, uucp]")}}});
@@ -738,13 +811,13 @@ StatusOr<Config> Config::ParseYaml(std::string_view yaml) {
   };
   const std::array floors{
       SizeFloor{.field = "partitions.efi",
-                .configured = config.partitions.efi.bytes(),
+                .configured = config.partitions.efi.Bytes(),
                 .minimum = 64 * kMiB},
       SizeFloor{.field = "partitions.rootMin",
-                .configured = config.partitions.root_min.bytes(),
+                .configured = config.partitions.root_min.Bytes(),
                 .minimum = 2 * kGiB},
       SizeFloor{.field = "partitions.home",
-                .configured = config.partitions.home.bytes(),
+                .configured = config.partitions.home.Bytes(),
                 .minimum = kMiB}};
   for (const SizeFloor& floor : floors) {
     if (floor.configured < floor.minimum) {
@@ -762,8 +835,8 @@ StatusOr<Config> Config::Load(const std::filesystem::path& path) {
   if (!file) {
     return InvalidArgumentError("failed to read config {}", path.string());
   }
-  std::string text{std::istreambuf_iterator<char>(file),
-                   std::istreambuf_iterator<char>()};
+  std::string const text{std::istreambuf_iterator<char>(file),
+                         std::istreambuf_iterator<char>()};
 
   if (file.bad()) {
     return InvalidArgumentError("failed to read config {}", path.string());
@@ -779,8 +852,8 @@ StatusOr<Config> Config::Load(const std::filesystem::path& path) {
 StatusOr<uint64_t> Config::MinTargetSizeBytes() const {
   constexpr uint64_t kMax = std::numeric_limits<uint64_t>::max();
   const std::array<uint64_t, 4> parts = {
-      partitions.efi.bytes(), partitions.root_min.bytes(),
-      partitions.home.bytes(), kLayoutSlackBytes};
+      partitions.efi.Bytes(), partitions.root_min.Bytes(),
+      partitions.home.Bytes(), kLayoutSlackBytes};
   uint64_t total = 0;
   for (const uint64_t part : parts) {
     if (part > kMax - total) {

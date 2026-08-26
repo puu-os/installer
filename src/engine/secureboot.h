@@ -4,7 +4,9 @@
 #ifndef PUU_ENGINE_SECUREBOOT_H_
 #define PUU_ENGINE_SECUREBOOT_H_
 
+#include <cstdint>
 #include <filesystem>
+#include <string_view>
 #include <vector>
 
 #include "base/status.h"
@@ -12,7 +14,7 @@
 
 namespace puu::engine {
 
-enum class KeyKind {
+enum class KeyKind : std::uint8_t {
   // Platform Key: the root of trust. Enrolling it leaves Setup Mode.
   kPlatform,
   // Key Exchange Key: signs updates to the signature databases.
@@ -40,9 +42,9 @@ class KeyStore {
   // platform key.
   Status EnsureKeys();
 
-  StatusOr<KeyPair> Get(KeyKind kind) const;
+  [[nodiscard]] StatusOr<KeyPair> Get(KeyKind kind) const;
 
-  StatusOr<EfiGuid> OwnerGuid() const;
+  [[nodiscard]] StatusOr<EfiGuid> OwnerGuid() const;
 
  private:
   std::filesystem::path root_;

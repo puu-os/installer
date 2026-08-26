@@ -9,11 +9,12 @@
 #include <argtable3.h>
 
 #include "base/status.h"
+#include "config.h"
 
 namespace puu {
 namespace {
 
-constexpr char kProgramName[] = "puu-installer";
+constexpr const char* kProgramName = "puu-installer";
 
 class ArgTable {
  public:
@@ -26,7 +27,7 @@ class ArgTable {
   ArgTable(const ArgTable&) = delete;
   ArgTable& operator=(const ArgTable&) = delete;
 
-  void** data() { return entries_.data(); }
+  void** Data() { return entries_.data(); }
 
  private:
   std::vector<void*> entries_;
@@ -73,16 +74,16 @@ ParseResult ParseCommandLine(int argc, char** argv) {
 
   ParseResult result;
 
-  if (arg_nullcheck(table.data()) != 0) {
+  if (arg_nullcheck(table.Data()) != 0) {
     std::fprintf(stderr, "%s: cannot allocate the argument table\n",
                  kProgramName);
     return result;
   }
 
-  const int errors = arg_parse(argc, argv, table.data());
+  const int errors = arg_parse(argc, argv, table.Data());
 
   if (help->count > 0) {
-    PrintHelp(table.data());
+    PrintHelp(table.Data());
     result.outcome = ParseOutcome::kExitSuccess;
     return result;
   }
@@ -96,7 +97,7 @@ ParseResult ParseCommandLine(int argc, char** argv) {
   if (errors > 0) {
     arg_print_errors(stderr, end, kProgramName);
     std::fprintf(stderr, "Usage: %s", kProgramName);
-    arg_print_syntax(stderr, table.data(), "\n");
+    arg_print_syntax(stderr, table.Data(), "\n");
     std::fprintf(stderr, "Try '%s --help' for more information.\n",
                  kProgramName);
     return result;

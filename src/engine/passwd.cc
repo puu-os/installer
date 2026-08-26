@@ -12,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+#include <fmt/format.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 
@@ -46,12 +47,16 @@ class Sha512 {
   }
 
   void Update(std::span<const uint8_t> data) {
-    if (!ok_ || data.empty()) return;
+    if (!ok_ || data.empty()) {
+      return;
+    }
     ok_ = EVP_DigestUpdate(ctx_.get(), data.data(), data.size()) == 1;
   }
 
   bool Finish(Digest512& out) {
-    if (!ok_) return false;
+    if (!ok_) {
+      return false;
+    }
     unsigned int size = 0;
     ok_ = EVP_DigestFinal_ex(ctx_.get(), out.data(), &size) == 1 &&
           size == out.size();
@@ -133,7 +138,9 @@ StatusOr<std::string> Sha512Crypt(std::string_view password,
   }
   ok = hash.Finish(result) && ok;
 
-  for (size_t index = 0; index < key.size(); ++index) hash.Update(key);
+  for (size_t index = 0; index < key.size(); ++index) {
+    hash.Update(key);
+  }
   ok = hash.Finish(alternate) && ok;
   std::vector<uint8_t> key_sequence = Tile(alternate, key.size());
 
@@ -148,8 +155,12 @@ StatusOr<std::string> Sha512Crypt(std::string_view password,
     const bool odd = (round & 1) != 0;
     hash.Update(odd ? std::span<const uint8_t>(key_sequence)
                     : std::span<const uint8_t>(result));
-    if (round % 3 != 0) hash.Update(salt_sequence);
-    if (round % 7 != 0) hash.Update(key_sequence);
+    if (round % 3 != 0) {
+      hash.Update(salt_sequence);
+    }
+    if (round % 7 != 0) {
+      hash.Update(key_sequence);
+    }
     hash.Update(odd ? std::span<const uint8_t>(result)
                     : std::span<const uint8_t>(key_sequence));
     ok = hash.Finish(result) && ok;
@@ -162,7 +173,9 @@ StatusOr<std::string> Sha512Crypt(std::string_view password,
   OPENSSL_cleanse(key_sequence.data(), key_sequence.size());
   OPENSSL_cleanse(salt_sequence.data(), salt_sequence.size());
 
-  if (!ok) return InternalError("SHA-512 digest failed");
+  if (!ok) {
+    return InternalError("SHA-512 digest failed");
+  }
   return encoded;
 }
 
@@ -174,7 +187,9 @@ StatusOr<std::string> HashPassword(std::string_view password) {
 
   std::string salt;
   salt.reserve(kSaltChars);
-  for (const uint8_t byte : random) salt.push_back(kCryptB64[byte & 0x3f]);
+  for (const uint8_t byte : random) {
+    salt.push_back(kCryptB64[byte & 0x3f]);
+  }
 
   PUU_ASSIGN_OR_RETURN(const std::string encoded, Sha512Crypt(password, salt));
   return fmt::format("$6${}${}", salt, encoded);

@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
@@ -26,6 +27,7 @@
 
 #include <absl/base/no_destructor.h>
 #include <absl/strings/ascii.h>
+#include <fmt/format.h>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/component_options.hpp>
@@ -70,21 +72,21 @@ struct LocaleChoice {
 };
 
 constexpr std::array<LocaleChoice, 10> kLocales{{
-    {"English (US)", "en_US.UTF-8"},
-    {"English (UK)", "en_GB.UTF-8"},
-    {"Finnish", "fi_FI.UTF-8"},
-    {"Swedish", "sv_SE.UTF-8"},
-    {"Norwegian", "nb_NO.UTF-8"},
-    {"Danish", "da_DK.UTF-8"},
-    {"German", "de_DE.UTF-8"},
-    {"French", "fr_FR.UTF-8"},
-    {"Italian", "it_IT.UTF-8"},
-    {"Spanish", "es_ES.UTF-8"},
+    {.label = "English (US)", .name = "en_US.UTF-8"},
+    {.label = "English (UK)", .name = "en_GB.UTF-8"},
+    {.label = "Finnish", .name = "fi_FI.UTF-8"},
+    {.label = "Swedish", .name = "sv_SE.UTF-8"},
+    {.label = "Norwegian", .name = "nb_NO.UTF-8"},
+    {.label = "Danish", .name = "da_DK.UTF-8"},
+    {.label = "German", .name = "de_DE.UTF-8"},
+    {.label = "French", .name = "fr_FR.UTF-8"},
+    {.label = "Italian", .name = "it_IT.UTF-8"},
+    {.label = "Spanish", .name = "es_ES.UTF-8"},
 }};
 
 constexpr std::array<std::string_view, 2> kShells{"Bash", "Zsh"};
 
-enum class Route {
+enum class Route : std::uint8_t {
   kWelcome = 0,
   kTarget,
   kIdentity,
@@ -95,7 +97,7 @@ enum class Route {
   kReboot,
 };
 
-enum class ModalKind {
+enum class ModalKind : std::uint8_t {
   kWipe,
   kRebootConfirm,
   kSetupMode,
@@ -103,9 +105,15 @@ enum class ModalKind {
   kCancel,
 };
 
-enum class StepState { kPending, kActive, kDone, kSkipped, kFailed };
+enum class StepState : std::uint8_t {
+  kPending,
+  kActive,
+  kDone,
+  kSkipped,
+  kFailed
+};
 
-enum class InstallState { kRunning, kSucceeded, kFailed };
+enum class InstallState : std::uint8_t { kRunning, kSucceeded, kFailed };
 
 struct DriveEntry {
   std::filesystem::path path;
@@ -187,14 +195,18 @@ const std::vector<std::string>& LoweredTimezones() {
   static const absl::NoDestructor<std::vector<std::string>> lowered([] {
     std::vector<std::string> values;
     values.reserve(Timezones().size());
-    for (const std::string& zone : Timezones()) values.push_back(ToLower(zone));
+    for (const std::string& zone : Timezones()) {
+      values.push_back(ToLower(zone));
+    }
     return values;
   }());
   return *lowered;
 }
 
 void Truncate(std::string* value, size_t max_bytes) {
-  if (max_bytes == std::string::npos) return;
+  if (max_bytes == std::string::npos) {
+    return;
+  }
   *value = TruncateUtf8(*value, max_bytes);
 }
 
@@ -243,7 +255,9 @@ class Installer::Impl {
   engine::Context TakeContext() { return std::move(context_); }
 
  private:
-  Route CurrentRoute() const { return static_cast<Route>(route_index_); }
+  [[nodiscard]] Route CurrentRoute() const {
+    return static_cast<Route>(route_index_);
+  }
   void Goto(Route route);
 
   Component BuildRoot();
@@ -257,11 +271,11 @@ class Installer::Impl {
   Component BuildReboot();
   Component BuildModal();
 
-  Element RenderChrome(Element body) const;
-  Element RenderInstall() const;
-  Element RenderSteps() const;
-  Element RenderLog() const;
-  std::string Title() const;
+  [[nodiscard]] Element RenderChrome(Element body) const;
+  [[nodiscard]] Element RenderInstall() const;
+  [[nodiscard]] Element RenderSteps() const;
+  [[nodiscard]] Element RenderLog() const;
+  [[nodiscard]] std::string Title() const;
 
   bool OnGlobalEvent(const Event& event);
   void OnWelcomeEnter();
@@ -274,7 +288,7 @@ class Installer::Impl {
   void ResetFlow();
   void RefreshDrives();
   void RefilterZones();
-  bool SetupModeOn() const;
+  [[nodiscard]] bool SetupModeOn() const;
 
   void OpenModal(ModalKind kind);
   void CloseModal(bool confirmed);
@@ -285,7 +299,7 @@ class Installer::Impl {
   void OnProgress(size_t step_index, double fraction);
   void OnStepSkipped(size_t step_index);
   void OnInstallFinished(const Status& status);
-  double OverallProgress() const;
+  [[nodiscard]] double OverallProgress() const;
 
   void SetTrap(Trap trap);
   void Post(std::function<void()> task);
@@ -375,12 +389,12 @@ Trap Installer::Impl::Run() {
     screen_ = &screen;
   }
 
-  hostname_ = context_.config.identity.hostname.value();
-  username_ = context_.username.has_value() ? context_.username->value() : "";
+  hostname_ = context_.config.identity.hostname.Value();
+  username_ = context_.username.has_value() ? context_.username->Value() : "";
   shell_index_ = context_.user_shell == UserShell::kZsh ? 1 : 0;
   RefilterZones();
 
-  Component root = BuildRoot();
+  Component const root = BuildRoot();
   StartTicker();
 
   const auto cleanup = [this] {
@@ -403,14 +417,14 @@ Trap Installer::Impl::Run() {
 }
 
 Component Installer::Impl::BuildRoot() {
-  Component tab = ftxui::Container::Tab(
+  Component const tab = ftxui::Container::Tab(
       Components{BuildWelcome(), BuildTarget(), BuildIdentity(),
                  BuildTimezone(), BuildSecureBoot(), BuildReview(),
                  BuildInstall(), BuildReboot()},
       &route_index_);
-  Component chrome =
+  Component const chrome =
       ftxui::Renderer(tab, [this, tab] { return RenderChrome(tab->Render()); });
-  Component root = chrome | ftxui::Modal(BuildModal(), &modal_open_);
+  Component const root = chrome | ftxui::Modal(BuildModal(), &modal_open_);
   return ftxui::CatchEvent(
       root, [this](const Event& event) { return OnGlobalEvent(event); });
 }
@@ -421,8 +435,12 @@ void Installer::Impl::Goto(Route route) {
 }
 
 bool Installer::Impl::OnGlobalEvent(const Event& event) {
-  if (modal_open_) return event == Event::CtrlC;
-  if (event != Event::CtrlC) return false;
+  if (modal_open_) {
+    return event == Event::CtrlC;
+  }
+  if (event != Event::CtrlC) {
+    return false;
+  }
 
   if (CurrentRoute() == Route::kInstall &&
       install_state_ == InstallState::kRunning) {
@@ -445,9 +463,9 @@ Component Installer::Impl::BuildWelcome() {
       "Install system", "Open recovery shell", "Reboot machine"};
   option.selected = &welcome_index_;
   option.on_enter = [this] { OnWelcomeEnter(); };
-  Component menu = ftxui::Menu(option);
+  Component const menu = ftxui::Menu(option);
 
-  Component body = ftxui::Renderer(menu, [menu] {
+  Component const body = ftxui::Renderer(menu, [menu] {
     return ftxui::vbox({
         ftxui::text("Install a bootc system with guided disk, identity and "
                     "security setup.") |
@@ -457,7 +475,9 @@ Component Installer::Impl::BuildWelcome() {
     });
   });
   return ftxui::CatchEvent(body, [this](const Event& event) {
-    if (event != Event::Escape) return false;
+    if (event != Event::Escape) {
+      return false;
+    }
     SetTrap(Trap::kQuit);
     return true;
   });
@@ -503,9 +523,9 @@ Component Installer::Impl::BuildTarget() {
   option.entries = &drive_rows_;
   option.selected = &drive_index_;
   option.on_enter = [this] { OnDriveEnter(); };
-  Component menu = ftxui::Menu(option);
+  Component const menu = ftxui::Menu(option);
 
-  Component body = ftxui::Renderer(menu, [this, menu] {
+  Component const body = ftxui::Renderer(menu, [this, menu] {
     if (scanning_) {
       return ftxui::text("Scanning for target disks...") | ftxui::bold;
     }
@@ -546,9 +566,13 @@ Component Installer::Impl::BuildTarget() {
 }
 
 void Installer::Impl::RefreshDrives() {
-  if (scanning_) return;
+  if (scanning_) {
+    return;
+  }
 
-  if (drive_thread_.joinable()) drive_thread_.join();
+  if (drive_thread_.joinable()) {
+    drive_thread_.join();
+  }
   scanning_ = true;
   drives_.clear();
   drive_rows_.clear();
@@ -630,14 +654,17 @@ Component Installer::Impl::BuildIdentity() {
     option.multiline = false;
     option.on_change = [value, max_bytes] { Truncate(value, max_bytes); };
     option.on_enter = [this] { OnIdentitySubmit(); };
-    if (secret) option.password = &hide_password_;
+    if (secret) {
+      option.password = &hide_password_;
+    }
     return ftxui::Input(option);
   };
 
-  Component hostname = make_input(&hostname_, kHostnameMaxBytes, false);
-  Component username = make_input(&username_, kPosixNameMaxBytes, false);
-  Component password = make_input(&password_, std::string::npos, true);
-  Component repeated = make_input(&repeated_password_, std::string::npos, true);
+  Component const hostname = make_input(&hostname_, kHostnameMaxBytes, false);
+  Component const username = make_input(&username_, kPosixNameMaxBytes, false);
+  Component const password = make_input(&password_, std::string::npos, true);
+  Component const repeated =
+      make_input(&repeated_password_, std::string::npos, true);
 
   ftxui::CheckboxOption reveal_option = ftxui::CheckboxOption::Simple();
   reveal_option.label = "Show password";
@@ -645,19 +672,20 @@ Component Installer::Impl::BuildIdentity() {
   reveal_option.on_change = [this] { hide_password_ = !reveal_password_; };
 
   reveal_option.transform = [](const ftxui::EntryState& state) {
-    Element label = ftxui::text((state.state ? "[x] " : "[ ] ") + state.label);
+    Element const label =
+        ftxui::text((state.state ? "[x] " : "[ ] ") + state.label);
     return state.active ? label | ftxui::inverted : label;
   };
-  Component reveal = ftxui::Checkbox(reveal_option);
+  Component const reveal = ftxui::Checkbox(reveal_option);
 
-  Component submit = ftxui::Button(
+  Component const submit = ftxui::Button(
       "[ Continue ]", [this] { OnIdentitySubmit(); },
       ftxui::ButtonOption::Ascii());
 
-  Component form = ftxui::Container::Vertical(Components{
+  Component const form = ftxui::Container::Vertical(Components{
       language, hostname, username, password, repeated, reveal, shell, submit});
 
-  Component body =
+  Component const body =
       ftxui::Renderer(form, [this, language, hostname, username, password,
                              repeated, reveal, shell, submit] {
         Elements rows{
@@ -680,7 +708,7 @@ Component Installer::Impl::BuildIdentity() {
         rows.push_back(ftxui::text(""));
         rows.push_back(ftxui::text(fmt::format(
                            "Keyboard layout: {} (from the configuration file)",
-                           context_.config.identity.keymap.value())) |
+                           context_.config.identity.keymap.Value())) |
                        ftxui::dim);
         return ftxui::vbox(std::move(rows));
       });
@@ -690,7 +718,9 @@ Component Installer::Impl::BuildIdentity() {
       OnIdentitySubmit();
       return true;
     }
-    if (event != Event::Escape) return false;
+    if (event != Event::Escape) {
+      return false;
+    }
     Goto(Route::kTarget);
     return true;
   });
@@ -730,7 +760,9 @@ void Installer::Impl::OnIdentitySubmit() {
   context_.config.identity.hostname = *hostname;
   const StatusOr<SingleLine> locale =
       SingleLine::Parse(kLocales[static_cast<size_t>(language_index_)].name);
-  if (locale.ok()) context_.config.identity.locale = *locale;
+  if (locale.ok()) {
+    context_.config.identity.locale = *locale;
+  }
   context_.username = *parsed_username;
   context_.user_password.Assign(password_);
   context_.user_shell = shell_index_ == 1 ? UserShell::kZsh : UserShell::kBash;
@@ -744,16 +776,17 @@ Component Installer::Impl::BuildTimezone() {
   filter_option.multiline = false;
   filter_option.on_change = [this] { RefilterZones(); };
   filter_option.on_enter = [this] { OnTimezoneEnter(); };
-  Component filter = ftxui::Input(filter_option);
+  Component const filter = ftxui::Input(filter_option);
 
   ftxui::MenuOption menu_option = ftxui::MenuOption::Vertical();
   menu_option.entries = &zone_rows_;
   menu_option.selected = &zone_index_;
   menu_option.on_enter = [this] { OnTimezoneEnter(); };
-  Component menu = ftxui::Menu(menu_option);
+  Component const menu = ftxui::Menu(menu_option);
 
-  Component container = ftxui::Container::Vertical(Components{filter, menu});
-  Component body = ftxui::Renderer(container, [this, filter, menu] {
+  Component const container =
+      ftxui::Container::Vertical(Components{filter, menu});
+  Component const body = ftxui::Renderer(container, [this, filter, menu] {
     return ftxui::vbox({
         Field("Filter", filter->Render() | ftxui::underlined),
         ftxui::text(fmt::format("{} zones", zone_rows_.size())) | ftxui::dim,
@@ -763,7 +796,9 @@ Component Installer::Impl::BuildTimezone() {
   });
 
   return ftxui::CatchEvent(body, [this](const Event& event) {
-    if (event != Event::Escape) return false;
+    if (event != Event::Escape) {
+      return false;
+    }
     Goto(Route::kIdentity);
     return true;
   });
@@ -774,7 +809,7 @@ void Installer::Impl::RefilterZones() {
   const std::string selected =
       (zone_index_ >= 0 && static_cast<size_t>(zone_index_) < zone_rows_.size())
           ? zone_rows_[static_cast<size_t>(zone_index_)]
-          : context_.config.identity.timezone.value();
+          : context_.config.identity.timezone.Value();
 
   zone_rows_.clear();
   const auto& zones = Timezones();
@@ -785,7 +820,7 @@ void Installer::Impl::RefilterZones() {
     }
   }
 
-  const auto found = std::find(zone_rows_.begin(), zone_rows_.end(), selected);
+  const auto found = std::ranges::find(zone_rows_, selected);
   zone_index_ = found != zone_rows_.end()
                     ? static_cast<int>(found - zone_rows_.begin())
                     : 0;
@@ -798,7 +833,9 @@ void Installer::Impl::OnTimezoneEnter() {
   }
   const StatusOr<Timezone> zone =
       Timezone::Parse(zone_rows_[static_cast<size_t>(zone_index_)]);
-  if (!zone.ok()) return;
+  if (!zone.ok()) {
+    return;
+  }
   context_.config.identity.timezone = *zone;
 
   firmware_ = engine::DetectSetupMode();
@@ -812,31 +849,32 @@ bool Installer::Impl::SetupModeOn() const {
 
 Component Installer::Impl::BuildSecureBoot() {
   const ftxui::ButtonOption option = ftxui::ButtonOption::Ascii();
-  Component back =
+  Component const back =
       ftxui::Button("[ Back ]", [this] { Goto(Route::kTimezone); }, option);
-  Component enable = ftxui::Button(
+  Component const enable = ftxui::Button(
       "[ Enable Secure Boot ]", [this] { OnEnableSecureBoot(); }, option);
-  Component skip = ftxui::Button(
-                       "[ Continue without Secure Boot ]",
-                       [this] {
-                         context_.secure_boot = engine::SecureBootMode::kSkip;
-                         Goto(Route::kReview);
-                       },
-                       option) |
-                   ftxui::Maybe([this] { return !SetupModeOn(); });
-  Component reboot = ftxui::Button(
-                         "[ Reboot to firmware settings ]",
-                         [this] { SetTrap(Trap::kReboot); }, option) |
-                     ftxui::Maybe([this] { return !SetupModeOn(); });
+  Component const skip = ftxui::Button(
+                             "[ Continue without Secure Boot ]",
+                             [this] {
+                               context_.secure_boot =
+                                   engine::SecureBootMode::kSkip;
+                               Goto(Route::kReview);
+                             },
+                             option) |
+                         ftxui::Maybe([this] { return !SetupModeOn(); });
+  Component const reboot = ftxui::Button(
+                               "[ Reboot to firmware settings ]",
+                               [this] { SetTrap(Trap::kReboot); }, option) |
+                           ftxui::Maybe([this] { return !SetupModeOn(); });
 
-  Component menu =
+  Component const menu =
       ftxui::Container::Vertical(Components{back, enable, skip, reboot});
-  Component body = ftxui::Renderer(menu, [this, menu] {
+  Component const body = ftxui::Renderer(menu, [this, menu] {
     Elements rows;
     if (SetupModeOn()) {
       rows.push_back(
           ftxui::text(fmt::format("{} can enrol its own Secure Boot keys.",
-                                  context_.config.branding.name.value())));
+                                  context_.config.branding.name.Value())));
       rows.push_back(
           ftxui::text("This writes firmware Secure Boot variables.") |
           ftxui::bold | ftxui::color(ftxui::Color::Yellow));
@@ -858,7 +896,9 @@ Component Installer::Impl::BuildSecureBoot() {
   });
 
   return ftxui::CatchEvent(body, [this](const Event& event) {
-    if (event != Event::Escape) return false;
+    if (event != Event::Escape) {
+      return false;
+    }
     Goto(Route::kTimezone);
     return true;
   });
@@ -875,9 +915,9 @@ void Installer::Impl::OnEnableSecureBoot() {
 
 Component Installer::Impl::BuildReview() {
   const ftxui::ButtonOption option = ftxui::ButtonOption::Ascii();
-  Component back =
+  Component const back =
       ftxui::Button("[ Back ]", [this] { Goto(Route::kSecureBoot); }, option);
-  Component start = ftxui::Button(
+  Component const start = ftxui::Button(
       "[ Start installation ]",
       [this] {
         Goto(Route::kInstall);
@@ -885,8 +925,8 @@ Component Installer::Impl::BuildReview() {
       },
       option);
 
-  Component menu = ftxui::Container::Vertical(Components{back, start});
-  Component body = ftxui::Renderer(menu, [this, menu] {
+  Component const menu = ftxui::Container::Vertical(Components{back, start});
+  Component const body = ftxui::Renderer(menu, [this, menu] {
     return ftxui::vbox({
         ftxui::text("Review these settings carefully. Starting the "
                     "installation erases the target disk.") |
@@ -894,9 +934,9 @@ Component Installer::Impl::BuildReview() {
         ftxui::text(""),
         Field("Target disk", ftxui::text(context_.drive_label.value_or("-"))),
         Field("Hostname",
-              ftxui::text(context_.config.identity.hostname.value())),
+              ftxui::text(context_.config.identity.hostname.Value())),
         Field("Time zone",
-              ftxui::text(context_.config.identity.timezone.value())),
+              ftxui::text(context_.config.identity.timezone.Value())),
         Field("Secure Boot", ftxui::text(context_.secure_boot ==
                                                  engine::SecureBootMode::kEnroll
                                              ? "Enabled"
@@ -907,14 +947,16 @@ Component Installer::Impl::BuildReview() {
   });
 
   return ftxui::CatchEvent(body, [this](const Event& event) {
-    if (event != Event::Escape) return false;
+    if (event != Event::Escape) {
+      return false;
+    }
     Goto(Route::kSecureBoot);
     return true;
   });
 }
 
 Component Installer::Impl::BuildInstall() {
-  Component body = ftxui::Renderer([this] { return RenderInstall(); });
+  Component const body = ftxui::Renderer([this] { return RenderInstall(); });
   return ftxui::CatchEvent(body, [this](const Event& event) {
     const int page = LogPageLines();
     if (event == Event::PageUp) {
@@ -958,7 +1000,9 @@ Element Installer::Impl::RenderSteps() const {
     Element row = ftxui::text(fmt::format("{} {:02} {}", StepMarker(state),
                                           index + 1, step.title)) |
                   ftxui::color(StepColor(state));
-    if (index == current_step_) row = row | ftxui::focus;
+    if (index == current_step_) {
+      row = row | ftxui::focus;
+    }
     rows.push_back(std::move(row));
     ++index;
   }
@@ -982,7 +1026,9 @@ Element Installer::Impl::RenderLog() const {
   for (size_t index = start; index < end; ++index) {
     Element line = ftxui::text(lines[index]) | ftxui::dim;
 
-    if (index == anchor) line = line | ftxui::focus;
+    if (index == anchor) {
+      line = line | ftxui::focus;
+    }
     rows.push_back(std::move(line));
   }
   return ftxui::vbox(std::move(rows)) | ftxui::vscroll_indicator | ftxui::frame;
@@ -1047,14 +1093,14 @@ Element Installer::Impl::RenderInstall() const {
 
 Component Installer::Impl::BuildReboot() {
   const ftxui::ButtonOption option = ftxui::ButtonOption::Ascii();
-  Component shell = ftxui::Button(
+  Component const shell = ftxui::Button(
       "[ Open shell ]", [this] { SetTrap(Trap::kShell); }, option);
-  Component now = ftxui::Button(
+  Component const now = ftxui::Button(
       "[ Reboot now ]", [this] { SetTrap(Trap::kReboot); }, option);
 
-  Component menu =
+  Component const menu =
       ftxui::Container::Vertical(Components{shell, now}, &reboot_index_);
-  Component body = ftxui::Renderer(menu, [this, menu] {
+  Component const body = ftxui::Renderer(menu, [this, menu] {
     return ftxui::vbox({
         Field("Target", ftxui::text(context_.drive_label.value_or("-"))),
         ftxui::text(""),
@@ -1080,14 +1126,14 @@ Component Installer::Impl::BuildReboot() {
 
 Component Installer::Impl::BuildModal() {
   const ftxui::ButtonOption option = ftxui::ButtonOption::Ascii();
-  Component dismiss = ftxui::Button(
+  Component const dismiss = ftxui::Button(
       &modal_dismiss_label_, [this] { CloseModal(false); }, option);
-  Component confirm = ftxui::Button(
+  Component const confirm = ftxui::Button(
       &modal_confirm_label_, [this] { CloseModal(true); }, option);
-  Component buttons =
+  Component const buttons =
       ftxui::Container::Horizontal(Components{dismiss, confirm});
 
-  Component body = ftxui::Renderer(buttons, [this, buttons] {
+  Component const body = ftxui::Renderer(buttons, [this, buttons] {
     return ftxui::vbox({
                ftxui::text(modal_title_) | ftxui::bold,
                ftxui::separator(),
@@ -1101,7 +1147,9 @@ Component Installer::Impl::BuildModal() {
   });
 
   return ftxui::CatchEvent(body, [this](const Event& event) {
-    if (event != Event::Escape) return false;
+    if (event != Event::Escape) {
+      return false;
+    }
     CloseModal(false);
     return true;
   });
@@ -1160,14 +1208,20 @@ void Installer::Impl::CloseModal(bool confirmed) {
   modal_open_ = false;
   switch (modal_kind_) {
     case ModalKind::kWipe:
-      if (confirmed) Goto(Route::kIdentity);
+      if (confirmed) {
+        Goto(Route::kIdentity);
+      }
       break;
     case ModalKind::kRebootConfirm:
     case ModalKind::kSetupMode:
-      if (confirmed) SetTrap(Trap::kReboot);
+      if (confirmed) {
+        SetTrap(Trap::kReboot);
+      }
       break;
     case ModalKind::kFailure:
-      if (confirmed) Goto(Route::kWelcome);
+      if (confirmed) {
+        Goto(Route::kWelcome);
+      }
       break;
     case ModalKind::kCancel:
 
@@ -1186,7 +1240,7 @@ void Installer::Impl::CloseModal(bool confirmed) {
 }
 
 void Installer::Impl::StartInstall() {
-  if (context_.k3s_token.empty() && context_.k3s_token_file.has_value()) {
+  if (context_.k3s_token.Empty() && context_.k3s_token_file.has_value()) {
     StatusOr<SecretString> token =
         engine::ReadFirstSecretLine(*context_.k3s_token_file);
     if (!token.ok()) {
@@ -1236,18 +1290,20 @@ void Installer::Impl::RunInstall(engine::Context context) {
   Status status;
   try {
     engine::Runner runner(std::move(context));
-    runner.set_cancel_callback([this] { return install_cancel_.load(); });
-    runner.set_progress_callback([this](size_t index, double fraction) {
+    runner.SetCancelCallback([this] { return install_cancel_.load(); });
+    runner.SetProgressCallback([this](size_t index, double fraction) {
       Post([this, index, fraction] { OnProgress(index, fraction); });
     });
-    runner.set_skip_callback([this](size_t index) {
+    runner.SetSkipCallback([this](size_t index) {
       Post([this, index] { OnStepSkipped(index); });
     });
-    runner.set_commit_callback(
+    runner.SetCommitCallback(
         [this](size_t index) { return AwaitCommit(index); });
 
     auto logger = spdlog::get(std::string(engine::kInstallationLogTarget));
-    if (logger != nullptr) logger->info("installation worker started");
+    if (logger != nullptr) {
+      logger->info("installation worker started");
+    }
 
     status = runner.Execute(engine::Steps());
     if (logger != nullptr) {
@@ -1287,7 +1343,9 @@ bool Installer::Impl::AwaitCommit(size_t step_index) {
 }
 
 void Installer::Impl::OnProgress(size_t step_index, double fraction) {
-  if (step_index >= step_states_.size()) return;
+  if (step_index >= step_states_.size()) {
+    return;
+  }
   current_step_ = step_index;
 
   for (size_t index = 0; index < step_index; ++index) {
@@ -1303,7 +1361,9 @@ void Installer::Impl::OnProgress(size_t step_index, double fraction) {
 }
 
 void Installer::Impl::OnStepSkipped(size_t step_index) {
-  if (step_index >= step_states_.size()) return;
+  if (step_index >= step_states_.size()) {
+    return;
+  }
   step_states_[step_index] = StepState::kSkipped;
   step_fractions_[step_index] = 1.0;
 }
@@ -1346,7 +1406,9 @@ void Installer::Impl::OnInstallFinished(const Status& status) {
 }
 
 double Installer::Impl::OverallProgress() const {
-  if (install_state_ == InstallState::kSucceeded) return 1.0;
+  if (install_state_ == InstallState::kSucceeded) {
+    return 1.0;
+  }
   double total = 0.0;
   double progressed = 0.0;
   size_t index = 0;
@@ -1393,7 +1455,7 @@ Element Installer::Impl::RenderChrome(Element body) const {
 }
 
 std::string Installer::Impl::Title() const {
-  const std::string& brand = context_.config.branding.name.value();
+  const std::string& brand = context_.config.branding.name.Value();
   switch (CurrentRoute()) {
     case Route::kWelcome:
       return context_.image_version.has_value()
@@ -1453,7 +1515,9 @@ void Installer::Impl::SetTrap(Trap trap) {
 
 void Installer::Impl::Post(std::function<void()> task) {
   const std::lock_guard<std::mutex> lock(screen_mutex_);
-  if (screen_ != nullptr) screen_->Post(std::move(task));
+  if (screen_ != nullptr) {
+    screen_->Post(std::move(task));
+  }
 }
 
 void Installer::Impl::StartTicker() {
@@ -1461,9 +1525,13 @@ void Installer::Impl::StartTicker() {
   ticker_thread_ = std::thread([this] {
     while (!ticker_stop_.load()) {
       std::this_thread::sleep_for(kTickInterval);
-      if (ticker_stop_.load()) break;
+      if (ticker_stop_.load()) {
+        break;
+      }
 
-      if (!ticking_.load()) continue;
+      if (!ticking_.load()) {
+        continue;
+      }
       Post([this] { OnTick(); });
     }
   });
@@ -1490,7 +1558,9 @@ void Installer::Impl::StopWorkers() {
     }
     install_thread_.join();
   }
-  if (drive_thread_.joinable()) drive_thread_.join();
+  if (drive_thread_.joinable()) {
+    drive_thread_.join();
+  }
 }
 
 Installer::Installer(engine::Context context)

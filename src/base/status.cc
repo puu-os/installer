@@ -3,7 +3,11 @@
 
 #include "base/status.h"
 
+#include <string_view>
+
 #include <absl/status/status.h>
+#include <absl/strings/cord.h>
+#include <fmt/format.h>
 
 namespace puu {
 
@@ -12,7 +16,9 @@ Status ErrnoToStatus(int error_number, std::string_view operation) {
 }
 
 Status WithContext(const Status& status, std::string_view context) {
-  if (status.ok()) return status;
+  if (status.ok()) {
+    return status;
+  }
   Status result(status.code(),
                 fmt::format("{}: {}", context, status.message()));
   status.ForEachPayload(

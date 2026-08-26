@@ -4,8 +4,10 @@
 #include "engine/der.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -44,12 +46,12 @@ StatusOr<uint64_t> ParseArc(std::string_view text, std::string_view dotted) {
   uint64_t value = 0;
   for (const char ch : text) {
     if (ch < '0' || ch > '9') {
-      return InvalidArgumentError("OID \"{}\" has a non-numeric arc \"{}\"",
+      return InvalidArgumentError(R"(OID "{}" has a non-numeric arc "{}")",
                                   dotted, text);
     }
     value = value * 10 + static_cast<uint64_t>(ch - '0');
     if (value > kMaxArc) {
-      return InvalidArgumentError("OID \"{}\" has an out-of-range arc \"{}\"",
+      return InvalidArgumentError(R"(OID "{}" has an out-of-range arc "{}")",
                                   dotted, text);
     }
   }
@@ -64,7 +66,9 @@ StatusOr<std::vector<uint64_t>> ParseArcs(std::string_view dotted) {
     PUU_ASSIGN_OR_RETURN(const uint64_t arc,
                          ParseArc(rest.substr(0, dot), dotted));
     arcs.push_back(arc);
-    if (dot == std::string_view::npos) break;
+    if (dot == std::string_view::npos) {
+      break;
+    }
     rest.remove_prefix(dot + 1);
   }
   if (arcs.size() < 2) {
@@ -84,7 +88,9 @@ StatusOr<std::vector<uint64_t>> ParseArcs(std::string_view dotted) {
 }  // namespace
 
 std::vector<uint8_t> Length(size_t length) {
-  if (length < kHighBit) return {static_cast<uint8_t>(length)};
+  if (length < kHighBit) {
+    return {static_cast<uint8_t>(length)};
+  }
 
   std::array<uint8_t, sizeof(size_t)> bytes = {};
   size_t count = 0;
@@ -200,7 +206,9 @@ StatusOr<Parsed> ReadAt(std::span<const uint8_t> data, size_t offset) {
 
 std::optional<Parsed> TryReadAt(std::span<const uint8_t> data, size_t offset) {
   StatusOr<Parsed> parsed = ReadAt(data, offset);
-  if (!parsed.ok()) return std::nullopt;
+  if (!parsed.ok()) {
+    return std::nullopt;
+  }
   return *parsed;
 }
 
@@ -220,10 +228,14 @@ std::optional<EmbeddedSignature> ParseAuthenticode(
   }
   const std::optional<Parsed> content_type =
       TryReadAt(content_info->contents, 0);
-  if (!content_type.has_value()) return std::nullopt;
+  if (!content_type.has_value()) {
+    return std::nullopt;
+  }
   const std::optional<Parsed> content =
       TryReadAt(content_info->contents, content_type->next);
-  if (!content.has_value() || content->tag != 0xa0) return std::nullopt;
+  if (!content.has_value() || content->tag != 0xa0) {
+    return std::nullopt;
+  }
   const std::optional<Parsed> signed_data = TryReadAt(content->contents, 0);
   if (!signed_data.has_value() || signed_data->tag != 0x30) {
     return std::nullopt;
@@ -231,46 +243,72 @@ std::optional<EmbeddedSignature> ParseAuthenticode(
   const std::span<const uint8_t> body = signed_data->contents;
 
   const std::optional<Parsed> version = TryReadAt(body, 0);
-  if (!version.has_value()) return std::nullopt;
+  if (!version.has_value()) {
+    return std::nullopt;
+  }
   const std::optional<Parsed> digest_algorithms =
       TryReadAt(body, version->next);
-  if (!digest_algorithms.has_value()) return std::nullopt;
+  if (!digest_algorithms.has_value()) {
+    return std::nullopt;
+  }
   const std::optional<Parsed> encap = TryReadAt(body, digest_algorithms->next);
-  if (!encap.has_value()) return std::nullopt;
+  if (!encap.has_value()) {
+    return std::nullopt;
+  }
 
   const std::optional<Parsed> econtent_type = TryReadAt(encap->contents, 0);
-  if (!econtent_type.has_value()) return std::nullopt;
+  if (!econtent_type.has_value()) {
+    return std::nullopt;
+  }
   const std::optional<Parsed> econtent =
       TryReadAt(encap->contents, econtent_type->next);
-  if (!econtent.has_value() || econtent->tag != 0xa0) return std::nullopt;
+  if (!econtent.has_value() || econtent->tag != 0xa0) {
+    return std::nullopt;
+  }
 
   const std::optional<Parsed> spc = TryReadAt(econtent->contents, 0);
-  if (!spc.has_value()) return std::nullopt;
+  if (!spc.has_value()) {
+    return std::nullopt;
+  }
   const std::optional<Parsed> spc_data = TryReadAt(spc->contents, 0);
-  if (!spc_data.has_value()) return std::nullopt;
+  if (!spc_data.has_value()) {
+    return std::nullopt;
+  }
   const std::optional<Parsed> digest_info =
       TryReadAt(spc->contents, spc_data->next);
-  if (!digest_info.has_value()) return std::nullopt;
+  if (!digest_info.has_value()) {
+    return std::nullopt;
+  }
   const std::optional<Parsed> algorithm = TryReadAt(digest_info->contents, 0);
-  if (!algorithm.has_value()) return std::nullopt;
+  if (!algorithm.has_value()) {
+    return std::nullopt;
+  }
   const std::optional<Parsed> digest =
       TryReadAt(digest_info->contents, algorithm->next);
-  if (!digest.has_value() || digest->tag != 0x04) return std::nullopt;
+  if (!digest.has_value() || digest->tag != 0x04) {
+    return std::nullopt;
+  }
 
   EmbeddedSignature out;
   out.digest = Bytes(digest->contents);
   size_t position = encap->next;
   while (position < body.size()) {
     const std::optional<Parsed> element = TryReadAt(body, position);
-    if (!element.has_value()) return std::nullopt;
+    if (!element.has_value()) {
+      return std::nullopt;
+    }
     position = element->next;
-    if (element->tag != 0xa0) continue;
+    if (element->tag != 0xa0) {
+      continue;
+    }
 
     size_t inner = 0;
     while (inner < element->contents.size()) {
       const std::optional<Parsed> certificate =
           TryReadAt(element->contents, inner);
-      if (!certificate.has_value()) return std::nullopt;
+      if (!certificate.has_value()) {
+        return std::nullopt;
+      }
       out.certificates.push_back(Bytes(certificate->total));
       inner = certificate->next;
     }

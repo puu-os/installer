@@ -43,8 +43,8 @@ class ValidatedString {
     return value;
   }
 
-  const std::string& value() const { return value_; }
-  bool empty() const { return value_.empty(); }
+  [[nodiscard]] const std::string& Value() const { return value_; }
+  [[nodiscard]] bool Empty() const { return value_.empty(); }
   friend bool operator==(const Derived& lhs, const Derived& rhs) {
     return lhs.value() == rhs.value();
   }
@@ -82,7 +82,7 @@ class Digest : public ValidatedString<Digest> {
   static Status Validate(std::string_view text);
 
   // The 64-character hex body, without the "sha256:" prefix.
-  std::string_view hex() const;
+  [[nodiscard]] std::string_view Hex() const;
 };
 
 // A container image reference, optionally prefixed with a transport
@@ -139,7 +139,7 @@ class VolumeLabel {
 
   static StatusOr<VolumeLabel> Parse(std::string_view text, size_t max_bytes);
 
-  const std::string& value() const { return value_; }
+  [[nodiscard]] const std::string& Value() const { return value_; }
 
  private:
   std::string value_;
@@ -154,7 +154,7 @@ class PartitionSize {
 
   static StatusOr<PartitionSize> Parse(std::string_view text);
 
-  uint64_t bytes() const { return bytes_; }
+  [[nodiscard]] uint64_t Bytes() const { return bytes_; }
 
  private:
   uint64_t bytes_ = 0;
@@ -162,7 +162,7 @@ class PartitionSize {
 
 // Target CPU architecture. Only the architectures the installer can produce a
 // bootable ESP for are represented.
-enum class Arch { kX86_64, kAarch64 };
+enum class Arch : std::uint8_t { kX8664, kAarch64 };
 
 StatusOr<Arch> HostArch();
 StatusOr<Arch> ParseArch(std::string_view text);
@@ -170,13 +170,13 @@ std::string_view ArchName(Arch arch);
 // "x64" or "aa64": the EFI removable-media boot file suffix.
 std::string_view ArchEfiSuffix(Arch arch);
 
-enum class K3sRole { kServer, kAgent };
+enum class K3sRole : std::uint8_t { kServer, kAgent };
 
 StatusOr<K3sRole> ParseK3sRole(std::string_view text);
 std::string_view K3sRoleName(K3sRole role);
 
 // Login shell offered by the installer UI. Not configurable via YAML.
-enum class UserShell { kBash, kZsh };
+enum class UserShell : std::uint8_t { kBash, kZsh };
 
 std::string_view UserShellPath(UserShell shell);
 
@@ -243,7 +243,7 @@ struct Config {
 
   // Smallest target drive the layout fits on: efi + rootMin + home + 1 GiB of
   // GPT and alignment slack.
-  StatusOr<uint64_t> MinTargetSizeBytes() const;
+  [[nodiscard]] StatusOr<uint64_t> MinTargetSizeBytes() const;
 
   BrandingConfig branding;
   PartitionsConfig partitions;

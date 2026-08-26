@@ -18,11 +18,11 @@ namespace puu::engine {
 
 // Whether the installer should enrol its own Secure Boot keys. Chosen by the
 // user on the Secure Boot screen.
-enum class SecureBootMode { kEnroll, kSkip };
+enum class SecureBootMode : std::uint8_t { kEnroll, kSkip };
 
 // Firmware Secure Boot setup state, as read from efivarfs.
 struct SetupMode {
-  enum class State {
+  enum class State : std::uint8_t {
     // Firmware is in Setup Mode; key enrolment is possible.
     kOn,
     // Firmware has already-enrolled keys; enrolment would fail.
@@ -76,7 +76,7 @@ struct Context {
   Context(Context&&) = default;
   Context& operator=(Context&&) = default;
 
-  Context Clone() const {
+  [[nodiscard]] Context Clone() const {
     Context copy;
     copy.config = config;
     copy.source_image = source_image;

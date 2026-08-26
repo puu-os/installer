@@ -5,26 +5,43 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <functional>
+#include <ios>
 #include <iterator>
 #include <limits>
+#include <optional>
+#include <set>
+#include <span>
+#include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
+#include <absl/status/status.h>
+#include <fmt/base.h>
+#include <fmt/format.h>
 #include <openssl/crypto.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
+#include "base/secret_string.h"
 #include "base/status.h"
 
 namespace puu::engine {
@@ -36,9 +53,11 @@ constexpr size_t kMountPointField = 4;
 
 bool IsExecutable(const std::filesystem::path& path) {
   struct stat info = {};
-  if (::stat(path.c_str(), &info) != 0) return false;
+  if (::stat(path.c_str(), &info) != 0) {
+    return false;
+  }
   return S_ISREG(info.st_mode) &&
-         (info.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH));
+         ((info.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0U);
 }
 
 std::string UnescapeMountInfo(std::string_view field) {
@@ -90,7 +109,9 @@ std::vector<MountInfoEntry> ParseMountInfoEntries(std::string_view text) {
       rest =
           end == std::string_view::npos ? std::string_view() : rest.substr(end);
     }
-    if (mount_point.empty()) continue;
+    if (mount_point.empty()) {
+      continue;
+    }
 
     std::string_view source;
     const size_t separator = line.rfind(" - ");
@@ -131,7 +152,8 @@ bool IsDirectory(const std::filesystem::path& path) {
 
 std::filesystem::path Canonical(const std::filesystem::path& path) {
   std::error_code error;
-  std::filesystem::path resolved = std::filesystem::canonical(path, error);
+  std::filesystem::path const resolved =
+      std::filesystem::canonical(path, error);
   return error ? path : resolved;
 }
 
@@ -140,27 +162,29 @@ Status WriteBytes(const std::filesystem::path& path,
   const UniqueFd fd(
       ::open(path.c_str(),
              O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | extra_flags, mode));
-  if (fd.get() < 0) {
+  if (fd.Get() < 0) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("open {}", path.string()));
   }
 
-  if (::fchmod(fd.get(), mode) != 0) {
+  if (::fchmod(fd.Get(), mode) != 0) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("chmod {}", path.string()));
   }
   size_t done = 0;
   while (done < data.size()) {
     const ssize_t written =
-        ::write(fd.get(), data.data() + done, data.size() - done);
-    if (written < 0 && errno == EINTR) continue;
+        ::write(fd.Get(), data.data() + done, data.size() - done);
+    if (written < 0 && errno == EINTR) {
+      continue;
+    }
     if (written <= 0) {
       const int error = errno;
       return ErrnoToStatus(error, fmt::format("write {}", path.string()));
     }
     done += static_cast<size_t>(written);
   }
-  if (::fsync(fd.get()) != 0) {
+  if (::fsync(fd.Get()) != 0) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("fsync {}", path.string()));
   }
@@ -173,22 +197,24 @@ Status ReplaceFileBytes(const std::filesystem::path& path,
       path.parent_path() / ("." + path.filename().string() + ".tmp");
   UniqueFd fd(::open(temporary.c_str(),
                      O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644));
-  if (fd.get() < 0) {
+  if (fd.Get() < 0) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("open {}", temporary.string()));
   }
   size_t done = 0;
   while (done < data.size()) {
     const ssize_t written =
-        ::write(fd.get(), data.data() + done, data.size() - done);
-    if (written < 0 && errno == EINTR) continue;
+        ::write(fd.Get(), data.data() + done, data.size() - done);
+    if (written < 0 && errno == EINTR) {
+      continue;
+    }
     if (written <= 0) {
       const int error = errno;
       return ErrnoToStatus(error, fmt::format("write {}", temporary.string()));
     }
     done += static_cast<size_t>(written);
   }
-  if (::fsync(fd.get()) != 0) {
+  if (::fsync(fd.Get()) != 0) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("fsync {}", temporary.string()));
   }
@@ -203,16 +229,22 @@ Status ReplaceFileBytes(const std::filesystem::path& path,
   return absl::OkStatus();
 }
 
+namespace {
+
 StatusOr<std::string> ReadMountInfo() {
   std::ifstream file{std::string(kMountInfoPath)};
   if (!file.is_open()) {
     return InternalError("failed to open {}", kMountInfoPath);
   }
-  const std::string text{std::istreambuf_iterator<char>(file),
-                         std::istreambuf_iterator<char>()};
-  if (file.bad()) return InternalError("failed to read {}", kMountInfoPath);
+  std::string text{std::istreambuf_iterator<char>(file),
+                   std::istreambuf_iterator<char>()};
+  if (file.bad()) {
+    return InternalError("failed to read {}", kMountInfoPath);
+  }
   return text;
 }
+
+}  // namespace
 
 StatusOr<std::set<std::filesystem::path>> MountedSources() {
   PUU_ASSIGN_OR_RETURN(const std::string text, ReadMountInfo());
@@ -228,7 +260,9 @@ StatusOr<std::set<std::filesystem::path>> MountedSources() {
 UniqueFd::UniqueFd(int fd) : fd_(fd) {}
 
 UniqueFd::~UniqueFd() {
-  if (fd_ >= 0) ::close(fd_);
+  if (fd_ >= 0) {
+    ::close(fd_);
+  }
 }
 
 UniqueFd::UniqueFd(UniqueFd&& other) noexcept
@@ -240,7 +274,9 @@ UniqueFd& UniqueFd::operator=(UniqueFd&& other) noexcept {
 }
 
 Status RandomBytes(std::span<uint8_t> buffer) {
-  if (buffer.empty()) return absl::OkStatus();
+  if (buffer.empty()) {
+    return absl::OkStatus();
+  }
   if (buffer.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
     return InvalidArgumentError("random request of {} bytes is too large",
                                 buffer.size());
@@ -267,7 +303,9 @@ Status WaitUntil(const std::function<bool()>& predicate,
                  std::chrono::milliseconds interval) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (true) {
-    if (predicate()) return absl::OkStatus();
+    if (predicate()) {
+      return absl::OkStatus();
+    }
     if (std::chrono::steady_clock::now() >= deadline) {
       return absl::DeadlineExceededError(
           fmt::format("timed out after {}ms", timeout.count()));
@@ -279,7 +317,7 @@ Status WaitUntil(const std::function<bool()>& predicate,
 std::string HumanSize(uint64_t bytes) {
   constexpr std::array<std::string_view, 6> kUnits = {"B",   "KiB", "MiB",
                                                       "GiB", "TiB", "PiB"};
-  double size = static_cast<double>(bytes);
+  auto size = static_cast<double>(bytes);
   size_t unit = 0;
   while (size >= 1024.0 && unit + 1 < kUnits.size()) {
     size /= 1024.0;
@@ -300,8 +338,7 @@ std::string CleanLogLine(std::string_view line) {
     if (character == 0x1b) {
       if (i + 1 < visible.size() && visible[i + 1] == '[') {
         i += 2;
-        while (i < visible.size() &&
-               !(visible[i] >= '@' && visible[i] <= '~')) {
+        while (i < visible.size() && (visible[i] < '@' || visible[i] > '~')) {
           ++i;
         }
       }
@@ -312,7 +349,9 @@ std::string CleanLogLine(std::string_view line) {
       continue;
     }
 
-    if (character < 0x20 || character == 0x7f) continue;
+    if (character < 0x20 || character == 0x7f) {
+      continue;
+    }
     out.push_back(visible[i]);
   }
 
@@ -323,12 +362,16 @@ std::string CleanLogLine(std::string_view line) {
 
 std::filesystem::path DefaultShell() {
   const char* shell = std::getenv("SHELL");
-  if (shell == nullptr || *shell == '\0') return {"/bin/sh"};
+  if (shell == nullptr || *shell == '\0') {
+    return {"/bin/sh"};
+  }
   return {shell};
 }
 
 std::optional<std::filesystem::path> FindInPath(std::string_view name) {
-  if (name.empty()) return std::nullopt;
+  if (name.empty()) {
+    return std::nullopt;
+  }
   if (name.find('/') != std::string_view::npos) {
     const std::filesystem::path candidate(name);
     return IsExecutable(candidate) ? std::optional(candidate) : std::nullopt;
@@ -344,10 +387,14 @@ std::optional<std::filesystem::path> FindInPath(std::string_view name) {
     const size_t separator = remaining.find(':');
     const std::string_view directory = remaining.substr(0, separator);
 
-    const std::filesystem::path candidate =
+    std::filesystem::path candidate =
         std::filesystem::path(directory.empty() ? "." : directory) / name;
-    if (IsExecutable(candidate)) return candidate;
-    if (separator == std::string_view::npos) break;
+    if (IsExecutable(candidate)) {
+      return candidate;
+    }
+    if (separator == std::string_view::npos) {
+      break;
+    }
     remaining.remove_prefix(separator + 1);
   }
   return std::nullopt;
@@ -357,21 +404,25 @@ bool WhichExists(std::string_view name) { return FindInPath(name).has_value(); }
 
 StatusOr<std::string> ReadFirstLine(const std::filesystem::path& path) {
   std::ifstream file(path);
-  if (!file.is_open()) return InternalError("failed to open {}", path.string());
+  if (!file.is_open()) {
+    return InternalError("failed to open {}", path.string());
+  }
   std::string line;
   std::getline(file, line);
-  if (file.bad()) return InternalError("failed to read {}", path.string());
+  if (file.bad()) {
+    return InternalError("failed to read {}", path.string());
+  }
   return line;
 }
 
 StatusOr<SecretString> ReadFirstSecretLine(const std::filesystem::path& path) {
   const UniqueFd fd(::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
-  if (fd.get() < 0) {
+  if (fd.Get() < 0) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("open {}", path.string()));
   }
   struct stat info = {};
-  if (::fstat(fd.get(), &info) != 0) {
+  if (::fstat(fd.Get(), &info) != 0) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("stat {}", path.string()));
   }
@@ -389,7 +440,7 @@ StatusOr<SecretString> ReadFirstSecretLine(const std::filesystem::path& path) {
   std::array<char, 4096> buffer{};
   ssize_t count = 0;
   do {
-    count = ::read(fd.get(), buffer.data(), buffer.size());
+    count = ::read(fd.Get(), buffer.data(), buffer.size());
   } while (count < 0 && errno == EINTR);
   if (count < 0) {
     const int error = errno;
@@ -403,9 +454,12 @@ StatusOr<SecretString> ReadFirstSecretLine(const std::filesystem::path& path) {
     return InvalidArgumentError("first line in {} exceeds 4095 bytes",
                                 path.string());
   }
-  size_t length = newline ? static_cast<size_t>(newline - buffer.data())
-                          : static_cast<size_t>(count);
-  if (length > 0 && buffer[length - 1] == '\r') --length;
+  size_t length = (newline != nullptr)
+                      ? static_cast<size_t>(newline - buffer.data())
+                      : static_cast<size_t>(count);
+  if (length > 0 && buffer[length - 1] == '\r') {
+    --length;
+  }
   SecretString result(std::string_view(buffer.data(), length));
   OPENSSL_cleanse(buffer.data(), buffer.size());
   return result;
@@ -414,16 +468,22 @@ StatusOr<SecretString> ReadFirstSecretLine(const std::filesystem::path& path) {
 StatusOr<std::vector<uint8_t>> ReadFileBytes(
     const std::filesystem::path& path) {
   std::ifstream file(path, std::ios::binary);
-  if (!file) return InternalError("failed to open {}", path.string());
+  if (!file) {
+    return InternalError("failed to open {}", path.string());
+  }
   std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(file),
                              std::istreambuf_iterator<char>()};
-  if (file.bad()) return InternalError("failed to read {}", path.string());
+  if (file.bad()) {
+    return InternalError("failed to read {}", path.string());
+  }
   return bytes;
 }
 
 std::string_view Trim(std::string_view text) {
   const size_t begin = text.find_first_not_of(" \t\r\n");
-  if (begin == std::string_view::npos) return {};
+  if (begin == std::string_view::npos) {
+    return {};
+  }
   return text.substr(begin, text.find_last_not_of(" \t\r\n") - begin + 1);
 }
 
@@ -462,16 +522,15 @@ std::vector<std::filesystem::path> MountPointsBelow(
     const std::filesystem::path& root) {
   std::vector<std::filesystem::path> selected;
   for (const std::filesystem::path& point : mount_points) {
-    const auto prefix =
-        std::mismatch(root.begin(), root.end(), point.begin(), point.end());
-    if (prefix.first == root.end()) selected.push_back(point);
+    if (std::ranges::mismatch(root, point).in1 == root.end()) {
+      selected.push_back(point);
+    }
   }
 
-  std::sort(selected.begin(), selected.end(),
-            [](const std::filesystem::path& left,
-               const std::filesystem::path& right) {
-              return left.native().size() > right.native().size();
-            });
+  std::ranges::sort(selected, [](const std::filesystem::path& left,
+                                 const std::filesystem::path& right) {
+    return left.native().size() > right.native().size();
+  });
   return selected;
 }
 
@@ -486,10 +545,10 @@ StatusOr<Mounts> Mounts::Read() {
 
 bool Mounts::IsMountPoint(const std::filesystem::path& path) const {
   const std::filesystem::path wanted = Canonical(path);
-  return std::any_of(mount_points_.begin(), mount_points_.end(),
-                     [&wanted](const std::filesystem::path& point) {
-                       return Canonical(point) == wanted;
-                     });
+  return std::ranges::any_of(mount_points_,
+                             [&wanted](const std::filesystem::path& point) {
+                               return Canonical(point) == wanted;
+                             });
 }
 
 std::vector<std::filesystem::path> Mounts::Below(

@@ -10,13 +10,14 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/status.h"
 
 namespace puu::engine {
 
-enum class BusyReason {
+enum class BusyReason : std::uint8_t {
   kMounted,
   kCrypt,
   kLvm,
