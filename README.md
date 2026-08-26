@@ -72,5 +72,5 @@ Optional K3s token must be passed via `--k3s-token-file`.
 
 ## Licensing
 
-Puu OS installer has been licensed with the GNU General Public License 2.0, or
-under any newer version published by the [Free Software Foundation](https://www.fsf.org/).
+Puu OS installer has been licensed with the GNU General Public License 2.0, or a
+newer version. Study [`LICENSE`](LICENSE) for further details.
