@@ -13,6 +13,12 @@ project(
     'b_ndebug=if-release',
     'b_pie=true',
     'wrap_mode=forcefallback',
+    # Vendored fallbacks are private implementation details: always static,
+    # and their headers/libs are never installed (see subprojects/packagefiles).
+    'fmt:default_library=static',
+    'spdlog:default_library=static',
+    'argtable3:default_library=static',
+    'yaml-cpp:default_library=static',
     'ftxui:examples=disabled',
     'yaml-cpp:tests=disabled',
     'yaml-cpp:tools=false',

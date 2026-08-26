@@ -1,5 +1,6 @@
 [wrap-file]
 directory = spdlog-1.17.0
+diff_files = spdlog-no-install.patch
 source_url = https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
 source_filename = spdlog-1.17.0.tar.gz
 source_hash = d8862955c6d74e5846b3f580b1605d2428b11d97a410d86e2fb13e857cd3a744
@@ -12,3 +13,4 @@ wrapdb_version = 1.17.0-2
 
 [provide]
 dependency_names = spdlog
+

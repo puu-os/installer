@@ -1,5 +1,6 @@
 [wrap-file]
 directory = argtable-v3.3.1
+diff_files = argtable3-no-install.patch
 source_url = https://github.com/argtable/argtable3/releases/download/v3.3.1/argtable-v3.3.1.tar.gz
 source_filename = argtable-v3.3.1.tar.gz
 source_hash = c08bca4b88ddb9234726b75455b3b1670d7c864d8daf198eaa7a3b4d41addf2c
@@ -12,3 +13,4 @@ wrapdb_version = 3.3.1-1
 
 [provide]
 dependency_names = argtable3
+
