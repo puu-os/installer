@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) Opinsys Oy 2026
+
+#include "base/status.h"
+
+#include <absl/status/status.h>
+
+namespace puu {
+
+Status ErrnoToStatus(int error_number, std::string_view operation) {
+  return absl::ErrnoToStatus(error_number, operation);
+}
+
+Status WithContext(const Status& status, std::string_view context) {
+  if (status.ok()) return status;
+  Status result(status.code(),
+                fmt::format("{}: {}", context, status.message()));
+  status.ForEachPayload(
+      [&result](absl::string_view type_url, const absl::Cord& payload) {
+        result.SetPayload(type_url, payload);
+      });
+  return result;
+}
+
+}  // namespace puu
