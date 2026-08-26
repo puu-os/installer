@@ -1,0 +1,815 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) Opinsys Oy 2026
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cerrno>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
+
+#include <absl/strings/str_join.h>
+#include <nlohmann/json.hpp>
+#include <openssl/crypto.h>
+#include <spdlog/spdlog.h>
+
+#include "base/status.h"
+#include "config.h"
+#include "engine/block.h"
+#include "engine/command.h"
+#include "engine/context.h"
+#include "engine/firmware.h"
+#include "engine/image.h"
+#include "engine/partition.h"
+#include "engine/passwd.h"
+#include "engine/pipeline.h"
+#include "engine/progress.h"
+#include "engine/secureboot.h"
+#include "engine/step.h"
+#include "engine/util.h"
+
+namespace puu::engine {
+namespace {
+
+constexpr std::array<std::string_view, 5> kDependencies = {
+    "bootc", "mke2fs", "mkfs.fat", "mkfs.xfs", "unshare"};
+
+constexpr std::chrono::seconds kDeviceTimeout{30};
+constexpr std::chrono::seconds kHeartbeatInterval{30};
+
+constexpr mode_t kPublicFileMode = 0644;
+constexpr mode_t kSecretFileMode = 0600;
+
+constexpr std::string_view kBootcStorageConf =
+    "/run/puu-installer/bootc-storage.conf";
+constexpr std::string_view kBootcGraphRoot =
+    "/run/puu-installer/target/var/tmp/puu-bootc-storage/containers/storage";
+constexpr std::string_view kContainersRunRoot = "/run/containers/storage";
+constexpr std::string_view kHostVarTmp = "/var/tmp";
+
+constexpr std::string_view kK3sTokenInChroot = "/etc/rancher/k3s/puu-token";
+
+bool IsRegularFile(const std::filesystem::path& path) {
+  std::error_code error;
+  return std::filesystem::is_regular_file(path, error);
+}
+
+bool Exists(const std::filesystem::path& path) {
+  std::error_code error;
+  return std::filesystem::exists(std::filesystem::symlink_status(path, error));
+}
+
+Status WriteFile(const std::filesystem::path& path, std::string_view content,
+                 mode_t mode, int extra_flags = 0) {
+  return WriteBytes(
+      path, {reinterpret_cast<const uint8_t*>(content.data()), content.size()},
+      mode, extra_flags);
+}
+
+Status WriteFileIfAbsent(const std::filesystem::path& path,
+                         std::string_view content) {
+  if (Exists(path)) return absl::OkStatus();
+  return WriteFile(path, content, kPublicFileMode);
+}
+
+StatusOr<std::string> ReadFile(const std::filesystem::path& path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file.is_open()) return InternalError("failed to open {}", path.string());
+  std::string text{std::istreambuf_iterator<char>(file),
+                   std::istreambuf_iterator<char>()};
+  if (file.bad()) return InternalError("failed to read {}", path.string());
+  return text;
+}
+
+std::filesystem::path InTarget(const std::filesystem::path& path) {
+  return std::filesystem::path(kTargetMount) / path.relative_path();
+}
+
+StatusOr<std::filesystem::path> StateRoot() {
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
+                       DeploymentRoot(kTargetMount));
+  std::filesystem::path state = deployment.parent_path().parent_path();
+  if (state.empty() || state == deployment) {
+    return InternalError("deployment root has unexpected path: {}",
+                         deployment.string());
+  }
+  return state;
+}
+
+Status MountEfi(const Runner& runner) {
+  return MountTarget(runner.context().parts.efi_part, kTargetEfiMount, "vfat",
+                     "fmask=0077,dmask=0077");
+}
+
+StatusOr<uint64_t> ValidateTargetDrive(const std::filesystem::path& drive,
+                                       const Config& config) {
+  std::error_code error;
+  const std::filesystem::file_status status =
+      std::filesystem::status(drive, error);
+  if (error) {
+    return FilesystemError(
+        error, fmt::format("inspect target drive {}", drive.string()));
+  }
+  if (!std::filesystem::is_block_file(status)) {
+    return InvalidArgumentError("'{}' is not a block device", drive.string());
+  }
+  PUU_ASSIGN_OR_RETURN(const BusySources busy_sources, ReadBusySources());
+  PUU_ASSIGN_OR_RETURN(const std::optional<BusyReason> busy,
+                       DiskBusy(drive, busy_sources));
+  if (busy.has_value()) {
+    return FailedPreconditionError("'{}' is busy: {}", drive.string(),
+                                   BusyReasonText(*busy));
+  }
+  PUU_ASSIGN_OR_RETURN(const uint64_t size, DriveSizeBytes(drive));
+  PUU_ASSIGN_OR_RETURN(const uint64_t minimum, MinTargetSizeBytes(config));
+  if (size < minimum) {
+    return FailedPreconditionError(
+        "'{}' is too small: {} detected, need at least {} for EFI, root and "
+        "home partitions",
+        drive.string(), HumanSize(size), HumanSize(minimum));
+  }
+  return size;
+}
+
+StatusOr<ImageRef> SourceImageRef(const std::filesystem::path& source) {
+  const std::string_view transport =
+      IsDirectory(source) ? "dir" : "oci-archive";
+  return ImageRef::Parse(fmt::format("{}:{}", transport, source.string()));
+}
+
+Status RunChrootedHelper(const Runner& runner,
+                         const std::filesystem::path& helper,
+                         std::string heartbeat) {
+  CleanupStack binds;
+
+  binds.Push([] {
+    for (const std::string_view relative : {"run", "dev", "sys", "proc"}) {
+      Unmount(std::filesystem::path(kTargetMount) / relative).IgnoreError();
+    }
+  });
+  PUU_RETURN_IF_ERROR(MountChrootBinds());
+
+  MarkerProgress progress;
+  Command command(helper.string());
+  command.Chroot(kTargetMount)
+      .Heartbeat(kHeartbeatInterval, std::move(heartbeat))
+      .Track(&progress,
+             [&runner](double fraction) { runner.ReportProgress(fraction); });
+  return command.Run();
+}
+
+Status SeedStore(const Runner& runner, const std::filesystem::path& live_store,
+                 const std::filesystem::path& sync_helper,
+                 const std::filesystem::path& relative_target,
+                 std::string_view what) {
+  if (IsDirectory(live_store)) {
+    PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
+    PUU_RETURN_IF_ERROR(CopyTree(live_store, state / relative_target));
+    InstallationLogger()->info("{}: copied the store from the live image",
+                               what);
+    return absl::OkStatus();
+  }
+  if (!IsRegularFile(InTarget(sync_helper))) {
+    InstallationLogger()->info("{}: nothing to pre-stage", what);
+    return absl::OkStatus();
+  }
+  InstallationLogger()->info("{}: running {}", what, sync_helper.string());
+  PUU_RETURN_IF_ERROR(RunChrootedHelper(
+      runner, sync_helper,
+      fmt::format("{} pre-seed still running; downloading content", what)));
+  InstallationLogger()->info("{}: pre-staged", what);
+  return absl::OkStatus();
+}
+
+StatusOr<std::filesystem::path> SystemdBootSource() {
+  const std::array<std::filesystem::path, 2> directories = {
+      std::filesystem::path(kTargetMount) / "usr/lib/systemd/boot/efi",
+      std::filesystem::path("/usr/lib/systemd/boot/efi")};
+  for (const std::filesystem::path& directory : directories) {
+    std::error_code error;
+    std::filesystem::directory_iterator entries(directory, error);
+    if (error) continue;
+    const std::filesystem::directory_iterator end;
+    for (; entries != end && !error; entries.increment(error)) {
+      std::filesystem::path path = entries->path();
+      const std::string name = path.filename().string();
+      std::string extension = path.extension().string();
+      std::transform(extension.begin(), extension.end(), extension.begin(),
+                     [](unsigned char c) { return std::tolower(c); });
+      if (name.starts_with("systemd-boot") && extension == ".efi") return path;
+    }
+  }
+  return NotFoundError("systemd-boot EFI binary not found");
+}
+
+Status StepDependencies(Runner& /*runner*/) {
+  std::vector<std::string_view> missing;
+  for (const std::string_view dependency : kDependencies) {
+    if (!WhichExists(dependency)) missing.push_back(dependency);
+  }
+  if (!missing.empty()) {
+    for (const std::string_view dependency : missing) {
+      InstallationLogger()->info("missing required tool: {}", dependency);
+    }
+    return FailedPreconditionError("missing dependencies: {}",
+                                   absl::StrJoin(missing, ", "));
+  }
+  InstallationLogger()->info("all {} dependencies present",
+                             kDependencies.size());
+  return absl::OkStatus();
+}
+
+Status StepSetupMode(Runner& runner) {
+  if (runner.context().secure_boot == SecureBootMode::kSkip) {
+    InstallationLogger()->info(
+        "Secure Boot disabled; skipping firmware setup check");
+    return absl::OkStatus();
+  }
+  const SetupMode mode = DetectSetupMode();
+  switch (mode.state) {
+    case SetupMode::State::kUnknown:
+
+      runner.context().secure_boot = SecureBootMode::kSkip;
+      InstallationLogger()->info(
+          "Secure Boot Setup Mode could not be detected; continuing without "
+          "Secure Boot");
+      if (!mode.reason.empty()) {
+        InstallationLogger()->info("  reason: {}", mode.reason);
+      }
+      return absl::OkStatus();
+    case SetupMode::State::kOff:
+      return FailedPreconditionError(
+          "Secure Boot Setup Mode is off. Reboot to firmware setup or "
+          "continue without Secure Boot.");
+    case SetupMode::State::kOn:
+      InstallationLogger()->info(
+          "firmware reports Setup Mode on; Secure Boot is {}",
+          mode.secure_boot_enabled.value_or(false) ? "enabled" : "disabled");
+      return absl::OkStatus();
+  }
+  return InternalError("unhandled Secure Boot setup mode");
+}
+
+Status StepCleanup(Runner& /*runner*/) { return CleanupMounts(); }
+
+Status StepValidateDrive(Runner& runner) {
+  Context& context = runner.context();
+  PUU_ASSIGN_OR_RETURN(const uint64_t size,
+                       ValidateTargetDrive(context.drive, context.config));
+  if (context.source_image.has_value() &&
+      !IsRegularFile(*context.source_image) &&
+      !IsDirectory(*context.source_image)) {
+    return NotFoundError("source bootc image not found at {}",
+                         context.source_image->string());
+  }
+
+  context.parts.efi_part = PartitionPath(context.drive, kEfiPartitionNumber);
+  context.parts.root_part = PartitionPath(context.drive, kRootPartitionNumber);
+  context.parts.home_part = PartitionPath(context.drive, kHomePartitionNumber);
+
+  InstallationLogger()->info(
+      "target {} ({}; {}, {}, {})", context.drive.string(), HumanSize(size),
+      context.parts.efi_part.string(), context.parts.root_part.string(),
+      context.parts.home_part.string());
+  return absl::OkStatus();
+}
+
+Status StepVerifyImage(Runner& runner) {
+  const Context& context = runner.context();
+  if (!context.source_image.has_value()) {
+    InstallationLogger()->info("using the running bootc image as the source");
+    return absl::OkStatus();
+  }
+  const std::optional<Digest>& expected = context.config.image.expected_digest;
+  if (!expected.has_value()) {
+    return InvalidArgumentError(
+        "image.expectedDigest is required when installing from a local image "
+        "source");
+  }
+  InstallationLogger()->info("expected image digest: {}", expected->value());
+  PUU_RETURN_IF_ERROR(VerifyImageDigest(*context.source_image,
+                                        context.image_manifest, *expected));
+  InstallationLogger()->info("image digest verified: {}", expected->value());
+  return absl::OkStatus();
+}
+
+Status StepPartition(Runner& runner) {
+  Context& context = runner.context();
+
+  PUU_RETURN_IF_ERROR(
+      ValidateTargetDrive(context.drive, context.config).status());
+  PUU_ASSIGN_OR_RETURN(context.parts.layout,
+                       PartitionDrive(context.drive, context.config));
+
+  PUU_RETURN_IF_ERROR(WaitForUdevSettle(kDeviceTimeout));
+  for (const std::filesystem::path* part :
+       {&context.parts.efi_part, &context.parts.root_part,
+        &context.parts.home_part}) {
+    PUU_RETURN_IF_ERROR(WaitForBlockDevice(*part, kDeviceTimeout));
+  }
+  return absl::OkStatus();
+}
+
+Status StepFormatEfi(Runner& runner) {
+  Context& context = runner.context();
+  const std::filesystem::path part = context.parts.efi_part;
+  InstallationLogger()->info("formatting {} as FAT32 (label EFI)",
+                             part.string());
+  Command command("mkfs.fat");
+  PUU_RETURN_IF_ERROR(command.Args({"-F32", "-n", "EFI", part.string()}).Run());
+
+  PUU_ASSIGN_OR_RETURN(context.parts.efi_uuid, CapturePartUuid(part));
+  return absl::OkStatus();
+}
+
+Status StepFormatRoot(Runner& runner) {
+  Context& context = runner.context();
+  const std::filesystem::path part = context.parts.root_part;
+  const std::string label = context.config.labels.root.value();
+  InstallationLogger()->info("formatting {} as XFS (label {})", part.string(),
+                             label);
+  Command command("mkfs.xfs");
+  PUU_RETURN_IF_ERROR(command.Args({"-f", "-L", label, part.string()}).Run());
+  PUU_ASSIGN_OR_RETURN(context.parts.root_uuid, CaptureUuid(part));
+  return absl::OkStatus();
+}
+
+Status StepFormatHome(Runner& runner) {
+  Context& context = runner.context();
+  const std::filesystem::path part = context.parts.home_part;
+  const std::string label = context.config.labels.home.value();
+  InstallationLogger()->info("formatting {} as ext4 (label {})", part.string(),
+                             label);
+  Command command("mke2fs");
+
+  PUU_RETURN_IF_ERROR(command
+                          .Args({"-t", "ext4", "-O", "encrypt", "-F", "-L",
+                                 label, part.string()})
+                          .Run());
+  PUU_ASSIGN_OR_RETURN(context.parts.home_uuid, CaptureUuid(part));
+  return absl::OkStatus();
+}
+
+Status StepMount(Runner& runner) {
+  return MountTarget(runner.context().parts.root_part, kTargetMount, "xfs", "");
+}
+
+Status StepBootcInstall(Runner& runner) {
+  Context& context = runner.context();
+  if (context.parts.root_uuid.empty()) {
+    return FailedPreconditionError(
+        "root partition UUID is unset; the root filesystem was not formatted");
+  }
+  if (!context.source_image.has_value() && !RunningInContainer()) {
+    return FailedPreconditionError(
+        "no local bootc source image found; expected a filesystem labelled {}",
+        context.config.image.source_label.value());
+  }
+
+  CleanupStack cleanups;
+  const std::filesystem::path target_var_tmp = InTarget("/var/tmp");
+  PUU_RETURN_IF_ERROR(CreateDirectories(target_var_tmp));
+
+  PUU_RETURN_IF_ERROR(BindMount(kHostVarTmp, target_var_tmp));
+  cleanups.Push([target_var_tmp] { Unmount(target_var_tmp).IgnoreError(); });
+  PUU_RETURN_IF_ERROR(CreateDirectories(kBootcGraphRoot));
+  PUU_RETURN_IF_ERROR(CreateDirectories(kContainersRunRoot));
+  PUU_RETURN_IF_ERROR(WriteFile(
+      kBootcStorageConf,
+      fmt::format("[storage]\ndriver = \"overlay\"\ngraphroot = \"{}\"\n"
+                  "runroot = \"{}\"\n",
+                  kBootcGraphRoot, kContainersRunRoot),
+      kPublicFileMode));
+
+  std::vector<std::string> args = {"--pid", "--fork",  "--mount-proc", "--",
+                                   "bootc", "install", "to-filesystem"};
+  if (context.source_image.has_value()) {
+    ImageRef source;
+    if (context.image_manifest.source_imgref.has_value()) {
+      source = *context.image_manifest.source_imgref;
+    } else {
+      PUU_ASSIGN_OR_RETURN(source, SourceImageRef(*context.source_image));
+    }
+    args.emplace_back("--source-imgref");
+    args.push_back(source.value());
+  }
+  args.emplace_back("--target-imgref");
+  args.push_back(context.target_imgref.value());
+  args.emplace_back("--skip-fetch-check");
+  args.emplace_back("--bootloader");
+  args.emplace_back("none");
+  args.emplace_back("--skip-finalize");
+  PUU_ASSIGN_OR_RETURN(
+      const std::vector<KernelArg> kernel_args,
+      InstallKernelArgs(context.parts.root_uuid, context.config));
+  for (const KernelArg& argument : kernel_args) {
+    args.emplace_back("--karg");
+    args.push_back(argument.value());
+  }
+  args.emplace_back(kTargetMount);
+
+  InstallationLogger()->info(
+      "bootc image deployment may take several minutes without native "
+      "progress output");
+
+  Command command("unshare");
+  command.Args(args)
+      .Env("CONTAINERS_STORAGE_CONF", std::string(kBootcStorageConf))
+      .Env("TMPDIR", std::string(kHostVarTmp))
+      .Heartbeat(kHeartbeatInterval,
+                 "bootc install still running; deploying image");
+
+  std::optional<DiskWriteProgress> progress;
+  if (context.source_image.has_value()) {
+    const StatusOr<uint64_t> expected =
+        EstimatedInstallBytes(*context.source_image, context.image_manifest);
+    if (expected.ok()) {
+      progress.emplace(kTargetMount, *expected);
+      command.Track(&progress.value(), [&runner](double fraction) {
+        runner.ReportProgress(fraction);
+      });
+    }
+  }
+  return command.Run();
+}
+
+Status StepMountHome(Runner& runner) {
+  return MountTarget(runner.context().parts.home_part, kTargetHomeMount, "ext4",
+                     "");
+}
+
+Status StepConfigureMounts(Runner& runner) {
+  const Context& context = runner.context();
+  if (context.parts.efi_uuid.empty() || context.parts.home_uuid.empty()) {
+    return FailedPreconditionError(
+        "EFI or home partition UUID is unset; the filesystems were not "
+        "formatted");
+  }
+
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
+                       DeploymentRoot(kTargetMount));
+
+  for (const std::string_view relative : {"efi", "var", "var/home", "etc"}) {
+    PUU_RETURN_IF_ERROR(CreateDirectories(deployment / relative));
+  }
+
+  const std::filesystem::path fstab = deployment / "etc/fstab";
+  std::string existing;
+  if (Exists(fstab)) {
+    PUU_ASSIGN_OR_RETURN(existing, ReadFile(fstab));
+  }
+  return WriteFile(
+      fstab,
+      MergeFstab(existing, context.parts.efi_uuid, context.parts.home_uuid),
+      kPublicFileMode);
+}
+
+Status StepFirstboot(Runner& runner) {
+  const IdentityConfig& identity = runner.context().config.identity;
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
+                       DeploymentRoot(kTargetMount));
+
+  if (!IsRegularFile(deployment / "usr/share/zoneinfo" /
+                     identity.timezone.value())) {
+    return NotFoundError("timezone not found in target system: {}",
+                         identity.timezone.value());
+  }
+
+  const std::filesystem::path etc = deployment / "etc";
+  PUU_RETURN_IF_ERROR(CreateDirectories(etc));
+
+  PUU_RETURN_IF_ERROR(WriteFileIfAbsent(
+      etc / "hostname", fmt::format("{}\n", identity.hostname.value())));
+  if (!identity.locale.empty()) {
+    PUU_RETURN_IF_ERROR(
+        WriteFileIfAbsent(etc / "locale.conf",
+                          fmt::format("LANG={}\n", identity.locale.value())));
+  }
+  const std::filesystem::path localtime = etc / "localtime";
+  if (!Exists(localtime)) {
+    std::error_code error;
+    std::filesystem::create_symlink(
+        std::filesystem::path("../usr/share/zoneinfo") /
+            identity.timezone.value(),
+        localtime, error);
+    if (error) {
+      return FilesystemError(error,
+                             fmt::format("symlink {}", localtime.string()));
+    }
+  }
+
+  if (!identity.keymap.empty()) {
+    PUU_RETURN_IF_ERROR(WriteFile(
+        etc / "vconsole.conf",
+        fmt::format("KEYMAP={}\n", identity.keymap.value()), kPublicFileMode));
+    InstallationLogger()->info("staged keymap {} in /etc/vconsole.conf",
+                               identity.keymap.value());
+  }
+  return absl::OkStatus();
+}
+
+Status StepConfigureK3s(Runner& runner) {
+  Context& context = runner.context();
+  const K3sConfig& k3s = context.config.k3s;
+
+  if (k3s.role == K3sRole::kServer && !k3s.node_name.has_value()) {
+    InstallationLogger()->info(
+        "k3s cluster: using image default server configuration");
+    return absl::OkStatus();
+  }
+
+  std::vector<std::string> args = {"--role",
+                                   std::string(K3sRoleName(k3s.role))};
+  if (k3s.server_url.has_value()) {
+    args.emplace_back("--server-url");
+    args.push_back(k3s.server_url->value());
+  }
+
+  CleanupStack cleanups;
+  if (!context.k3s_token.empty()) {
+    const std::filesystem::path token = InTarget(kK3sTokenInChroot);
+    PUU_RETURN_IF_ERROR(CreateDirectories(token.parent_path()));
+
+    cleanups.Push([token] {
+      std::error_code error;
+      std::filesystem::remove(token, error);
+    });
+
+    std::string content;
+    content.reserve(context.k3s_token.size() + 1);
+    content.assign(context.k3s_token.value());
+    content.push_back('\n');
+    const Status written =
+        WriteFile(token, content, kSecretFileMode, O_NOFOLLOW);
+    OPENSSL_cleanse(content.data(), content.size());
+    PUU_RETURN_IF_ERROR(written);
+    args.emplace_back("--token-file");
+
+    args.emplace_back(kK3sTokenInChroot);
+  }
+  if (k3s.node_name.has_value()) {
+    args.emplace_back("--node-name");
+    args.push_back(k3s.node_name->value());
+  }
+
+  Command command(k3s.helper.string());
+  PUU_RETURN_IF_ERROR(command.Args(args).Chroot(kTargetMount).Run());
+  context.k3s_token.Clear();
+  InstallationLogger()->info("k3s cluster: staged {} configuration",
+                             K3sRoleName(k3s.role));
+  return absl::OkStatus();
+}
+
+Status StepStageHomedIdentity(Runner& runner) {
+  Context& context = runner.context();
+  if (!context.username.has_value()) {
+    return InvalidArgumentError(
+        "username is required to stage a homed identity");
+  }
+  const std::string name = context.username->value();
+  const std::string_view password = context.user_password.value();
+
+  if (password.find_first_of("\r\n") != std::string_view::npos) {
+    return InvalidArgumentError("password must not contain newline characters");
+  }
+  PUU_ASSIGN_OR_RETURN(const std::string hashed, HashPassword(password));
+
+  std::vector<std::string> groups;
+  groups.reserve(context.config.homed.groups.size());
+  for (const GroupName& group : context.config.homed.groups) {
+    groups.push_back(group.value());
+  }
+
+  nlohmann::ordered_json identity;
+  identity["userName"] = name;
+  identity["secret"]["password"].push_back(std::string(password));
+  identity["realName"] = name;
+  identity["shell"] = std::string(UserShellPath(context.user_shell));
+  identity["memberOf"] = groups;
+  identity["homeDirectory"] = fmt::format("/var/home/{}", name);
+  identity["imagePath"] = fmt::format("/var/home/{}.homedir", name);
+  identity["storage"] = "fscrypt";
+  identity["preferredSessionLauncher"] = "gnome";
+  identity["enforcePasswordPolicy"] = false;
+  identity["privileged"]["hashedPassword"].push_back(hashed);
+
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
+  const std::filesystem::path target = state / "var/lib/puu/identity.json";
+  PUU_RETURN_IF_ERROR(CreateDirectories(target.parent_path()));
+
+  std::string text =
+      identity.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+  const Status written = WriteFile(target, text, kSecretFileMode, O_NOFOLLOW);
+
+  for (auto& value : identity["secret"]["password"]) {
+    std::string& held = value.get_ref<std::string&>();
+    OPENSSL_cleanse(held.data(), held.size());
+  }
+  OPENSSL_cleanse(text.data(), text.size());
+  identity = nlohmann::ordered_json();
+  context.user_password.Clear();
+  PUU_RETURN_IF_ERROR(written);
+
+  InstallationLogger()->info(
+      "staged homed identity for {} at /var/lib/puu/identity.json", name);
+  return absl::OkStatus();
+}
+
+Status StepFlatpakSeed(Runner& runner) {
+  const FlatpakConfig& flatpak = runner.context().config.flatpak;
+  return SeedStore(runner, flatpak.live_store, flatpak.sync_helper,
+                   "var/lib/flatpak", "flatpak-seed");
+}
+
+Status StepModelsSeed(Runner& runner) {
+  const ModelsConfig& models = runner.context().config.models;
+  return SeedStore(runner, models.live_store, models.sync_helper,
+                   "var/lib/vllm/models", "models-seed");
+}
+
+Status StepInstallBootloader(Runner& runner) {
+  PUU_RETURN_IF_ERROR(MountEfi(runner));
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path source, SystemdBootSource());
+  PUU_ASSIGN_OR_RETURN(const Arch arch, HostArch());
+  const std::string suffix(ArchEfiSuffix(arch));
+  std::string upper = suffix;
+  std::transform(upper.begin(), upper.end(), upper.begin(),
+                 [](unsigned char c) { return std::toupper(c); });
+
+  const std::filesystem::path systemd_dir =
+      std::filesystem::path(kTargetEfiMount) / "EFI/systemd";
+  const std::filesystem::path fallback_dir =
+      std::filesystem::path(kTargetEfiMount) / "EFI/BOOT";
+  PUU_RETURN_IF_ERROR(CreateDirectories(systemd_dir));
+  PUU_RETURN_IF_ERROR(CreateDirectories(fallback_dir));
+
+  std::error_code error;
+  const auto options = std::filesystem::copy_options::overwrite_existing;
+  std::filesystem::copy_file(
+      source, systemd_dir / fmt::format("systemd-boot{}.efi", suffix), options,
+      error);
+  if (error) {
+    return FilesystemError(error,
+                           fmt::format("copy {} to the ESP", source.string()));
+  }
+
+  std::filesystem::copy_file(
+      source, fallback_dir / fmt::format("BOOT{}.EFI", upper), options, error);
+  if (error) {
+    return FilesystemError(error,
+                           fmt::format("copy {} to the ESP", source.string()));
+  }
+  InstallationLogger()->info("installed systemd-boot on the ESP");
+  return absl::OkStatus();
+}
+
+Status StepStageEspBoot(Runner& runner) {
+  PUU_RETURN_IF_ERROR(MountEfi(runner));
+  const std::filesystem::path entries = InTarget("/boot/loader/entries");
+  const std::filesystem::path ostree = InTarget("/boot/ostree");
+  if (!IsDirectory(entries)) {
+    return NotFoundError("boot loader entries not found: {}", entries.string());
+  }
+  if (!IsDirectory(ostree)) {
+    return NotFoundError("boot ostree files not found: {}", ostree.string());
+  }
+  PUU_RETURN_IF_ERROR(CopyTreeFiles(
+      entries, std::filesystem::path(kTargetEfiMount) / "loader/entries"));
+  PUU_RETURN_IF_ERROR(CopyTreeFiles(
+      ostree, std::filesystem::path(kTargetEfiMount) / "boot/ostree"));
+
+  SyncAll();
+  InstallationLogger()->info(
+      "staged boot loader entries and ostree kernel files on ESP");
+  return absl::OkStatus();
+}
+
+Status StepSign(Runner& /*runner*/) {
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
+  KeyStore store(state / "var");
+  PUU_RETURN_IF_ERROR(store.EnsureKeys());
+  PUU_ASSIGN_OR_RETURN(const KeyPair database, store.Get(KeyKind::kDatabase));
+  PUU_ASSIGN_OR_RETURN(const std::vector<std::filesystem::path> binaries,
+                       TargetEfiBinaries(kTargetEfiMount));
+  if (binaries.empty()) {
+    return NotFoundError("no EFI binaries found under {}", kTargetEfiMount);
+  }
+
+  size_t signed_count = 0;
+  size_t skipped_count = 0;
+  for (const std::filesystem::path& binary : binaries) {
+    PUU_ASSIGN_OR_RETURN(const bool already, VerifyPeBinary(binary, database));
+    if (already) {
+      ++skipped_count;
+      continue;
+    }
+    PUU_RETURN_IF_ERROR(SignPeBinary(binary, database));
+    ++signed_count;
+  }
+  InstallationLogger()->info(
+      "signed {} EFI binaries on target ESP ({} already signed)", signed_count,
+      skipped_count);
+
+  for (const std::filesystem::path& binary : binaries) {
+    PUU_ASSIGN_OR_RETURN(const bool valid, VerifyPeBinary(binary, database));
+    if (!valid) {
+      return InternalError("signature verification failed for {}",
+                           binary.string());
+    }
+  }
+  return absl::OkStatus();
+}
+
+Status StepEnrollKeys(Runner& /*runner*/) {
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
+  KeyStore store(state / "var");
+  PUU_RETURN_IF_ERROR(store.EnsureKeys());
+
+  Status status = EnrollKeys(store);
+  if (status.ok()) {
+    InstallationLogger()->info("enrolled Secure Boot db, KEK and PK");
+    return absl::OkStatus();
+  }
+
+  if (DetectSetupMode().state == SetupMode::State::kOff) {
+    InstallationLogger()->info(
+        "Secure Boot keys appear to be enrolled already");
+    return absl::OkStatus();
+  }
+  return status;
+}
+
+Status StepNvram(Runner& runner) {
+  PUU_RETURN_IF_ERROR(MountEfi(runner));
+  Context& context = runner.context();
+  if (!context.parts.layout.has_value()) {
+    PUU_ASSIGN_OR_RETURN(const EfiPartitionLayout layout,
+                         LoadPartitionLayout(context.drive));
+    context.parts.layout = layout;
+  }
+  PUU_ASSIGN_OR_RETURN(const Arch arch, HostArch());
+  return ManageBootEntry(*context.parts.layout, arch,
+                         context.config.branding.name.value());
+}
+
+Status StepFinalCleanup(Runner& /*runner*/) {
+  PUU_RETURN_IF_ERROR(CleanupMounts());
+  InstallationLogger()->info("target filesystems unmounted; ready to reboot");
+  return absl::OkStatus();
+}
+
+constexpr std::array<Step, 24> kSteps = {{
+    {.title = "Verify dependencies", .run = &StepDependencies},
+    {.title = "Verify Secure Boot setup",
+     .run = &StepSetupMode,
+     .requires_secure_boot = true},
+    {.title = "Clean up previous mounts", .run = &StepCleanup},
+    {.title = "Validate target drive", .run = &StepValidateDrive},
+    {.title = "Verify image integrity", .run = &StepVerifyImage},
+    {.title = "Partition drive",
+     .run = &StepPartition,
+     .point_of_no_return = true},
+    {.title = "Format EFI system partition", .run = &StepFormatEfi},
+    {.title = "Format root filesystem", .run = &StepFormatRoot},
+    {.title = "Format home filesystem", .run = &StepFormatHome},
+    {.title = "Mount target filesystems", .run = &StepMount},
+    {.title = "Install bootc image", .run = &StepBootcInstall, .weight = 30},
+    {.title = "Mount home filesystem", .run = &StepMountHome},
+    {.title = "Configure persistent mounts", .run = &StepConfigureMounts},
+    {.title = "Configure firstboot identity", .run = &StepFirstboot},
+    {.title = "Configure k3s cluster", .run = &StepConfigureK3s},
+    {.title = "Stage homed user identity", .run = &StepStageHomedIdentity},
+    {.title = "Pre-stage Flatpak refs", .run = &StepFlatpakSeed, .weight = 15},
+    {.title = "Pre-stage model catalog", .run = &StepModelsSeed, .weight = 15},
+    {.title = "Install systemd-boot", .run = &StepInstallBootloader},
+    {.title = "Stage ESP boot files", .run = &StepStageEspBoot},
+    {.title = "Sign EFI binaries",
+     .run = &StepSign,
+     .requires_secure_boot = true},
+    {.title = "Enroll Secure Boot keys",
+     .run = &StepEnrollKeys,
+     .requires_secure_boot = true},
+    {.title = "Manage NVRAM boot entry", .run = &StepNvram},
+    {.title = "Unmount target filesystems", .run = &StepFinalCleanup},
+}};
+
+}  // namespace
+
+std::span<const Step> Steps() { return kSteps; }
+
+}  // namespace puu::engine
