@@ -11,3 +11,4 @@ wrapdb_version = 6.1.9-1
 
 [provide]
 dependency_names = ftxui-screen, ftxui-dom, ftxui-component
+ftxui = component_dep

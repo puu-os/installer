@@ -45,10 +45,6 @@ if cxx.has_argument('-fstack-protector-strong')
   add_project_arguments('-fstack-protector-strong', language: 'cpp')
 endif
 
-if get_option('optimization') != '0'
-  add_project_arguments('-D_FORTIFY_SOURCE=2', language: 'cpp')
-endif
-
 argtable3_dep = dependency('argtable3', include_type: 'system')
 yaml_cpp_dep = dependency('yaml-cpp', include_type: 'system')
 fmt_dep = dependency('fmt', include_type: 'system')
@@ -57,17 +53,14 @@ json_dep = dependency('nlohmann_json', include_type: 'system')
 
 absl_deps = [
   dependency('absl_status', include_type: 'system'),
+  dependency('absl_statusor', include_type: 'system'),
   dependency('absl_strings', include_type: 'system'),
   dependency('absl_base', include_type: 'system'),
   dependency('absl_synchronization', include_type: 'system'),
   dependency('absl_time', include_type: 'system'),
 ]
 
-ftxui_deps = [
-  dependency('ftxui-screen', include_type: 'system'),
-  dependency('ftxui-dom', include_type: 'system'),
-  dependency('ftxui-component', include_type: 'system'),
-]
+ftxui_deps = [dependency('ftxui', include_type: 'system')]
 
 openssl_dep = dependency('openssl', version: '>= 3.0', include_type: 'system')
 blkid_dep = dependency('blkid', include_type: 'system')
