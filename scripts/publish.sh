@@ -119,7 +119,7 @@ git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' \
 if command -v "$GLAB" >/dev/null 2>&1; then
   if "$GLAB" release view "$version" >/dev/null 2>&1; then
     "$GLAB" release upload "$version" "$workdir"/release/*.tar.xz \
-      "$workdir"/release/*.sha256 --clobber
+      "$workdir"/release/*.sha256
   else
     "$GLAB" release create "$version" "$workdir"/release/*.tar.xz \
       "$workdir"/release/*.sha256 --name "puu-installer $version" \
