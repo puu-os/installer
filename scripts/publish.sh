@@ -12,6 +12,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/sha256.sh"
 
 GLAB="${GLAB:-glab}"
+BUILDDIR="${BUILDDIR:-build}"
 
 cleanup() {
   local status=$?
@@ -88,7 +89,7 @@ remote_tag="${remote_output%%$'\t'*}"
   || die "push tag $version to origin before publishing"
 
 asset="puu-installer-$version.tar.xz"
-asset_path="artifacts/$asset"
+asset_path="$BUILDDIR/artifacts/$asset"
 asset_checksum="$asset_path.sha256"
 [[ -f "$asset_path" && -f "$asset_checksum" ]] \
   || die "missing $asset_path or its checksum; run 'make package' first"
@@ -125,9 +126,9 @@ if command -v "$GLAB" >/dev/null 2>&1; then
       --notes-file "$notes"
   fi
 else
-  printf 'glab not found; copying release assets to artifacts/release\n'
-  mkdir -p artifacts/release
-  cp "$workdir"/release/*.tar.xz "$workdir"/release/*.sha256 artifacts/release/
+  printf 'glab not found; copying release assets to %s/artifacts/release\n' "$BUILDDIR"
+  mkdir -p "$BUILDDIR/artifacts/release"
+  cp "$workdir"/release/*.tar.xz "$workdir"/release/*.sha256 "$BUILDDIR/artifacts/release/"
 fi
 
 printf 'published puu-installer %s\n' "$version"

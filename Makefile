@@ -40,4 +40,4 @@ publish: ## Publish a GitLab release
 	./scripts/publish.sh "$(VERSION)"
 
 clean: ## Remove build artifacts
-	$(RM) -r $(BUILDDIR) artifacts
+	$(RM) -r $(BUILDDIR)

@@ -3,7 +3,7 @@
 # Copyright (C) Opinsys Oy 2026
 #
 # Builds the source release: a .tar.xz of the committed tree plus a .sha256
-# sidecar, written to artifacts/.
+# sidecar, written to $BUILDDIR/artifacts/.
 #
 # The installer is no longer shipped as a pre-compiled binary. `meson dist`
 # archives HEAD, then unpacks, builds and tests the archive, so a tarball that
@@ -65,9 +65,10 @@ asset="puu-installer-$version.tar.xz"
 dist_path="$BUILDDIR/meson-dist/$asset"
 [[ -f "$dist_path" ]] || die "meson dist did not produce $dist_path"
 
-mkdir -p artifacts
-cp "$dist_path" "artifacts/$asset"
-write_sha256_sidecar "artifacts/$asset"
+artifacts_dir="$BUILDDIR/artifacts"
+mkdir -p "$artifacts_dir"
+cp "$dist_path" "$artifacts_dir/$asset"
+write_sha256_sidecar "$artifacts_dir/$asset"
 
-printf 'packaged artifacts/%s\n' "$asset"
-printf 'checksum artifacts/%s.sha256\n' "$asset"
+printf 'packaged %s/%s\n' "$artifacts_dir" "$asset"
+printf 'checksum %s/%s.sha256\n' "$artifacts_dir" "$asset"
