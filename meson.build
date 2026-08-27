@@ -4,7 +4,7 @@
 project(
   'puu-installer',
   'cpp',
-  version: '1.0.50',
+  version: '1.0.51',
   license: 'GPL-2.0-or-later',
   meson_version: '>= 1.1.0',
   default_options: [
