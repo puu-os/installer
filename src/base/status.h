@@ -62,11 +62,7 @@ Status WithContext(const Status& status, std::string_view context);
 #define PUU_STATUS_CONCAT(a, b) PUU_STATUS_CONCAT_INNER(a, b)
 
 // Assigns the value of a StatusOr to `lhs`, propagating failure. `lhs` may
-// include a declaration, for example: PUU_ASSIGN_OR_RETURN(auto fd, Open(p));
-//
-// Requires GCC or Clang: the statement-expression extension is what lets `lhs`
-// carry a declaration while the failure path still returns from the enclosing
-// function.
+// include a declaration, for example: `PUU_ASSIGN_OR_RETURN(auto fd, Open(p))`.
 #define PUU_ASSIGN_OR_RETURN(lhs, expr)                      \
   lhs = __extension__({                                      \
     auto PUU_STATUS_CONCAT(puu_or_, __LINE__) = (expr);      \
