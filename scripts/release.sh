@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 #
-# Bumps the project version in meson.build, verifies the tree builds and tests
-# clean, then creates a signed release tag.
+# Bumps the project version in CMakeLists.txt, verifies the tree builds and
+# tests clean, then creates a signed release tag.
 
 set -euo pipefail
 
-MESON="${MESON:-meson}"
-BUILDDIR="${BUILDDIR:-build}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=project-version.sh
+source "$script_dir/project-version.sh"
 
 die() {
 	echo "$1" >&2
@@ -34,9 +35,9 @@ cleanup() {
 			"refs/tags/$signing_check_tag" >/dev/null; then
 		git tag -d "$signing_check_tag" >/dev/null 2>&1 || true
 	fi
-	rm -f meson.build.next
+	rm -f CMakeLists.txt.next
 	if (( status != 0 && !committed )); then
-		git restore -- meson.build 2>/dev/null || true
+		git restore -- CMakeLists.txt 2>/dev/null || true
 	fi
 	return "$status"
 }
@@ -68,14 +69,9 @@ git tag -s "$signing_check_tag" -m "puu-installer release signing check" \
 git tag -d "$signing_check_tag" >/dev/null
 signing_check_tag=""
 
-meson_version() {
-	sed -n "s/^[[:space:]]*version:[[:space:]]*'\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)'.*/\1/p" \
-		meson.build | head -1
-}
-
 pkg=puu-installer
-cur_ver="$(meson_version)"
-[[ -n "$cur_ver" ]] || die "cannot find version in meson.build"
+cur_ver="$(read_project_version)"
+[[ -n "$cur_ver" ]] || die "cannot find version in CMakeLists.txt"
 
 [[ "$cur_ver" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] \
 	|| die "cannot parse version components from: $cur_ver"
@@ -87,15 +83,15 @@ ver_gt "$next_a" "$next_b" "$next_c" "$cur_a" "$cur_b" "$cur_c" \
 	|| die "$next_ver is not greater than current $cur_ver"
 
 awk -v cur="$cur_ver" -v nxt="$next_ver" '
-	!done && $0 ~ /^[[:space:]]*version:[[:space:]]*'"'"'/ {
-		sub("'"'"'" cur "'"'"'", "'"'"'" nxt "'"'"'")
+	!done && /^[[:space:]]*VERSION[[:space:]]/ {
+		sub("VERSION " cur, "VERSION " nxt)
 		done = 1
 	}
 	{ print }
-' meson.build > meson.build.next
-mv meson.build.next meson.build
-[[ "$(meson_version)" == "$next_ver" ]] \
-	|| die "failed to update version in meson.build"
+' CMakeLists.txt > CMakeLists.txt.next
+mv CMakeLists.txt.next CMakeLists.txt
+[[ "$(read_project_version)" == "$next_ver" ]] \
+	|| die "failed to update version in CMakeLists.txt"
 
 ./scripts/ci.sh
 
@@ -118,4 +114,4 @@ printf '%s %s\n\n%s\n\n%s\n' "$pkg" "$next_ver" "$log" "$sob" | git tag -s "$nex
 printf 'tagged %s\n' "$next_ver"
 printf 'push the commit and tag: git push --atomic origin %q %q\n' \
 	"HEAD:refs/heads/$branch" "refs/tags/$next_ver"
-printf 'then run: make package && make publish\n'
+printf 'then run: make publish\n'

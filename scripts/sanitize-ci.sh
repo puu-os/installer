@@ -7,20 +7,16 @@
 
 set -euo pipefail
 
-MESON="${MESON:-meson}"
+CMAKE="${CMAKE:-cmake}"
+CTEST="${CTEST:-ctest}"
 BUILDDIR="${SANITIZE_BUILDDIR:-build-sanitize}"
 
-# GCC 14 rejects abseil's hash-table internals under -fsanitize=undefined
-# (function-pointer comparison stops being a constant expression), so build
-# that subproject unsanitized; our code is still fully instrumented.
-NO_ABLSAN='-Dabseil-cpp:b_sanitize=none'
-if [[ -d "$BUILDDIR" ]]; then
-  "$MESON" setup --reconfigure "$BUILDDIR" -Db_sanitize=address,undefined \
-    "$NO_ABLSAN" >/dev/null
-else
-  "$MESON" setup "$BUILDDIR" -Db_sanitize=address,undefined \
-    "$NO_ABLSAN" >/dev/null
-fi
+# PUU_SANITIZE instruments only our own code; dependencies stay unsanitized.
+# GCC 14 rejects Abseil's hash-table internals under -fsanitize=undefined
+# (function-pointer comparison stops being a constant expression), so using
+# the uninstrumented system package also keeps those internals out of reach.
+"$CMAKE" -S . -B "$BUILDDIR" -G Ninja -DPUU_SANITIZE=address,undefined \
+  >/dev/null
 
-ninja -C "$BUILDDIR"
-"$MESON" test -C "$BUILDDIR" --print-errorlogs
+"$CMAKE" --build "$BUILDDIR"
+"$CTEST" --test-dir "$BUILDDIR" --output-on-failure

@@ -1,4 +1,2 @@
 /build/
-/subprojects/*
-!/subprojects/packagefiles/
-!/subprojects/*.wrap
+/build-sanitize/

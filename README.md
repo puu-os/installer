@@ -67,8 +67,14 @@ Optional K3s token must be passed via `--k3s-token-file`.
 
 ## Development
 
+- Install `abseil-cpp` for foundational C++ utilities:
+  - Debian/Ubuntu: `libabsl-dev`.
+  - Fedora: `abseil-cpp-devel`.
+  - macOS: `brew install abseil`.
 - Follow [Google C++ Style Guide](https://google.github.io/styleguide/cppguide.html).
-- Use [Meson WrapDB](https://mesonbuild.com/Wrapdb-projects.html) as much as possible.
+- Vendor dependencies other than Abseil and the existing platform libraries with
+  [FetchContent](https://cmake.org/cmake/help/latest/module/FetchContent.html),
+  pinned to hash-checked upstream release tarballs.
 
 ## Licensing
 
