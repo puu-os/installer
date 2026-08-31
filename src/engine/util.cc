@@ -400,8 +400,6 @@ std::optional<std::filesystem::path> FindInPath(std::string_view name) {
   return std::nullopt;
 }
 
-bool WhichExists(std::string_view name) { return FindInPath(name).has_value(); }
-
 StatusOr<std::string> ReadFirstLine(const std::filesystem::path& path) {
   std::ifstream file(path);
   if (!file.is_open()) {

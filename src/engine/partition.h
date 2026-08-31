@@ -35,8 +35,6 @@ std::filesystem::path PartitionPath(const std::filesystem::path& drive,
 StatusOr<EfiPartitionLayout> PartitionDrive(const std::filesystem::path& drive,
                                             const Config& config);
 
-StatusOr<uint64_t> MinTargetSizeBytes(const Config& config);
-
 // Reads the ESP geometry from the partition table on `drive`, for writing an
 // EFI boot entry when the layout was not captured during partitioning.
 StatusOr<EfiPartitionLayout> LoadPartitionLayout(

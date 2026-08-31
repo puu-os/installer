@@ -142,7 +142,7 @@ StatusOr<uint64_t> ValidateTargetDrive(const std::filesystem::path& drive,
                                    BusyReasonText(*busy));
   }
   PUU_ASSIGN_OR_RETURN(const uint64_t size, DriveSizeBytes(drive));
-  PUU_ASSIGN_OR_RETURN(const uint64_t minimum, MinTargetSizeBytes(config));
+  PUU_ASSIGN_OR_RETURN(const uint64_t minimum, config.MinTargetSizeBytes());
   if (size < minimum) {
     return FailedPreconditionError(
         "'{}' is too small: {} detected, need at least {} for EFI, root and "
@@ -228,10 +228,10 @@ StatusOr<std::filesystem::path> SystemdBootSource() {
 }
 
 Status StepDependencies(Runner& /*runner*/) {
-  std::vector<std::string_view> missing;
+  std::vector<std::string> missing;
   for (const std::string_view dependency : kDependencies) {
-    if (!WhichExists(dependency)) {
-      missing.push_back(dependency);
+    if (!FindInPath(dependency).has_value()) {
+      missing.emplace_back(dependency.data(), dependency.size());
     }
   }
   if (!missing.empty()) {

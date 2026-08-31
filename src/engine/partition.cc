@@ -442,10 +442,6 @@ StatusOr<EfiPartitionLayout> PartitionDrive(const std::filesystem::path& drive,
   return efi;
 }
 
-StatusOr<uint64_t> MinTargetSizeBytes(const Config& config) {
-  return config.MinTargetSizeBytes();
-}
-
 StatusOr<EfiPartitionLayout> LoadPartitionLayout(
     const std::filesystem::path& drive) {
   PUU_ASSIGN_OR_RETURN(const UniqueFd file, OpenDrive(drive, O_RDONLY));

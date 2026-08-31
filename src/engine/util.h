@@ -76,8 +76,6 @@ std::filesystem::path DefaultShell();
 // containing a slash is checked directly instead of searched.
 std::optional<std::filesystem::path> FindInPath(std::string_view name);
 
-bool WhichExists(std::string_view name);
-
 // Reads the first line of `path`, without the line terminator.
 StatusOr<std::string> ReadFirstLine(const std::filesystem::path& path);
 // Reads the first line of `path` into a SecretString, wiping file buffers.
