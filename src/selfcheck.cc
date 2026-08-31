@@ -13,11 +13,11 @@
 #include "config.h"
 #include "engine/context.h"
 #include "engine/le_bytes.h"
-#include "engine/partition.cc"
+#include "engine/partition.cc"  // NOLINT(bugprone-suspicious-include)
 #include "engine/partition.h"
-#include "engine/passwd.cc"
+#include "engine/passwd.cc"  // NOLINT(bugprone-suspicious-include)
 #include "engine/passwd.h"
-#include "engine/secureboot.cc"
+#include "engine/secureboot.cc"  // NOLINT(bugprone-suspicious-include)
 
 namespace puu::engine {
 namespace {
