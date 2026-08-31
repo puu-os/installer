@@ -498,11 +498,11 @@ StatusOr<std::optional<std::filesystem::path>> DefaultSourceImage(
 
 StatusOr<ImageRef> LoadTargetImgRef(const ImageManifest& manifest,
                                     const Config& config) {
-  if (!config.image.target_imgref.Empty()) {
-    return config.image.target_imgref;
-  }
   if (manifest.target_imgref.has_value()) {
     return *manifest.target_imgref;
+  }
+  if (!config.image.target_imgref.Empty()) {
+    return config.image.target_imgref;
   }
   return InvalidArgumentError("target image reference is empty");
 }
