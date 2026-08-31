@@ -46,7 +46,7 @@ class ValidatedString {
   [[nodiscard]] const std::string& Value() const { return value_; }
   [[nodiscard]] bool Empty() const { return value_.empty(); }
   friend bool operator==(const Derived& lhs, const Derived& rhs) {
-    return lhs.value() == rhs.value();
+    return lhs.value_ == rhs.value_;
   }
 
  private:

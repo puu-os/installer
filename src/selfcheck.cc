@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "base/status.h"
+#include "config.h"
 #include "engine/context.h"
 #include "engine/le_bytes.h"
 #include "engine/partition.cc"
@@ -112,6 +113,18 @@ void CheckSha512Crypt() {
   assert(*other != *hashed);
 }
 
+void CheckValidatedString() {
+  const StatusOr<Hostname> host1 = Hostname::Parse("host-a");
+  assert(host1.ok());
+  const StatusOr<Hostname> host2 = Hostname::Parse("host-a");
+  assert(host2.ok());
+  const StatusOr<Hostname> host3 = Hostname::Parse("host-b");
+  assert(host3.ok());
+  assert(*host1 == *host2);
+  assert(!(*host1 == *host3));
+  assert(*host1 != *host3);
+}
+
 }  // namespace
 }  // namespace puu::engine
 
@@ -119,6 +132,7 @@ int main() {
   puu::engine::CheckGptLayout();
   puu::engine::CheckAuthenticodeSkippedRanges();
   puu::engine::CheckSha512Crypt();
+  puu::engine::CheckValidatedString();
   std::puts("selfcheck: ok");
   return 0;
 }
