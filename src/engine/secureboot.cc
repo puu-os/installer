@@ -252,7 +252,7 @@ StatusOr<std::vector<uint8_t>> CertificateDer(const X509* certificate) {
 }
 
 StatusOr<KeyAndCert> LoadKeyAndCert(const KeyPair& pair) {
-  PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> key_pem,
+  PUU_ASSIGN_OR_RETURN(std::vector<uint8_t> key_pem,
                        ReadFileBytes(pair.key_path));
   PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> cert_pem,
                        ReadFileBytes(pair.certificate_path));
@@ -273,7 +273,7 @@ StatusOr<KeyAndCert> LoadKeyAndCert(const KeyPair& pair) {
     }
     return key;
   }();
-  OPENSSL_cleanse(const_cast<uint8_t*>(key_pem.data()), key_pem.size());
+  OPENSSL_cleanse(key_pem.data(), key_pem.size());
   if (!parsed_key.ok()) {
     return parsed_key.status();
   }
@@ -910,17 +910,16 @@ Status GenerateKeyPair(std::string_view common_name,
     return OpensslError("PEM_write_bio_X509");
   }
 
-  const auto bio_bytes = [](BIO* bio) -> std::span<const uint8_t> {
+  const auto bio_bytes = [](BIO* bio) -> std::span<uint8_t> {
     char* data = nullptr;
     const auto length = static_cast<int64_t>(BIO_get_mem_data(bio, &data));
     if (data == nullptr || length <= 0) {
       return {};
     }
-    return {reinterpret_cast<const uint8_t*>(data),
-            static_cast<size_t>(length)};
+    return {reinterpret_cast<uint8_t*>(data), static_cast<size_t>(length)};
   };
-  const std::span<const uint8_t> key_pem = bio_bytes(key_bio.get());
-  const std::span<const uint8_t> cert_pem = bio_bytes(cert_bio.get());
+  const std::span<uint8_t> key_pem = bio_bytes(key_bio.get());
+  const std::span<uint8_t> cert_pem = bio_bytes(cert_bio.get());
   Status written;
   if (key_pem.empty() || cert_pem.empty()) {
     written =
@@ -933,7 +932,7 @@ Status GenerateKeyPair(std::string_view common_name,
   }
 
   if (!key_pem.empty()) {
-    OPENSSL_cleanse(const_cast<uint8_t*>(key_pem.data()), key_pem.size());
+    OPENSSL_cleanse(key_pem.data(), key_pem.size());
   }
   return written;
 }
