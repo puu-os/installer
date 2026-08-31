@@ -564,7 +564,9 @@ Status VerifyImageDigest(const std::filesystem::path& source_image,
   PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> raw,
                        RawManifest(source_image, manifest));
   PUU_ASSIGN_OR_RETURN(const std::string actual, Sha256Hex(raw));
-  if (!absl::EqualsIgnoreCase(actual, expected.Hex())) {
+  const std::string_view expected_hex = expected.Hex();
+  if (!absl::EqualsIgnoreCase(actual, absl::string_view(expected_hex.data(),
+                                                        expected_hex.size()))) {
     return FailedPreconditionError(
         "image manifest digest mismatch for {}: expected sha256:{}, got "
         "sha256:{}",

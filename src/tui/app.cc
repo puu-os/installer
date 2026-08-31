@@ -188,7 +188,7 @@ ftxui::Color StepColor(StepState state) {
 }
 
 std::string ToLower(std::string_view text) {
-  return absl::AsciiStrToLower(text);
+  return absl::AsciiStrToLower(absl::string_view(text.data(), text.size()));
 }
 
 const std::vector<std::string>& LoweredTimezones() {

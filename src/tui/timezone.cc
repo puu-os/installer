@@ -14,6 +14,7 @@
 #include <absl/base/no_destructor.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_split.h>
+#include <absl/strings/string_view.h>
 
 #include "config.h"
 #include "tui/zone1970_tab.inc"
@@ -42,13 +43,14 @@ std::vector<std::string> ReadZoneTab() {
 
 std::vector<std::string> ParseZoneTab(std::string_view contents) {
   std::vector<std::string> zones;
-  for (std::string_view line : absl::StrSplit(contents, '\n')) {
+  const absl::string_view zone_tab(contents.data(), contents.size());
+  for (absl::string_view line : absl::StrSplit(zone_tab, '\n')) {
     line = absl::StripTrailingAsciiWhitespace(line);
     if (line.empty() || line.front() == '#') {
       continue;
     }
 
-    const std::vector<std::string_view> columns = absl::StrSplit(line, '\t');
+    const std::vector<absl::string_view> columns = absl::StrSplit(line, '\t');
 
     if (columns.size() < 3) {
       continue;
@@ -56,10 +58,11 @@ std::vector<std::string> ParseZoneTab(std::string_view contents) {
     if (columns[0].empty()) {
       continue;
     }
-    if (!Timezone::Validate(columns[2]).ok()) {
+    const std::string_view timezone(columns[2].data(), columns[2].size());
+    if (!Timezone::Validate(timezone).ok()) {
       continue;
     }
-    zones.emplace_back(columns[2]);
+    zones.emplace_back(timezone);
   }
 
   std::ranges::sort(zones);

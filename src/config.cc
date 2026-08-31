@@ -32,6 +32,7 @@
 #include <absl/status/status.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_split.h>
+#include <absl/strings/string_view.h>
 #include <fmt/format.h>
 #include <yaml-cpp/exceptions.h>
 #include <yaml-cpp/node/convert.h>
@@ -123,7 +124,8 @@ Status Hostname::Validate(std::string_view text) {
   if (text.empty() || text.size() > kHostnameMaxBytes) {
     return InvalidArgumentError("invalid hostname: \"{}\"", text);
   }
-  for (const std::string_view label : absl::StrSplit(text, '.')) {
+  const absl::string_view hostname(text.data(), text.size());
+  for (const absl::string_view label : absl::StrSplit(hostname, '.')) {
     if (label.empty() || label.size() > kLabelMaxBytes ||
         label.front() == '-' || label.back() == '-') {
       return InvalidArgumentError("invalid hostname: \"{}\"", text);
@@ -256,7 +258,8 @@ Status Timezone::Validate(std::string_view text) {
     return InvalidArgumentError("time zone must not be empty");
   }
 
-  for (const std::string_view component : absl::StrSplit(text, '/')) {
+  const absl::string_view timezone(text.data(), text.size());
+  for (const absl::string_view component : absl::StrSplit(timezone, '/')) {
     if (component.empty() || component == "." || component == "..") {
       return InvalidArgumentError("invalid time zone: \"{}\"", text);
     }
@@ -498,7 +501,8 @@ Status ParseOptionalInto(std::string_view path, const YAML::Node& node,
     return absl::OkStatus();
   }
   PUU_ASSIGN_OR_RETURN(const std::string text, ScalarText(path, node));
-  const std::string_view trimmed = absl::StripAsciiWhitespace(text);
+  const absl::string_view trimmed_absl = absl::StripAsciiWhitespace(text);
+  const std::string_view trimmed(trimmed_absl.data(), trimmed_absl.size());
   if (trimmed.empty()) {
     out->reset();
     return absl::OkStatus();

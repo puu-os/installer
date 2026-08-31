@@ -12,7 +12,8 @@
 namespace puu {
 
 Status ErrnoToStatus(int error_number, std::string_view operation) {
-  return absl::ErrnoToStatus(error_number, operation);
+  return absl::ErrnoToStatus(
+      error_number, absl::string_view(operation.data(), operation.size()));
 }
 
 Status WithContext(const Status& status, std::string_view context) {
