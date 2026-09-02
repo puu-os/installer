@@ -56,7 +56,7 @@ fi
 
 if command -v shellcheck >/dev/null 2>&1; then
   printf '==> shellcheck\n'
-  git ls-files '*.sh' | xargs shellcheck
+  git ls-files '*.sh' | xargs shellcheck -x
 else
   printf 'shellcheck not found; skipping the shell lint check\n' >&2
 fi

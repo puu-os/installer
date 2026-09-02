@@ -7,6 +7,7 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=project-version.sh
 source "$script_dir/project-version.sh"
 
@@ -60,7 +61,7 @@ if [[ -z "$version" ]]; then
 fi
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid version: $version"
 
-project_version="$(read_project_version)"
+project_version="$(read_project_version CMakeLists.txt)"
 [[ "$project_version" == "$version" ]] \
   || die "CMakeLists.txt version $project_version does not match $version"
 

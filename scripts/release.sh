@@ -8,6 +8,7 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=project-version.sh
 source "$script_dir/project-version.sh"
 
@@ -70,7 +71,7 @@ git tag -d "$signing_check_tag" >/dev/null
 signing_check_tag=""
 
 pkg=puu-installer
-cur_ver="$(read_project_version)"
+cur_ver="$(read_project_version CMakeLists.txt)"
 [[ -n "$cur_ver" ]] || die "cannot find version in CMakeLists.txt"
 
 [[ "$cur_ver" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] \
@@ -90,7 +91,7 @@ awk -v cur="$cur_ver" -v nxt="$next_ver" '
 	{ print }
 ' CMakeLists.txt > CMakeLists.txt.next
 mv CMakeLists.txt.next CMakeLists.txt
-[[ "$(read_project_version)" == "$next_ver" ]] \
+[[ "$(read_project_version CMakeLists.txt)" == "$next_ver" ]] \
 	|| die "failed to update version in CMakeLists.txt"
 
 ./scripts/ci.sh
