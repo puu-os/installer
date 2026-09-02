@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -113,6 +114,43 @@ void CheckSha512Crypt() {
   assert(*other != *hashed);
 }
 
+// The shipped Puu OS live configuration, verbatim. The installer rejects
+// unknown keys, so a schema that drifts from this file aborts the installer
+// before the UI ever appears.
+constexpr std::string_view kShippedMachineYaml = R"(identity:
+  keymap: us
+  locale: en_US.UTF-8
+  timezone: UTC
+  hostname: puu
+
+flatpak:
+  manifestPath: /usr/share/puu-os/flatpaks.list
+  syncHelper: /usr/libexec/puu-os/flatpak-sync
+  liveStore: /var/lib/flatpak
+
+k3s:
+  helper: /usr/libexec/puu-os/configure-k3s-cluster
+
+serialConsole:
+  x86_64: console=ttyS0,115200
+  aarch64: console=ttyAMA0,115200
+)";
+
+void CheckShippedConfigSchema() {
+  const StatusOr<Config> config = Config::ParseYaml(kShippedMachineYaml);
+  assert(config.ok());
+  assert(config->identity.hostname.Value() == "puu");
+  assert(config->flatpak.manifest_path == "/usr/share/puu-os/flatpaks.list");
+  assert(config->flatpak.sync_helper == "/usr/libexec/puu-os/flatpak-sync");
+  assert(config->k3s.helper == "/usr/libexec/puu-os/configure-k3s-cluster");
+  assert(config->serial_console.at("x86_64").Value() == "console=ttyS0,115200");
+
+  // Defaults must satisfy the schema too, and unknown keys must still fail.
+  assert(Config::Defaults().flatpak.manifest_path ==
+         "/usr/share/puu-os/flatpaks.list");
+  assert(!Config::ParseYaml("flatpak:\n  nosuchkey: x\n").ok());
+}
+
 void CheckValidatedString() {
   const StatusOr<Hostname> host1 = Hostname::Parse("host-a");
   assert(host1.ok());
@@ -132,6 +170,7 @@ int main() {
   puu::engine::CheckGptLayout();
   puu::engine::CheckAuthenticodeSkippedRanges();
   puu::engine::CheckSha512Crypt();
+  puu::engine::CheckShippedConfigSchema();
   puu::engine::CheckValidatedString();
   std::puts("selfcheck: ok");
   return 0;

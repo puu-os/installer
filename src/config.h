@@ -210,6 +210,9 @@ struct IdentityConfig {
 };
 
 struct FlatpakConfig {
+  // Ref list consulted inside the target to decide whether pre-seeding has any
+  // work to do. The sync helper reads the same file at its own default path.
+  std::filesystem::path manifest_path;
   std::filesystem::path sync_helper;
   std::filesystem::path live_store;
 };

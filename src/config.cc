@@ -699,10 +699,13 @@ const auto& Sections() {
           .key = "flatpak",
           .section = &Config::flatpak,
           .fields =
-              std::array{BindField("syncHelper", &FlatpakConfig::sync_helper,
-                                   "/usr/libexec/puu-os/flatpak-sync"),
-                         BindField("liveStore", &FlatpakConfig::live_store,
-                                   "/var/lib/flatpak")}},
+              std::array{
+                  BindField("manifestPath", &FlatpakConfig::manifest_path,
+                            "/usr/share/puu-os/flatpaks.list"),
+                  BindField("syncHelper", &FlatpakConfig::sync_helper,
+                            "/usr/libexec/puu-os/flatpak-sync"),
+                  BindField("liveStore", &FlatpakConfig::live_store,
+                            "/var/lib/flatpak")}},
       SectionEntry{
           .key = "models",
           .section = &Config::models,

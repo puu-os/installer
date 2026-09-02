@@ -701,6 +701,19 @@ Status StepStageHomedIdentity(Runner& runner) {
 
 Status StepFlatpakSeed(Runner& runner) {
   const FlatpakConfig& flatpak = runner.GetContext().config.flatpak;
+  if (!IsDirectory(flatpak.live_store)) {
+    // The helper installs nothing when the manifest lists no refs, so skip the
+    // chroot and the network round-trip entirely.
+    PUU_ASSIGN_OR_RETURN(const std::filesystem::path manifest,
+                         InDeployment(flatpak.manifest_path));
+    PUU_ASSIGN_OR_RETURN(const std::vector<std::string> refs,
+                         FlatpakManifestRefs(manifest));
+    if (refs.empty()) {
+      InstallationLogger()->info("flatpak-seed: no refs listed in {}",
+                                 flatpak.manifest_path.string());
+      return absl::OkStatus();
+    }
+  }
   return SeedStore(runner, flatpak.live_store, flatpak.sync_helper,
                    "var/lib/flatpak", "flatpak-seed");
 }
