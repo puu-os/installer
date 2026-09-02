@@ -84,6 +84,8 @@ struct Context {
     copy.image_version = image_version;
     copy.image_manifest = image_manifest;
     copy.drive = drive;
+    copy.drive_id = drive_id;
+    copy.drive_size = drive_size;
     copy.drive_label = drive_label;
     copy.username = username;
     copy.user_password = user_password.Clone();
@@ -105,6 +107,11 @@ struct Context {
   ImageManifest image_manifest;
 
   std::filesystem::path drive;
+  // Hardware identity and size recorded when the operator picked the drive.
+  // Re-checked before the partition table is written, because kernel names are
+  // reassigned when devices come and go.
+  std::string drive_id;
+  uint64_t drive_size = 0;
   std::optional<std::string> drive_label;
 
   std::optional<Username> username;

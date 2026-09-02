@@ -129,6 +129,17 @@ std::string DiskModel(udev_device* device, std::string_view sysname) {
   return SysfsAttr(sysname, "device/model").value_or(std::string());
 }
 
+// Prefers the WWN, which is globally unique and stable across reboots, and
+// falls back to the serial that udev synthesises for buses without one.
+std::string DiskIdentity(udev_device* device) {
+  for (const char* key : {"ID_WWN_WITH_EXTENSION", "ID_WWN", "ID_SERIAL"}) {
+    if (std::optional<std::string> value = UdevProperty(device, key)) {
+      return *value;
+    }
+  }
+  return {};
+}
+
 std::string DiskTransport(udev_device* device, std::string_view sysname) {
   if (std::optional<std::string> bus = UdevProperty(device, "ID_BUS")) {
     std::transform(bus->begin(), bus->end(), bus->begin(), [](char character) {
@@ -348,6 +359,7 @@ StatusOr<std::vector<Device>> ListDisks() {
     }
     disks.push_back(Device{
         .path = path,
+        .id = DiskIdentity(device.get()),
         .model = DiskModel(device.get(), sysname),
 
         .size = SysfsSizeBytes(sysname).value_or(0),
@@ -408,6 +420,23 @@ StatusOr<std::optional<BusyReason>> DiskBusy(const std::filesystem::path& drive,
                          fmt::format("open {} exclusively", devnode.string()));
   }
   return std::nullopt;
+}
+
+StatusOr<std::string> DriveIdentity(const std::filesystem::path& drive) {
+  const UdevPtr context(udev_new());
+  if (context == nullptr) {
+    return InternalError("failed to create a udev context");
+  }
+  const std::string name = drive.filename().string();
+  if (name.empty()) {
+    return InvalidArgumentError("invalid drive path '{}'", drive.string());
+  }
+  const UdevDevicePtr device(udev_device_new_from_subsystem_sysname(
+      context.get(), "block", name.c_str()));
+  if (device == nullptr) {
+    return NotFoundError("no udev record for '{}'", drive.string());
+  }
+  return DiskIdentity(device.get());
 }
 
 StatusOr<uint64_t> DriveSizeBytes(const std::filesystem::path& drive) {

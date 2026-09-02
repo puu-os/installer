@@ -117,6 +117,8 @@ enum class InstallState : std::uint8_t { kRunning, kSucceeded, kFailed };
 
 struct DriveEntry {
   std::filesystem::path path;
+  std::string id;
+  uint64_t size = 0;
   std::string label;
   bool busy = false;
   std::string busy_reason;
@@ -594,6 +596,8 @@ void Installer::Impl::RefreshDrives() {
             device.transport.empty() ? "-" : device.transport;
         entries.push_back(DriveEntry{
             .path = device.path,
+            .id = device.id,
+            .size = device.size,
             .label =
                 fmt::format("{} - {}, {}", device.path.string(), model, size),
             .busy = device.busy_reason.has_value(),
@@ -633,6 +637,10 @@ void Installer::Impl::OnDriveEnter() {
   }
   target_notice_.clear();
   context_.drive = drive.path;
+  // Recorded here so the install confirms it is erasing the disk shown on the
+  // review screen, not whatever later occupies this kernel name.
+  context_.drive_id = drive.id;
+  context_.drive_size = drive.size;
   context_.drive_label = drive.label;
   OpenModal(ModalKind::kWipe);
 }

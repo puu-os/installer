@@ -152,6 +152,31 @@ StatusOr<uint64_t> ValidateTargetDrive(const std::filesystem::path& drive,
   return size;
 }
 
+// Confirms the disk behind `context.drive` is still the one the operator
+// selected, then returns its size.
+//
+// The first call records the identity; later calls compare against it. A drive
+// udev cannot identify is matched on size alone, which is weaker but still
+// catches the common case of a swapped removable disk.
+StatusOr<uint64_t> ValidateSelectedDrive(Context& context) {
+  PUU_ASSIGN_OR_RETURN(const uint64_t size,
+                       ValidateTargetDrive(context.drive, context.config));
+  PUU_ASSIGN_OR_RETURN(const std::string id, DriveIdentity(context.drive));
+
+  if (context.drive_size == 0) {
+    context.drive_id = id;
+    context.drive_size = size;
+    return size;
+  }
+  if (id != context.drive_id || size != context.drive_size) {
+    return FailedPreconditionError(
+        "'{}' is no longer the disk that was selected; refusing to erase it. "
+        "Restart the installer and choose the target again",
+        context.drive.string());
+  }
+  return size;
+}
+
 StatusOr<ImageRef> SourceImageRef(const std::filesystem::path& source) {
   const std::string_view transport =
       IsDirectory(source) ? "dir" : "oci-archive";
@@ -281,8 +306,7 @@ Status StepCleanup(Runner& /*runner*/) { return CleanupMounts(); }
 
 Status StepValidateDrive(Runner& runner) {
   Context& context = runner.GetContext();
-  PUU_ASSIGN_OR_RETURN(const uint64_t size,
-                       ValidateTargetDrive(context.drive, context.config));
+  PUU_ASSIGN_OR_RETURN(const uint64_t size, ValidateSelectedDrive(context));
   if (context.source_image.has_value() &&
       !IsRegularFile(*context.source_image) &&
       !IsDirectory(*context.source_image)) {
@@ -323,8 +347,7 @@ Status StepVerifyImage(Runner& runner) {
 Status StepPartition(Runner& runner) {
   Context& context = runner.GetContext();
 
-  PUU_RETURN_IF_ERROR(
-      ValidateTargetDrive(context.drive, context.config).status());
+  PUU_RETURN_IF_ERROR(ValidateSelectedDrive(context).status());
   PUU_ASSIGN_OR_RETURN(context.parts.layout,
                        PartitionDrive(context.drive, context.config));
 

@@ -30,6 +30,9 @@ std::string_view BusyReasonText(BusyReason reason);
 
 struct Device {
   std::filesystem::path path;
+  // Stable hardware identity (WWN or serial), independent of the kernel name.
+  // Empty when udev reports neither.
+  std::string id;
   std::string model;
   uint64_t size = 0;
   // Connection bus, for example "NVME", "USB" or "SATA".
@@ -56,6 +59,14 @@ StatusOr<std::optional<BusyReason>> DiskBusy(const std::filesystem::path& drive,
                                              const BusySources& sources);
 
 StatusOr<uint64_t> DriveSizeBytes(const std::filesystem::path& drive);
+
+// Stable hardware identity of `drive`, matching `Device::id`.
+//
+// Kernel names such as /dev/sda are reassigned when devices are removed or
+// added, so a destructive operation must confirm the disk it is about to erase
+// is still the one the operator reviewed. Returns an empty string when udev
+// exposes no WWN or serial for the device.
+StatusOr<std::string> DriveIdentity(const std::filesystem::path& drive);
 
 StatusOr<std::string> CaptureUuid(const std::filesystem::path& partition);
 
