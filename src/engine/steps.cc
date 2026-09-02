@@ -81,14 +81,6 @@ Status WriteFile(const std::filesystem::path& path, std::string_view content,
       mode, extra_flags);
 }
 
-Status WriteFileIfAbsent(const std::filesystem::path& path,
-                         std::string_view content) {
-  if (Exists(path)) {
-    return absl::OkStatus();
-  }
-  return WriteFile(path, content, kPublicFileMode);
-}
-
 StatusOr<std::string> ReadFile(const std::filesystem::path& path) {
   std::ifstream file(path, std::ios::binary);
   if (!file.is_open()) {
@@ -555,24 +547,35 @@ Status StepFirstboot(Runner& runner) {
   const std::filesystem::path etc = deployment / "etc";
   PUU_RETURN_IF_ERROR(CreateDirectories(etc));
 
-  PUU_RETURN_IF_ERROR(WriteFileIfAbsent(
-      etc / "hostname", fmt::format("{}\n", identity.hostname.Value())));
+  // These overwrite whatever the image ships. Image defaults are placeholders;
+  // preserving them would silently discard the operator's choice and leave
+  // every machine on the same hostname.
+  PUU_RETURN_IF_ERROR(WriteFile(etc / "hostname",
+                                fmt::format("{}\n", identity.hostname.Value()),
+                                kPublicFileMode));
+  InstallationLogger()->info("staged hostname {} in /etc/hostname",
+                             identity.hostname.Value());
   if (!identity.locale.Empty()) {
-    PUU_RETURN_IF_ERROR(
-        WriteFileIfAbsent(etc / "locale.conf",
-                          fmt::format("LANG={}\n", identity.locale.Value())));
+    PUU_RETURN_IF_ERROR(WriteFile(
+        etc / "locale.conf", fmt::format("LANG={}\n", identity.locale.Value()),
+        kPublicFileMode));
+    InstallationLogger()->info("staged locale {} in /etc/locale.conf",
+                               identity.locale.Value());
   }
+
   const std::filesystem::path localtime = etc / "localtime";
-  if (!Exists(localtime)) {
-    std::error_code error;
-    std::filesystem::create_symlink(
-        std::filesystem::path("../usr/share/zoneinfo") /
-            identity.timezone.Value(),
-        localtime, error);
-    if (error) {
-      return FilesystemError(error,
-                             fmt::format("symlink {}", localtime.string()));
-    }
+  std::error_code error;
+  std::filesystem::remove(localtime, error);
+  if (error) {
+    return FilesystemError(error, fmt::format("remove {}", localtime.string()));
+  }
+  std::filesystem::create_symlink(
+      std::filesystem::path("../usr/share/zoneinfo") /
+          identity.timezone.Value(),
+      localtime, error);
+  if (error) {
+    return FilesystemError(error,
+                           fmt::format("symlink {}", localtime.string()));
   }
 
   if (!identity.keymap.Empty()) {
