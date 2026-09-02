@@ -52,9 +52,12 @@ Status BindMount(const std::filesystem::path& source,
 
 Status Unmount(const std::filesystem::path& target);
 
-// Bind-mounts /proc, /sys, /dev and /run under the target root, so helpers can
-// be run chrooted.
-Status MountChrootBinds();
+// Bind-mounts /proc, /sys, /dev and /run under `root`, so helpers can be run
+// chrooted there.
+//
+// `root` is the OSTree deployment directory, not the physical sysroot: only the
+// deployment has a /usr for the helper to execute from.
+Status MountChrootBinds(const std::filesystem::path& root);
 
 // Unmounts everything the installer mounted, deepest path first.
 Status CleanupMounts();

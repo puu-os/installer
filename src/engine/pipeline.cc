@@ -363,11 +363,10 @@ Status Unmount(const std::filesystem::path& target) {
   return ErrnoToStatus(error, fmt::format("unmount {}", target.string()));
 }
 
-Status MountChrootBinds() {
+Status MountChrootBinds(const std::filesystem::path& root) {
   PUU_ASSIGN_OR_RETURN(const Mounts mounts, Mounts::Read());
   for (const auto& [source, relative] : kChrootBindMounts) {
-    const std::filesystem::path target =
-        std::filesystem::path(kTargetMount) / relative;
+    const std::filesystem::path target = root / relative;
     PUU_RETURN_IF_ERROR(CreateDirectories(target));
     if (mounts.IsMountPoint(target)) {
       continue;

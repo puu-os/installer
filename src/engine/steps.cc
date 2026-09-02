@@ -183,21 +183,43 @@ StatusOr<ImageRef> SourceImageRef(const std::filesystem::path& source) {
   return ImageRef::Parse(fmt::format("{}:{}", transport, source.string()));
 }
 
+// Resolves an absolute in-target path against the OSTree deployment root.
+//
+// The physical sysroot has no /usr or /etc of its own; both live in the
+// deployment, so anything a chrooted helper will see must be resolved here.
+StatusOr<std::filesystem::path> InDeployment(
+    const std::filesystem::path& path) {
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
+                       DeploymentRoot(kTargetMount));
+  return deployment / path.relative_path();
+}
+
 Status RunChrootedHelper(const Runner& runner,
                          const std::filesystem::path& helper,
                          std::string heartbeat) {
-  CleanupStack binds;
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
+                       DeploymentRoot(kTargetMount));
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
 
-  binds.Push([] {
-    for (const std::string_view relative : {"run", "dev", "sys", "proc"}) {
-      Unmount(std::filesystem::path(kTargetMount) / relative).IgnoreError();
+  CleanupStack binds;
+  binds.Push([deployment] {
+    for (const std::string_view relative :
+         {"run", "dev", "sys", "proc", "var"}) {
+      Unmount(deployment / relative).IgnoreError();
     }
   });
-  PUU_RETURN_IF_ERROR(MountChrootBinds());
+
+  // Without this the helper writes into the deployment's empty /var, which
+  // ostree-prepare-root shadows with the stateroot's /var at boot, so every
+  // change would be silently discarded.
+  const std::filesystem::path var = deployment / "var";
+  PUU_RETURN_IF_ERROR(CreateDirectories(var));
+  PUU_RETURN_IF_ERROR(BindMount(state / "var", var));
+  PUU_RETURN_IF_ERROR(MountChrootBinds(deployment));
 
   MarkerProgress progress;
   Command command(helper.string());
-  command.Chroot(kTargetMount)
+  command.Chroot(deployment)
       .Heartbeat(kHeartbeatInterval, std::move(heartbeat))
       .Track(&progress,
              [&runner](double fraction) { runner.ReportProgress(fraction); });
@@ -215,7 +237,9 @@ Status SeedStore(const Runner& runner, const std::filesystem::path& live_store,
                                what);
     return absl::OkStatus();
   }
-  if (!IsRegularFile(InTarget(sync_helper))) {
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path helper,
+                       InDeployment(sync_helper));
+  if (!IsRegularFile(helper)) {
     InstallationLogger()->info("{}: nothing to pre-stage", what);
     return absl::OkStatus();
   }
@@ -228,8 +252,10 @@ Status SeedStore(const Runner& runner, const std::filesystem::path& live_store,
 }
 
 StatusOr<std::filesystem::path> SystemdBootSource() {
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
+                       DeploymentRoot(kTargetMount));
   const std::array<std::filesystem::path, 2> directories = {
-      std::filesystem::path(kTargetMount) / "usr/lib/systemd/boot/efi",
+      deployment / "usr/lib/systemd/boot/efi",
       std::filesystem::path("/usr/lib/systemd/boot/efi")};
   for (const std::filesystem::path& directory : directories) {
     std::error_code error;
@@ -576,9 +602,13 @@ Status StepConfigureK3s(Runner& runner) {
     args.push_back(k3s.server_url->Value());
   }
 
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
+                       DeploymentRoot(kTargetMount));
+
   CleanupStack cleanups;
   if (!context.k3s_token.Empty()) {
-    const std::filesystem::path token = InTarget(kK3sTokenInChroot);
+    const std::filesystem::path token =
+        deployment / std::filesystem::path(kK3sTokenInChroot).relative_path();
     PUU_RETURN_IF_ERROR(CreateDirectories(token.parent_path()));
 
     cleanups.Push([token] {
@@ -604,7 +634,7 @@ Status StepConfigureK3s(Runner& runner) {
   }
 
   Command command(k3s.helper.string());
-  PUU_RETURN_IF_ERROR(command.Args(args).Chroot(kTargetMount).Run());
+  PUU_RETURN_IF_ERROR(command.Args(args).Chroot(deployment).Run());
   context.k3s_token.Clear();
   InstallationLogger()->info("k3s cluster: staged {} configuration",
                              K3sRoleName(k3s.role));
