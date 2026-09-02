@@ -15,7 +15,7 @@ BUILDDIR="${SANITIZE_BUILDDIR:-build-sanitize}"
 # GCC 14 rejects Abseil's hash-table internals under -fsanitize=undefined
 # (function-pointer comparison stops being a constant expression), so using
 # the uninstrumented system package also keeps those internals out of reach.
-"$CMAKE" -S . -B "$BUILDDIR" -G Ninja -DPUU_SANITIZE=address,undefined \
+"$CMAKE" -S . -B "$BUILDDIR" -G Ninja --fresh -DPUU_SANITIZE=address,undefined \
   >/dev/null
 
 "$CMAKE" --build "$BUILDDIR"
