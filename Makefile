@@ -23,7 +23,7 @@ test: all ## Run the unit tests
 
 check: test ## Build and test
 
-ci: ## Run the local CI script
+ci: ## Build and test Linux arm64 and amd64 in containers
 	./scripts/ci.sh
 
 format: ## Reformat the sources in place
