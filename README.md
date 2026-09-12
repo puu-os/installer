@@ -67,10 +67,24 @@ Optional K3s token must be passed via `--k3s-token-file`.
 
 ## Development
 
+The installer targets Linux only. On both macOS and Linux, `make ci` builds
+and tests Linux arm64 and amd64 in containers, including sanitizer checks.
+`scripts/release.sh <next-version>` runs the same CI before committing and tagging.
+Git signing and `make publish` stay on the host; publishing requires `glab`.
+
+Install Apple `container` with Rosetta support on macOS, or Docker with
+cross-architecture emulation on Linux. Set `CONTAINER=podman` or
+`CONTAINER=docker` to override the engine; it must support both architectures.
+`CONTAINER_CPUS` and `CONTAINER_MEMORY` default to 8 and 16G per container.
+Build trees are isolated under `build/{arm64,amd64}` and
+`build-sanitize/{arm64,amd64}`. No native macOS build dependencies are needed.
+
+For native development on Linux (`make all`, `make test`, or `make tidy`):
+
+- Install the build dependencies listed in `Dockerfile`.
 - Install `abseil-cpp` for foundational C++ utilities:
   - Debian/Ubuntu: `libabsl-dev`.
   - Fedora: `abseil-cpp-devel`.
-  - macOS: `brew install abseil`.
 - Follow [Google C++ Style Guide](https://google.github.io/styleguide/cppguide.html).
 - Vendor dependencies other than Abseil and the existing platform libraries with
   [FetchContent](https://cmake.org/cmake/help/latest/module/FetchContent.html),
