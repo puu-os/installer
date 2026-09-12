@@ -431,8 +431,8 @@ Status StepBootcInstall(Runner& runner) {
   }
   if (!context.source_image.has_value() && !RunningInContainer()) {
     return FailedPreconditionError(
-        "no local bootc source image found; expected a filesystem labelled {}",
-        context.config.image.source_label.Value());
+        "no local bootc source image found; expected {}/image.tar",
+        context.config.image.source_mount.string());
   }
 
   CleanupStack cleanups;

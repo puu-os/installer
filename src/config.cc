@@ -493,6 +493,18 @@ Status ParseLabelInto(std::string_view path, const YAML::Node& node,
   return absl::OkStatus();
 }
 
+Status ParseLabelInto(std::string_view path, const YAML::Node& node,
+                      size_t max_bytes, std::optional<VolumeLabel>* out) {
+  if (node.IsNull()) {
+    out->reset();
+    return absl::OkStatus();
+  }
+  VolumeLabel label;
+  PUU_RETURN_IF_ERROR(ParseLabelInto(path, node, max_bytes, &label));
+  *out = std::move(label);
+  return absl::OkStatus();
+}
+
 template <typename T>
 Status ParseOptionalInto(std::string_view path, const YAML::Node& node,
                          std::optional<T>* out) {
@@ -601,8 +613,8 @@ FieldEntry<Struct> BindField(std::string_view key, Member Struct::* member,
       }};
 }
 
-template <size_t MaxBytes, typename Struct>
-FieldEntry<Struct> BindField(std::string_view key, VolumeLabel Struct::* member,
+template <size_t MaxBytes, typename Struct, typename Member>
+FieldEntry<Struct> BindField(std::string_view key, Member Struct::* member,
                              std::string_view def) {
   return {
       key, def,

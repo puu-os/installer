@@ -198,7 +198,7 @@ struct LabelsConfig {
 struct ImageConfig {
   ImageRef target_imgref;
   std::optional<Digest> expected_digest;
-  VolumeLabel source_label;  // at most 16 bytes.
+  std::optional<VolumeLabel> source_label;  // at most 16 bytes.
   std::filesystem::path source_mount;
 };
 

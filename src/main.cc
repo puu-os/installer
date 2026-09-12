@@ -58,9 +58,9 @@ StatusOr<engine::Context> BuildContext(const CommandLine& options) {
 
   if (!source_image.has_value() && !engine::RunningInContainer()) {
     return FailedPreconditionError(
-        "no local bootc source image found; expected "
-        "/dev/disk/by-label/{} or --source-image",
-        config.image.source_label.Value());
+        "no local bootc source image found; expected {}/image.tar "
+        "or --source-image",
+        config.image.source_mount.string());
   }
 
   SecretString k3s_token;

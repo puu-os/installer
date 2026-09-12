@@ -456,6 +456,13 @@ StatusOr<std::optional<std::filesystem::path>> DefaultSourceImage(
     return image;
   }
 
+  if (!config.image.source_label.has_value()) {
+    return NotFoundError(
+        "no local bootc source image at {}; "
+        "image.sourceLabel fallback is disabled",
+        image.string());
+  }
+
   PUU_ASSIGN_OR_RETURN(const Mounts mounts, Mounts::Read());
   if (mounts.IsMountPoint(mount_point)) {
     PUU_RETURN_IF_ERROR(Unmount(mount_point));
@@ -466,11 +473,11 @@ StatusOr<std::optional<std::filesystem::path>> DefaultSourceImage(
   }
 
   PUU_ASSIGN_OR_RETURN(const std::optional<std::filesystem::path> device,
-                       FindByLabel(config.image.source_label.Value()));
+                       FindByLabel(config.image.source_label->Value()));
   if (!device.has_value()) {
     return NotFoundError(
         "no filesystem labelled \"{}\" holds the install image",
-        config.image.source_label.Value());
+        config.image.source_label->Value());
   }
   PUU_ASSIGN_OR_RETURN(const std::string filesystem_type,
                        ProbeFilesystemType(*device));
