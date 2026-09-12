@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <ios>
@@ -61,8 +62,6 @@ constexpr std::string_view kBootcGraphRoot =
     "/run/puu-installer/target/var/tmp/puu-bootc-storage/containers/storage";
 constexpr std::string_view kContainersRunRoot = "/run/containers/storage";
 constexpr std::string_view kHostVarTmp = "/var/tmp";
-
-constexpr std::string_view kK3sTokenInChroot = "/etc/rancher/k3s/puu-token";
 
 bool IsRegularFile(const std::filesystem::path& path) {
   std::error_code error;
@@ -605,40 +604,66 @@ Status StepConfigureK3s(Runner& runner) {
     args.push_back(k3s.server_url->Value());
   }
 
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
-                       DeploymentRoot(kTargetMount));
-
-  CleanupStack cleanups;
-  if (!context.k3s_token.Empty()) {
-    const std::filesystem::path token =
-        deployment / std::filesystem::path(kK3sTokenInChroot).relative_path();
-    PUU_RETURN_IF_ERROR(CreateDirectories(token.parent_path()));
-
-    cleanups.Push([token] {
-      std::error_code error;
-      std::filesystem::remove(token, error);
-    });
-
-    std::string content;
-    content.reserve(context.k3s_token.Size() + 1);
-    content.assign(context.k3s_token.Value());
-    content.push_back('\n');
-    const Status written =
-        WriteFile(token, content, kSecretFileMode, O_NOFOLLOW);
-    OPENSSL_cleanse(content.data(), content.size());
-    PUU_RETURN_IF_ERROR(written);
-    args.emplace_back("--token-file");
-
-    args.emplace_back(kK3sTokenInChroot);
-  }
   if (k3s.node_name.has_value()) {
     args.emplace_back("--node-name");
     args.push_back(k3s.node_name->Value());
   }
 
-  Command command(k3s.helper.string());
-  PUU_RETURN_IF_ERROR(command.Args(args).Chroot(deployment).Run());
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
+                       DeploymentRoot(kTargetMount));
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
+  const std::filesystem::path deployment_var = deployment / "var";
+
+  Status result;
+  const auto record_cleanup = [&result](const Status& status) {
+    if (!status.ok()) {
+      InstallationLogger()->error("k3s cluster cleanup: {}", status.ToString());
+      result.Update(status);
+    }
+  };
+  {
+    CleanupStack cleanups;
+    result = [&]() -> Status {
+      PUU_RETURN_IF_ERROR(CreateDirectories(deployment_var));
+      PUU_RETURN_IF_ERROR(BindMount(state / "var", deployment_var));
+      cleanups.Push([&record_cleanup, deployment_var] {
+        record_cleanup(Unmount(deployment_var));
+      });
+
+      if (!context.k3s_token.Empty()) {
+        std::string directory = (state / "var/.puu-k3s-XXXXXX").string();
+        if (::mkdtemp(directory.data()) == nullptr) {
+          return ErrnoToStatus(errno, "create k3s token directory");
+        }
+        cleanups.Push([&record_cleanup, directory] {
+          std::error_code error;
+          std::filesystem::remove_all(directory, error);
+          record_cleanup(FilesystemError(
+              error, fmt::format("remove k3s token directory {}", directory)));
+        });
+
+        const std::filesystem::path token =
+            std::filesystem::path(directory) / "token";
+        std::string content;
+        content.reserve(context.k3s_token.Size() + 1);
+        content.assign(context.k3s_token.Value());
+        content.push_back('\n');
+        const Status written =
+            WriteFile(token, content, kSecretFileMode, O_NOFOLLOW | O_EXCL);
+        OPENSSL_cleanse(content.data(), content.size());
+        PUU_RETURN_IF_ERROR(written);
+        args.emplace_back("--token-file");
+        args.push_back(
+            (std::filesystem::path("/") / token.lexically_relative(state))
+                .string());
+      }
+
+      Command command(k3s.helper.string());
+      return command.Args(args).Chroot(deployment).Run();
+    }();
+  }
   context.k3s_token.Clear();
+  PUU_RETURN_IF_ERROR(result);
   InstallationLogger()->info("k3s cluster: staged {} configuration",
                              K3sRoleName(k3s.role));
   return absl::OkStatus();
