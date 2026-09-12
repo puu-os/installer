@@ -42,7 +42,6 @@ cleanup() {
 	fi
 	return "$status"
 }
-trap cleanup EXIT
 
 next_ver="${1:-}"
 [[ -n "$next_ver" ]] || die "usage: scripts/release.sh <next-version>"
@@ -58,6 +57,7 @@ branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" \
 
 [[ -z "$(git status --porcelain)" ]] \
 	|| die "working directory is not clean"
+trap cleanup EXIT
 
 [[ -z "$(git tag -l "$next_ver")" ]] \
 	|| die "tag $next_ver already exists"
