@@ -111,6 +111,11 @@ FetchContent_Declare(
   SYSTEM
   EXCLUDE_FROM_ALL)
 
+# yaml-cpp 0.8.0 requests policies older than CMake 4 supports.
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
+
 # fmt must precede spdlog so spdlog picks up the fmt::fmt target instead of
 # calling find_package(fmt).
 FetchContent_MakeAvailable(
