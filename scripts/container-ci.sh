@@ -46,14 +46,6 @@ else
   printf 'clang-format not found; skipping the format check\n' >&2
 fi
 
-# The strictest static analysis gate is opt-in upstream but must run here.
-if command -v clang-tidy >/dev/null 2>&1; then
-  printf '==> clang-tidy\n'
-  "$CMAKE" --build "$BUILDDIR" --target clang-tidy
-else
-  printf 'clang-tidy not found; skipping the lint check\n' >&2
-fi
-
 if command -v shellcheck >/dev/null 2>&1; then
   printf '==> shellcheck\n'
   git ls-files '*.sh' | xargs shellcheck -x

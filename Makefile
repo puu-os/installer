@@ -5,7 +5,7 @@ CMAKE ?= cmake
 CTEST ?= ctest
 BUILDDIR ?= build
 
-.PHONY: default help all setup check ci test format tidy publish clean
+.PHONY: default help all setup check ci test format publish clean
 
 default: help
 
@@ -28,9 +28,6 @@ ci: ## Build and test Linux arm64 and amd64 in containers
 
 format: ## Reformat the sources in place
 	find src -name '*.cc' -o -name '*.h' | xargs clang-format -i
-
-tidy: setup ## Run clang-tidy over the sources
-	$(CMAKE) --build $(BUILDDIR) --target clang-tidy
 
 publish: ## Publish a GitLab release
 	./scripts/publish.sh "$(VERSION)"

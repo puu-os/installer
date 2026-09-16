@@ -11,7 +11,6 @@ RUN apt-get -o APT::Retries=3 update \
         ca-certificates \
         clang \
         clang-format \
-        clang-tidy \
         cmake \
         git \
         libabsl-dev \

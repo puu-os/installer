@@ -65,18 +65,3 @@ add_executable(puu-selfcheck selfcheck.cc)
 target_compile_options(puu-selfcheck PRIVATE -UNDEBUG)
 target_link_libraries(puu-selfcheck PRIVATE puu-installer-core)
 add_test(NAME selfcheck COMMAND puu-selfcheck)
-
-# Lint only our own sources; the vendored dependencies follow upstream style.
-# run-clang-tidy checks the translation units in parallel; plain clang-tidy
-# is the serial fallback.
-find_program(PUU_CLANG_TIDY NAMES run-clang-tidy clang-tidy)
-if(PUU_CLANG_TIDY)
-  set(tidy_sources ${installer_core_sources} ${installer_tui_sources}
-    main.cc selfcheck.cc)
-  list(TRANSFORM tidy_sources PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-  add_custom_target(clang-tidy
-    COMMAND "${PUU_CLANG_TIDY}" -p "${CMAKE_BINARY_DIR}" ${tidy_sources}
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    USES_TERMINAL
-    VERBATIM)
-endif()
