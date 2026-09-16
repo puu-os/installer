@@ -1525,6 +1525,7 @@ void Installer::Impl::Post(std::function<void()> task) {
   const std::lock_guard<std::mutex> lock(screen_mutex_);
   if (screen_ != nullptr) {
     screen_->Post(std::move(task));
+    screen_->PostEvent(Event::Custom);
   }
 }
 
