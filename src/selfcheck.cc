@@ -18,6 +18,7 @@
 #include "engine/partition.h"
 #include "engine/passwd.cc"  // NOLINT(bugprone-suspicious-include)
 #include "engine/passwd.h"
+#include "engine/pipeline.h"
 #include "engine/secureboot.cc"  // NOLINT(bugprone-suspicious-include)
 
 namespace puu::engine {
@@ -163,6 +164,26 @@ void CheckValidatedString() {
   assert(*host1 != *host3);
 }
 
+void CheckMergeFstab() {
+  constexpr std::string_view kExisting =
+      "# /etc/fstab: static file system information.\n"
+      "/dev/root / auto rw 0 1\n"
+      "UUID=old-efi /efi vfat defaults 0 2\n"
+      "UUID=old-home /var/home ext4 defaults 0 2\n"
+      "/dev/sda4 /mnt/data ext4 defaults 0 2\n";
+  const std::string merged = MergeFstab(kExisting, "new-efi", "new-home");
+  assert(merged.find("/dev/root") == std::string::npos);
+  assert(merged.find("old-efi") == std::string::npos);
+  assert(merged.find("old-home") == std::string::npos);
+  assert(merged.find(
+             "PARTUUID=new-efi /efi vfat fmask=0077,dmask=0077,nofail 0 2\n") !=
+         std::string::npos);
+  assert(merged.find("UUID=new-home /var/home ext4 defaults 0 2\n") !=
+         std::string::npos);
+  assert(merged.find("/dev/sda4 /mnt/data ext4 defaults 0 2\n") !=
+         std::string::npos);
+}
+
 }  // namespace
 }  // namespace puu::engine
 
@@ -172,6 +193,7 @@ int main() {
   puu::engine::CheckSha512Crypt();
   puu::engine::CheckShippedConfigSchema();
   puu::engine::CheckValidatedString();
+  puu::engine::CheckMergeFstab();
   std::puts("selfcheck: ok");
   return 0;
 }

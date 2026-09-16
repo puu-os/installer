@@ -430,7 +430,8 @@ void CleanupStack::Release() { cleanups_.clear(); }
 
 std::string MergeFstab(std::string_view existing, std::string_view efi_partuuid,
                        std::string_view home_uuid) {
-  constexpr std::array<std::string_view, 2> kManaged = {"/efi", "/var/home"};
+  constexpr std::array<std::string_view, 3> kManaged = {"/", "/efi",
+                                                        "/var/home"};
   std::string merged;
   while (!existing.empty()) {
     const size_t newline = existing.find('\n');
