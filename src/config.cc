@@ -72,7 +72,8 @@ std::optional<char32_t> DecodeUtf8(std::string_view text, size_t& index) {
   }
   const size_t extra =
       lead < 0x80 ? 0 : static_cast<size_t>(std::countl_one(lead)) - 1;
-  char32_t code_point = extra == 0 ? lead : lead & (0xff >> (extra + 1));
+  char32_t code_point =
+      extra == 0 ? lead : static_cast<char32_t>(lead & (0xffu >> (extra + 1)));
   if (index + extra >= text.size()) {
     return std::nullopt;
   }
