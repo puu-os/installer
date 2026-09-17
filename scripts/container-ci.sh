@@ -56,7 +56,8 @@ fi
 printf '==> asan/ubsan build and test\n'
 # AddressSanitizer plus UndefinedBehaviorSanitizer over the same test suite;
 # halt_on_error makes the first finding fail the run.
-ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+# detect_leaks=0 disables LeakSanitizer, which is unsupported under QEMU user emulation.
+ASAN_OPTIONS=halt_on_error=1:detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
   "$(dirname "$0")/sanitize-ci.sh"
 
 printf 'local CI passed\n'
