@@ -357,6 +357,7 @@ class Installer::Impl {
 
   std::mutex screen_mutex_;
   ftxui::ScreenInteractive* screen_ = nullptr;
+  std::atomic<bool> stopping_ = false;
 
   int route_index_ = static_cast<int>(Route::kWelcome);
 
@@ -438,6 +439,7 @@ Trap Installer::Impl::Run() {
 
   screen.ForceHandleCtrlC(false);
   {
+    stopping_ = false;
     const std::lock_guard<std::mutex> lock(screen_mutex_);
     screen_ = &screen;
   }
@@ -451,11 +453,12 @@ Trap Installer::Impl::Run() {
   StartTicker();
 
   const auto cleanup = [this] {
+    stopping_ = true;
+    StopWorkers();
     {
       const std::lock_guard<std::mutex> lock(screen_mutex_);
       screen_ = nullptr;
     }
-    StopWorkers();
     WipeString(&password_);
     WipeString(&repeated_password_);
   };
@@ -1622,6 +1625,7 @@ void Installer::Impl::OnTick() {
 
 void Installer::Impl::SetTrap(Trap trap) {
   trap_ = trap;
+  stopping_ = true;
 
   ticker_stop_ = true;
   if (ticker_thread_.joinable()) {
@@ -1634,8 +1638,11 @@ void Installer::Impl::SetTrap(Trap trap) {
 }
 
 void Installer::Impl::Post(std::function<void()> task) {
+  if (stopping_.load()) {
+    return;
+  }
   const std::lock_guard<std::mutex> lock(screen_mutex_);
-  if (screen_ != nullptr) {
+  if (!stopping_.load() && screen_ != nullptr) {
     screen_->Post(std::move(task));
     screen_->PostEvent(Event::Custom);
   }
