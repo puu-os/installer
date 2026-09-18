@@ -20,6 +20,7 @@
 #include "engine/passwd.h"
 #include "engine/pipeline.h"
 #include "engine/secureboot.cc"  // NOLINT(bugprone-suspicious-include)
+#include "engine/util.h"
 
 namespace puu::engine {
 namespace {
@@ -184,6 +185,14 @@ void CheckMergeFstab() {
          std::string::npos);
 }
 
+void CheckMounts() {
+  const auto mounts = Mounts::Read();
+  assert(mounts.ok());
+  assert(mounts->IsMountPoint("/") || mounts->IsMountPoint("/proc"));
+  const auto sources = MountedSources();
+  assert(sources.ok());
+}
+
 }  // namespace
 }  // namespace puu::engine
 
@@ -194,6 +203,7 @@ int main() {
   puu::engine::CheckShippedConfigSchema();
   puu::engine::CheckValidatedString();
   puu::engine::CheckMergeFstab();
+  puu::engine::CheckMounts();
   std::puts("selfcheck: ok");
   return 0;
 }

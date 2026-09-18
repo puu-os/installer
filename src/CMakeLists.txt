@@ -52,6 +52,7 @@ target_link_libraries(puu-installer-core PUBLIC
   OpenSSL::Crypto
   PkgConfig::BLKID
   PkgConfig::UDEV
+  PkgConfig::MOUNT
   Threads::Threads)
 
 add_executable(puu-installer main.cc ${installer_tui_sources})

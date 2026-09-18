@@ -4,6 +4,7 @@
 #include "engine/pipeline.h"
 
 #include <fcntl.h>
+#include <libmount/libmount.h>
 #include <sched.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -37,6 +38,14 @@
 
 namespace puu::engine {
 namespace {
+struct MountContextDeleter {
+  void operator()(libmnt_context* cxt) const {
+    if (cxt != nullptr) {
+      mnt_free_context(cxt);
+    }
+  }
+};
+using UniqueMountContext = std::unique_ptr<libmnt_context, MountContextDeleter>;
 
 constexpr std::array<std::pair<std::string_view, std::string_view>, 4>
     kChrootBindMounts = {
@@ -322,45 +331,132 @@ Status MountTarget(const std::filesystem::path& source,
                                target.string());
     return absl::OkStatus();
   }
-  const std::string type(filesystem_type);
-  const std::string data(options);
-  if (::mount(source.c_str(), target.c_str(), type.c_str(), 0,
-              data.empty() ? nullptr : data.c_str()) != 0) {
-    const int error = errno;
+
+  UniqueMountContext cxt(mnt_new_context());
+  if (!cxt) {
+    return InternalError("failed to allocate mount context");
+  }
+  mnt_context_force_unrestricted(cxt.get());
+  if (mnt_context_set_source(cxt.get(), source.c_str()) != 0 ||
+      mnt_context_set_target(cxt.get(), target.c_str()) != 0) {
+    return InternalError("failed to configure mount of {} on {}",
+                         source.string(), target.string());
+  }
+  if (!filesystem_type.empty()) {
+    const std::string type(filesystem_type);
+    if (mnt_context_set_fstype(cxt.get(), type.c_str()) != 0) {
+      return InternalError("failed to set fstype {} for mount", type);
+    }
+  }
+  if (!options.empty()) {
+    const std::string opt(options);
+    if (mnt_context_set_options(cxt.get(), opt.c_str()) != 0) {
+      return InternalError("failed to set options {} for mount", opt);
+    }
+  }
+
+  const int rc = mnt_context_mount(cxt.get());
+  if (rc == 0) {
+    return absl::OkStatus();
+  }
+  char error_buf[512] = {};
+  mnt_context_get_excode(cxt.get(), rc, error_buf, sizeof(error_buf));
+  const int error = mnt_context_get_syscall_errno(cxt.get());
+  if (error_buf[0] != '\0') {
+    return InternalError("failed to mount {} at {}: {}", source.string(),
+                         target.string(), error_buf);
+  }
+  if (error != 0) {
     return ErrnoToStatus(
         error, fmt::format("mount {} at {}", source.string(), target.string()));
   }
-  return absl::OkStatus();
+  return InternalError("failed to mount {} at {}: code {}", source.string(),
+                       target.string(), rc);
 }
 
 Status BindMount(const std::filesystem::path& source,
                  const std::filesystem::path& target) {
-  if (::mount(source.c_str(), target.c_str(), nullptr, MS_BIND | MS_REC,
-              nullptr) != 0) {
-    const int error = errno;
+  UniqueMountContext cxt(mnt_new_context());
+  if (!cxt) {
+    return InternalError("failed to allocate mount context");
+  }
+  mnt_context_force_unrestricted(cxt.get());
+  if (mnt_context_set_source(cxt.get(), source.c_str()) != 0 ||
+      mnt_context_set_target(cxt.get(), target.c_str()) != 0 ||
+      mnt_context_set_options(cxt.get(), "rbind") != 0) {
+    return InternalError("failed to configure bind-mount from {} to {}",
+                         source.string(), target.string());
+  }
+  const int rc = mnt_context_mount(cxt.get());
+  if (rc == 0) {
+    return absl::OkStatus();
+  }
+  char error_buf[512] = {};
+  mnt_context_get_excode(cxt.get(), rc, error_buf, sizeof(error_buf));
+  const int error = mnt_context_get_syscall_errno(cxt.get());
+  if (error_buf[0] != '\0') {
+    return InternalError("failed to bind-mount {} at {}: {}", source.string(),
+                         target.string(), error_buf);
+  }
+  if (error != 0) {
     return ErrnoToStatus(error, fmt::format("bind-mount {} at {}",
                                             source.string(), target.string()));
   }
-  return absl::OkStatus();
+  return InternalError("failed to bind-mount {} at {}: code {}",
+                       source.string(), target.string(), rc);
 }
 
 Status Unmount(const std::filesystem::path& target) {
-  if (::umount2(target.c_str(), 0) == 0) {
-    return absl::OkStatus();
-  }
-  int error = errno;
+  struct UmountAttempt {
+    int rc;
+    int error;
+    std::string message;
+  };
 
-  if (error == EINVAL || error == ENOENT) {
+  auto attempt = [](const std::filesystem::path& path,
+                    bool lazy) -> UmountAttempt {
+    UniqueMountContext cxt(mnt_new_context());
+    if (!cxt) {
+      return {-1, ENOMEM, "failed to allocate mount context"};
+    }
+    mnt_context_force_unrestricted(cxt.get());
+    if (mnt_context_set_target(cxt.get(), path.c_str()) != 0) {
+      return {-1, EINVAL, "failed to configure umount target"};
+    }
+    if (lazy) {
+      mnt_context_enable_lazy(cxt.get(), 1);
+    }
+    const int rc = mnt_context_umount(cxt.get());
+    const int err = mnt_context_get_syscall_errno(cxt.get());
+    char error_buf[512] = {};
+    mnt_context_get_excode(cxt.get(), rc, error_buf, sizeof(error_buf));
+    return {rc, err, std::string(error_buf)};
+  };
+
+  UmountAttempt res = attempt(target, false);
+  if (res.rc == 0) {
     return absl::OkStatus();
   }
-  if (error == EBUSY) {
+  if (res.error == EINVAL || res.error == ENOENT) {
+    return absl::OkStatus();
+  }
+  if (res.error == EBUSY) {
     InstallationLogger()->warn("{} is busy, detaching lazily", target.string());
-    if (::umount2(target.c_str(), MNT_DETACH) == 0) {
+    res = attempt(target, true);
+    if (res.rc == 0) {
       return absl::OkStatus();
     }
-    error = errno;
   }
-  return ErrnoToStatus(error, fmt::format("unmount {}", target.string()));
+
+  if (!res.message.empty()) {
+    return InternalError("failed to unmount {}: {}", target.string(),
+                         res.message);
+  }
+  if (res.error != 0) {
+    return ErrnoToStatus(res.error, fmt::format("unmount {}", target.string()));
+  }
+  return InternalError("failed to unmount {}: code {}", target.string(),
+                       res.rc);
 }
 
 Status MountChrootBinds(const std::filesystem::path& root) {

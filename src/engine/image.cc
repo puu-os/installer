@@ -482,19 +482,8 @@ StatusOr<std::optional<std::filesystem::path>> DefaultSourceImage(
   PUU_ASSIGN_OR_RETURN(const std::string filesystem_type,
                        ProbeFilesystemType(*device));
 
-  std::filesystem::create_directories(mount_point, error);
-  if (error) {
-    return ErrnoToStatus(error.value(),
-                         fmt::format("create {}", mount_point.string()));
-  }
-
-  if (::mount(device->c_str(), mount_point.c_str(), filesystem_type.c_str(),
-              MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, nullptr) != 0) {
-    const int failure = errno;
-    return ErrnoToStatus(
-        failure,
-        fmt::format("mount {} on {}", device->string(), mount_point.string()));
-  }
+  PUU_RETURN_IF_ERROR(MountTarget(*device, mount_point, filesystem_type,
+                                  "ro,nosuid,nodev,noexec"));
 
   if (!std::filesystem::is_regular_file(image, error)) {
     Unmount(mount_point).IgnoreError();

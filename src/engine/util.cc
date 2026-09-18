@@ -4,6 +4,7 @@
 #include "engine/util.h"
 
 #include <fcntl.h>
+#include <libmount/libmount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -11,7 +12,6 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
-#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -47,9 +47,34 @@
 namespace puu::engine {
 namespace {
 
-constexpr std::string_view kMountInfoPath = "/proc/self/mountinfo";
+struct MountTableDeleter {
+  void operator()(libmnt_table* tb) const {
+    if (tb != nullptr) {
+      mnt_free_table(tb);
+    }
+  }
+};
+using UniqueMountTable = std::unique_ptr<libmnt_table, MountTableDeleter>;
 
-constexpr size_t kMountPointField = 4;
+struct MountIterDeleter {
+  void operator()(libmnt_iter* itr) const {
+    if (itr != nullptr) {
+      mnt_free_iter(itr);
+    }
+  }
+};
+using UniqueMountIter = std::unique_ptr<libmnt_iter, MountIterDeleter>;
+
+StatusOr<UniqueMountTable> ReadProcMountTable() {
+  UniqueMountTable table(mnt_new_table());
+  if (!table) {
+    return InternalError("failed to allocate mount table");
+  }
+  if (mnt_table_parse_file(table.get(), "/proc/self/mountinfo") != 0) {
+    return InternalError("failed to parse /proc/self/mountinfo");
+  }
+  return table;
+}
 
 bool IsExecutable(const std::filesystem::path& path) {
   struct stat info = {};
@@ -58,75 +83,6 @@ bool IsExecutable(const std::filesystem::path& path) {
   }
   return S_ISREG(info.st_mode) &&
          ((info.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0U);
-}
-
-std::string UnescapeMountInfo(std::string_view field) {
-  std::string out;
-  out.reserve(field.size());
-  for (size_t i = 0; i < field.size(); ++i) {
-    if (field[i] != '\\' || i + 3 >= field.size()) {
-      out.push_back(field[i]);
-      continue;
-    }
-    const std::string_view digits = field.substr(i + 1, 3);
-    unsigned value = 0;
-    const auto [end, error] =
-        std::from_chars(digits.data(), digits.data() + digits.size(), value, 8);
-    if (error != std::errc() || end != digits.data() + digits.size()) {
-      out.push_back(field[i]);
-      continue;
-    }
-    out.push_back(static_cast<char>(value));
-    i += 3;
-  }
-  return out;
-}
-
-struct MountInfoEntry {
-  std::filesystem::path mount_point;
-  std::filesystem::path source;
-};
-
-std::vector<MountInfoEntry> ParseMountInfoEntries(std::string_view text) {
-  std::vector<MountInfoEntry> entries;
-  while (!text.empty()) {
-    const size_t newline = text.find('\n');
-    const std::string_view line = text.substr(0, newline);
-    text = newline == std::string_view::npos ? std::string_view()
-                                             : text.substr(newline + 1);
-
-    std::string_view rest = line;
-    std::string_view mount_point;
-    for (size_t index = 0; index <= kMountPointField; ++index) {
-      const size_t start = rest.find_first_not_of(" \t");
-      if (start == std::string_view::npos) {
-        mount_point = {};
-        break;
-      }
-      rest.remove_prefix(start);
-      const size_t end = rest.find_first_of(" \t");
-      mount_point = rest.substr(0, end);
-      rest =
-          end == std::string_view::npos ? std::string_view() : rest.substr(end);
-    }
-    if (mount_point.empty()) {
-      continue;
-    }
-
-    std::string_view source;
-    const size_t separator = line.rfind(" - ");
-    if (separator != std::string_view::npos) {
-      rest = line.substr(separator + 3);
-      const size_t fstype_end = rest.find(' ');
-      if (fstype_end != std::string_view::npos) {
-        rest.remove_prefix(fstype_end + 1);
-        source = rest.substr(0, rest.find(' '));
-      }
-    }
-    entries.push_back(
-        {UnescapeMountInfo(mount_point), UnescapeMountInfo(source)});
-  }
-  return entries;
 }
 
 }  // namespace
@@ -229,29 +185,21 @@ Status ReplaceFileBytes(const std::filesystem::path& path,
   return absl::OkStatus();
 }
 
-namespace {
-
-StatusOr<std::string> ReadMountInfo() {
-  std::ifstream file{std::string(kMountInfoPath)};
-  if (!file.is_open()) {
-    return InternalError("failed to open {}", kMountInfoPath);
-  }
-  std::string text{std::istreambuf_iterator<char>(file),
-                   std::istreambuf_iterator<char>()};
-  if (file.bad()) {
-    return InternalError("failed to read {}", kMountInfoPath);
-  }
-  return text;
-}
-
-}  // namespace
-
 StatusOr<std::set<std::filesystem::path>> MountedSources() {
-  PUU_ASSIGN_OR_RETURN(const std::string text, ReadMountInfo());
+  PUU_ASSIGN_OR_RETURN(const UniqueMountTable table, ReadProcMountTable());
+  UniqueMountIter itr(mnt_new_iter(MNT_ITER_FORWARD));
+  if (!itr) {
+    return InternalError("failed to allocate mount iterator");
+  }
   std::set<std::filesystem::path> sources;
-  for (const MountInfoEntry& entry : ParseMountInfoEntries(text)) {
-    if (entry.source.native().starts_with("/dev/")) {
-      sources.insert(Canonical(entry.source));
+  libmnt_fs* fs = nullptr;
+  while (mnt_table_next_fs(table.get(), itr.get(), &fs) == 0) {
+    const char* src = mnt_fs_get_srcpath(fs);
+    if (src == nullptr) {
+      src = mnt_fs_get_source(fs);
+    }
+    if (src != nullptr && std::string_view(src).starts_with("/dev/")) {
+      sources.insert(Canonical(src));
     }
   }
   return sources;
@@ -507,14 +455,6 @@ StatusOr<std::string> Sha256Hex(std::span<const uint8_t> data) {
 
 namespace {
 
-std::vector<std::filesystem::path> ParseMountInfo(std::string_view text) {
-  std::vector<std::filesystem::path> mount_points;
-  for (MountInfoEntry& entry : ParseMountInfoEntries(text)) {
-    mount_points.push_back(std::move(entry.mount_point));
-  }
-  return mount_points;
-}
-
 std::vector<std::filesystem::path> MountPointsBelow(
     const std::vector<std::filesystem::path>& mount_points,
     const std::filesystem::path& root) {
@@ -535,9 +475,19 @@ std::vector<std::filesystem::path> MountPointsBelow(
 }  // namespace
 
 StatusOr<Mounts> Mounts::Read() {
-  PUU_ASSIGN_OR_RETURN(const std::string text, ReadMountInfo());
+  PUU_ASSIGN_OR_RETURN(const UniqueMountTable table, ReadProcMountTable());
+  UniqueMountIter itr(mnt_new_iter(MNT_ITER_FORWARD));
+  if (!itr) {
+    return InternalError("failed to allocate mount iterator");
+  }
   Mounts mounts;
-  mounts.mount_points_ = ParseMountInfo(text);
+  libmnt_fs* fs = nullptr;
+  while (mnt_table_next_fs(table.get(), itr.get(), &fs) == 0) {
+    const char* target = mnt_fs_get_target(fs);
+    if (target != nullptr && *target != '\0') {
+      mounts.mount_points_.emplace_back(target);
+    }
+  }
   return mounts;
 }
 
