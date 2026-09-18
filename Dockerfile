@@ -15,6 +15,7 @@ RUN apt-get -o APT::Retries=3 update \
         git \
         libabsl-dev \
         libblkid-dev \
+        libmount-dev \
         libssl-dev \
         libudev-dev \
         ninja-build \
