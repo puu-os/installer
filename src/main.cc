@@ -112,10 +112,9 @@ int RunInstaller(engine::Context context) {
 
       case tui::Trap::kShell: {
         const std::filesystem::path shell = engine::DefaultShell();
-        const Status status = engine::Command(shell.string()).Run();
+        const Status status = engine::RunInteractive(shell);
         if (!status.ok()) {
-          spdlog::warn("recovery shell exited abnormally: {}",
-                       status.message());
+          spdlog::warn("recovery shell exited: {}", status.message());
         }
 
         installer = tui::Installer(std::move(installer).IntoContext());

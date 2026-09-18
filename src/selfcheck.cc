@@ -10,8 +10,12 @@
 #include <utility>
 #include <vector>
 
+#include <absl/strings/match.h>
+#include <spdlog/spdlog.h>
+
 #include "base/status.h"
 #include "config.h"
+#include "engine/command.h"
 #include "engine/context.h"
 #include "engine/le_bytes.h"
 #include "engine/partition.cc"  // NOLINT(bugprone-suspicious-include)
@@ -185,6 +189,35 @@ void CheckMergeFstab() {
          std::string::npos);
 }
 
+void CheckSpawnReportsPreExecFailure() {
+  const Status status = Command("/nonexistent/puu-selfcheck-missing").Run();
+  assert(!status.ok());
+  // The failing step is named, rather than being folded into the child's exit
+  // status the way a write to stdout before _exit would be.
+  assert(absl::StrContains(status.message(), "execve"));
+}
+
+void CheckNewPidNamespace() {
+  const Status status = Command("/bin/sh")
+                            .Args({"-c", "test \"$$\" -eq 1"})
+                            .NewPidNamespace()
+                            .Run();
+  // Either the namespace was created and the shell saw itself as process 1, or
+  // creating it was refused and that specific step is reported.
+  assert(status.ok() || absl::StrContains(status.message(), "unshare"));
+}
+
+void CheckRunInteractive() {
+  const Status ok_status = RunInteractive("/bin/true");
+  assert(ok_status.ok());
+
+  const Status fail_status = RunInteractive("/bin/false");
+  assert(!fail_status.ok());
+
+  const Status missing_status = RunInteractive("/nonexistent/puu-test-missing");
+  assert(!missing_status.ok());
+}
+
 void CheckMounts() {
   const auto mounts = Mounts::Read();
   assert(mounts.ok());
@@ -197,12 +230,16 @@ void CheckMounts() {
 }  // namespace puu::engine
 
 int main() {
+  spdlog::default_logger()->set_level(spdlog::level::off);
   puu::engine::CheckGptLayout();
   puu::engine::CheckAuthenticodeSkippedRanges();
   puu::engine::CheckSha512Crypt();
   puu::engine::CheckShippedConfigSchema();
   puu::engine::CheckValidatedString();
   puu::engine::CheckMergeFstab();
+  puu::engine::CheckSpawnReportsPreExecFailure();
+  puu::engine::CheckNewPidNamespace();
+  puu::engine::CheckRunInteractive();
   puu::engine::CheckMounts();
   std::puts("selfcheck: ok");
   return 0;

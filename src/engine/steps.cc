@@ -47,8 +47,8 @@
 namespace puu::engine {
 namespace {
 
-constexpr std::array<std::string_view, 5> kDependencies = {
-    "bootc", "mke2fs", "mkfs.fat", "mkfs.xfs", "unshare"};
+constexpr std::array<std::string_view, 4> kDependencies = {
+    "bootc", "mke2fs", "mkfs.fat", "mkfs.xfs"};
 
 constexpr std::chrono::seconds kDeviceTimeout{30};
 constexpr std::chrono::seconds kHeartbeatInterval{30};
@@ -449,8 +449,7 @@ Status StepBootcInstall(Runner& runner) {
                   kBootcGraphRoot, kContainersRunRoot),
       kPublicFileMode));
 
-  std::vector<std::string> args = {"--pid", "--fork",  "--mount-proc", "--",
-                                   "bootc", "install", "to-filesystem"};
+  std::vector<std::string> args = {"install", "to-filesystem"};
   if (context.source_image.has_value()) {
     ImageRef source;
     if (context.image_manifest.source_imgref.has_value()) {
@@ -480,8 +479,9 @@ Status StepBootcInstall(Runner& runner) {
       "bootc image deployment may take several minutes without native "
       "progress output");
 
-  Command command("unshare");
+  Command command("bootc");
   command.Args(args)
+      .NewPidNamespace()
       .Env("CONTAINERS_STORAGE_CONF", std::string(kBootcStorageConf))
       .Env("TMPDIR", std::string(kHostVarTmp))
       .Heartbeat(kHeartbeatInterval,

@@ -33,6 +33,10 @@ class Command {
   // Runs the child inside `root` with the working directory set to "/".
   Command& Chroot(std::filesystem::path root);
 
+  // Runs the child as process 1 of a new PID and mount namespace, over a
+  // freshly mounted /proc, so the whole process tree it spawns dies with it.
+  Command& NewPidNamespace();
+
   // Logs `message` every `interval` while the child is still running, so a slow
   // step does not look hung.
   Command& Heartbeat(std::chrono::seconds interval, std::string message);
@@ -52,6 +56,7 @@ class Command {
   std::vector<std::string> args_;
   std::vector<std::pair<std::string, std::string>> env_;
   std::optional<std::filesystem::path> chroot_;
+  bool new_pid_namespace_ = false;
   std::optional<std::chrono::seconds> heartbeat_interval_;
   std::string heartbeat_message_;
   ProgressSource* progress_source_ = nullptr;
@@ -62,6 +67,11 @@ class Command {
 // short queries such as reading a filesystem UUID.
 StatusOr<std::string> CaptureOutput(std::string_view program,
                                     const std::vector<std::string>& args);
+
+// Runs an interactive command with stdin, stdout, and stderr connected directly
+// to the controlling terminal, without background session detachment.
+Status RunInteractive(const std::filesystem::path& program,
+                      const std::vector<std::string>& args = {});
 
 }  // namespace puu::engine
 

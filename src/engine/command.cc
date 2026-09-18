@@ -5,8 +5,10 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <sys/mount.h>
 #include <sys/poll.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -51,6 +53,53 @@ constexpr size_t kOutputTailLines = 12;
 
 constexpr int kSpawnFailureStatus = 127;
 
+// A step the child performs between fork and exec. Its failure is reported to
+// the parent over a dedicated pipe, because a forked child of a threaded
+// process may not allocate and so cannot format a message itself.
+enum class ChildStep : std::uint8_t {
+  kSetsid,
+  kOpenNull,
+  kDup2,
+  kUnshare,
+  kFork,
+  kMountPrivate,
+  kMountProc,
+  kChroot,
+  kChdir,
+  kExec,
+};
+
+struct ChildFailure {
+  ChildStep step = ChildStep::kExec;
+  int error = 0;
+};
+
+std::string_view ChildStepName(ChildStep step) {
+  switch (step) {
+    case ChildStep::kSetsid:
+      return "setsid";
+    case ChildStep::kOpenNull:
+      return "open /dev/null";
+    case ChildStep::kDup2:
+      return "dup2";
+    case ChildStep::kUnshare:
+      return "unshare(CLONE_NEWPID | CLONE_NEWNS)";
+    case ChildStep::kFork:
+      return "fork into PID namespace";
+    case ChildStep::kMountPrivate:
+      return "mount / private";
+    case ChildStep::kMountProc:
+      return "mount /proc";
+    case ChildStep::kChroot:
+      return "chroot";
+    case ChildStep::kChdir:
+      return "chdir /";
+    case ChildStep::kExec:
+      return "execve";
+  }
+  return "spawn";
+}
+
 constexpr std::chrono::milliseconds kProgressSampleInterval{500};
 
 constexpr int kPollTimeoutMs = 200;
@@ -91,7 +140,137 @@ struct Child {
   int output_fd = -1;
 };
 
+// Everything the child needs, resolved before the fork so that the child side
+// only makes async-signal-safe calls.
+struct ChildParams {
+  int output_read_fd = -1;
+  int output_write_fd = -1;
+  int status_fd = -1;
+  const char* program = nullptr;
+  char* const* argv = nullptr;
+  char* const* envp = nullptr;
+  const char* chroot_dir = nullptr;
+  bool new_pid_namespace = false;
+};
+
+struct ChildSetup {
+  std::optional<std::filesystem::path> chroot_dir;
+  bool new_pid_namespace = false;
+};
+
 void KillSession(pid_t pid) { ::kill(-pid, SIGKILL); }
+
+void Reap(pid_t pid) {
+  int ignored = 0;
+  while (::waitpid(pid, &ignored, 0) < 0 && errno == EINTR) {
+  }
+}
+
+[[noreturn]] void ReportAndExit(int status_fd, ChildStep step, int error) {
+  const ChildFailure failure{.step = step, .error = error};
+  const ssize_t ignored = ::write(status_fd, &failure, sizeof(failure));
+  static_cast<void>(ignored);
+  ::_exit(kSpawnFailureStatus);
+}
+
+// Exits with `pid`'s outcome, so the process the caller waits on reports the
+// exit status or signal of the program that actually ran.
+[[noreturn]] void ForwardExit(pid_t pid) {
+  int wait_status = 0;
+  while (::waitpid(pid, &wait_status, 0) < 0) {
+    if (errno != EINTR) {
+      ::_exit(kSpawnFailureStatus);
+    }
+  }
+  if (WIFSIGNALED(wait_status)) {
+    const int signal_number = WTERMSIG(wait_status);
+    ::signal(signal_number, SIG_DFL);
+    ::raise(signal_number);
+  }
+  ::_exit(WEXITSTATUS(wait_status));
+}
+
+// Unshares the PID and mount namespaces and forks, so that the program to come
+// is process 1 of the new namespace and sees a /proc that matches it. Returns
+// only in that new process; the caller waits for it and exits.
+void EnterPidNamespace(const ChildParams& params) {
+  if (::unshare(CLONE_NEWPID | CLONE_NEWNS) != 0) {
+    ReportAndExit(params.status_fd, ChildStep::kUnshare, errno);
+  }
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    ReportAndExit(params.status_fd, ChildStep::kFork, errno);
+  }
+  if (pid == 0) {
+    if (::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0) {
+      ReportAndExit(params.status_fd, ChildStep::kMountPrivate, errno);
+    }
+    if (::mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC,
+                nullptr) != 0) {
+      ReportAndExit(params.status_fd, ChildStep::kMountProc, errno);
+    }
+    return;
+  }
+  // Let the parent see the status pipe close as soon as the new process execs.
+  ::close(params.status_fd);
+  ForwardExit(pid);
+}
+
+[[noreturn]] void RunChild(const ChildParams& params) {
+  const auto fail = [&params](ChildStep step) {
+    ReportAndExit(params.status_fd, step, errno);
+  };
+
+  if (::setsid() < 0) {
+    fail(ChildStep::kSetsid);
+  }
+  ::close(params.output_read_fd);
+  const int null_fd = ::open("/dev/null", O_RDONLY);
+  if (null_fd < 0) {
+    fail(ChildStep::kOpenNull);
+  }
+  if (::dup2(null_fd, STDIN_FILENO) < 0 ||
+      ::dup2(params.output_write_fd, STDOUT_FILENO) < 0 ||
+      ::dup2(params.output_write_fd, STDERR_FILENO) < 0) {
+    fail(ChildStep::kDup2);
+  }
+  if (null_fd != STDIN_FILENO) {
+    ::close(null_fd);
+  }
+  if (params.output_write_fd > STDERR_FILENO) {
+    ::close(params.output_write_fd);
+  }
+  if (params.new_pid_namespace) {
+    EnterPidNamespace(params);
+  }
+  if (params.chroot_dir != nullptr) {
+    if (::chroot(params.chroot_dir) != 0) {
+      fail(ChildStep::kChroot);
+    }
+    if (::chdir("/") != 0) {
+      fail(ChildStep::kChdir);
+    }
+  }
+  ::execve(params.program, params.argv, params.envp);
+  ReportAndExit(params.status_fd, ChildStep::kExec, errno);
+}
+
+// Reads the child's pre-exec failure, if any. The pipe is close-on-exec, so a
+// successful exec arrives as end of file.
+StatusOr<std::optional<ChildFailure>> ReadChildFailure(int status_fd) {
+  ChildFailure failure{};
+  ssize_t count = 0;
+  while ((count = ::read(status_fd, &failure, sizeof(failure))) < 0) {
+    const int error = errno;
+    if (error != EINTR) {
+      return ErrnoToStatus(error, "read spawn status");
+    }
+  }
+  if (count != static_cast<ssize_t>(sizeof(failure))) {
+    return std::optional<ChildFailure>();
+  }
+  return std::optional<ChildFailure>(failure);
+}
 
 std::string ResolveProgram(const std::string& program) {
   if (program.find('/') != std::string::npos) {
@@ -131,7 +310,7 @@ std::vector<std::string> MakeEnvironment(
 StatusOr<Child> Spawn(
     const std::string& program, const std::vector<std::string>& args,
     const std::vector<std::pair<std::string, std::string>>& env,
-    const std::optional<std::filesystem::path>& chroot_dir) {
+    const ChildSetup& setup) {
   std::vector<char*> argv;
   argv.reserve(args.size() + 2);
   argv.push_back(const_cast<char*>(program.c_str()));
@@ -147,69 +326,60 @@ StatusOr<Child> Spawn(
     envp.push_back(const_cast<char*>(entry.data()));
   }
   envp.push_back(nullptr);
-  const std::string failure_message =
-      fmt::format("failed to start {}\n", program);
 
-  std::array<int, 2> pipe_fds = {-1, -1};
-
-  if (::pipe2(pipe_fds.data(), O_CLOEXEC) != 0) {
+  std::array<int, 2> output_fds = {-1, -1};
+  if (::pipe2(output_fds.data(), O_CLOEXEC) != 0) {
     const int error = errno;
-    return ErrnoToStatus(error, "pipe");
+    return ErrnoToStatus(error, "pipe for command output");
   }
+  std::array<int, 2> status_fds = {-1, -1};
+  if (::pipe2(status_fds.data(), O_CLOEXEC) != 0) {
+    const int error = errno;
+    ::close(output_fds[0]);
+    ::close(output_fds[1]);
+    return ErrnoToStatus(error, "pipe for spawn status");
+  }
+
+  const ChildParams params{
+      .output_read_fd = output_fds[0],
+      .output_write_fd = output_fds[1],
+      .status_fd = status_fds[1],
+      .program = resolved.c_str(),
+      .argv = argv.data(),
+      .envp = envp.data(),
+      .chroot_dir = setup.chroot_dir ? setup.chroot_dir->c_str() : nullptr,
+      .new_pid_namespace = setup.new_pid_namespace,
+  };
 
   const pid_t pid = ::fork();
   if (pid < 0) {
     const int error = errno;
-    ::close(pipe_fds[0]);
-    ::close(pipe_fds[1]);
+    ::close(output_fds[0]);
+    ::close(output_fds[1]);
+    ::close(status_fds[0]);
+    ::close(status_fds[1]);
     return ErrnoToStatus(error, fmt::format("fork for {}", program));
   }
-
   if (pid == 0) {
-    const auto fail = [&failure_message]() {
-      const ssize_t ignored = ::write(STDOUT_FILENO, failure_message.data(),
-                                      failure_message.size());
-      static_cast<void>(ignored);
-      ::_exit(kSpawnFailureStatus);
-    };
-
-    if (::setsid() < 0) {
-      fail();
-    }
-    ::close(pipe_fds[0]);
-    const int null_fd = ::open("/dev/null", O_RDONLY);
-    if (null_fd < 0) {
-      fail();
-    }
-    if (::dup2(null_fd, STDIN_FILENO) < 0) {
-      fail();
-    }
-    if (::dup2(pipe_fds[1], STDOUT_FILENO) < 0) {
-      fail();
-    }
-    if (::dup2(pipe_fds[1], STDERR_FILENO) < 0) {
-      fail();
-    }
-    if (null_fd != STDIN_FILENO) {
-      ::close(null_fd);
-    }
-    if (pipe_fds[1] > STDERR_FILENO) {
-      ::close(pipe_fds[1]);
-    }
-    if (chroot_dir) {
-      if (::chroot(chroot_dir->c_str()) != 0) {
-        fail();
-      }
-      if (::chdir("/") != 0) {
-        fail();
-      }
-    }
-    ::execve(resolved.c_str(), argv.data(), envp.data());
-    fail();
+    RunChild(params);
   }
 
-  ::close(pipe_fds[1]);
-  return Child{.pid = pid, .output_fd = pipe_fds[0]};
+  ::close(output_fds[1]);
+  ::close(status_fds[1]);
+  const StatusOr<std::optional<ChildFailure>> failure =
+      ReadChildFailure(status_fds[0]);
+  ::close(status_fds[0]);
+  if (!failure.ok() || failure->has_value()) {
+    ::close(output_fds[0]);
+    Reap(pid);
+    if (!failure.ok()) {
+      return failure.status();
+    }
+    return ErrnoToStatus(
+        (*failure)->error,
+        fmt::format("{} for {}", ChildStepName((*failure)->step), program));
+  }
+  return Child{.pid = pid, .output_fd = output_fds[0]};
 }
 
 StatusOr<std::optional<std::string>> WaitForChild(pid_t pid,
@@ -300,6 +470,11 @@ Command& Command::Chroot(std::filesystem::path root) {
   return *this;
 }
 
+Command& Command::NewPidNamespace() {
+  new_pid_namespace_ = true;
+  return *this;
+}
+
 Command& Command::Heartbeat(std::chrono::seconds interval,
                             std::string message) {
   heartbeat_interval_ = interval;
@@ -319,8 +494,11 @@ Status Command::Run() {
   const std::shared_ptr<spdlog::logger> logger = InstallationLogger();
   logger->info("$ {}", command_line);
 
-  PUU_ASSIGN_OR_RETURN(const Child child,
-                       Spawn(program_, args_, env_, chroot_));
+  PUU_ASSIGN_OR_RETURN(
+      const Child child,
+      Spawn(program_, args_, env_,
+            ChildSetup{.chroot_dir = chroot_,
+                       .new_pid_namespace = new_pid_namespace_}));
   const absl::Cleanup close_output = [&child] { ::close(child.output_fd); };
 
   std::deque<std::string> tail;
@@ -384,7 +562,7 @@ StatusOr<std::string> CaptureOutput(std::string_view program,
                                     const std::vector<std::string>& args) {
   const std::string program_name(program);
   PUU_ASSIGN_OR_RETURN(const Child child,
-                       Spawn(program_name, args, {}, std::nullopt));
+                       Spawn(program_name, args, {}, ChildSetup{}));
   const absl::Cleanup close_output = [&child] { ::close(child.output_fd); };
 
   std::string output;
@@ -404,6 +582,77 @@ StatusOr<std::string> CaptureOutput(std::string_view program,
                          Trim(output));
   }
   return std::string(Trim(output));
+}
+
+Status RunInteractive(const std::filesystem::path& program,
+                      const std::vector<std::string>& args) {
+  const std::string resolved = ResolveProgram(program.string());
+  const std::vector<std::string> environment = MakeEnvironment({});
+  std::vector<char*> envp;
+  envp.reserve(environment.size() + 1);
+  for (const std::string& entry : environment) {
+    envp.push_back(const_cast<char*>(entry.data()));
+  }
+  envp.push_back(nullptr);
+
+  std::vector<char*> argv;
+  argv.reserve(args.size() + 2);
+  argv.push_back(const_cast<char*>(resolved.c_str()));
+  for (const std::string& argument : args) {
+    argv.push_back(const_cast<char*>(argument.c_str()));
+  }
+  argv.push_back(nullptr);
+
+  struct sigaction sa_ignore{}, sa_orig_int{}, sa_orig_quit{};
+  sa_ignore.sa_handler = SIG_IGN;
+  ::sigaction(SIGINT, &sa_ignore, &sa_orig_int);
+  ::sigaction(SIGQUIT, &sa_ignore, &sa_orig_quit);
+
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    const int error = errno;
+    ::sigaction(SIGINT, &sa_orig_int, nullptr);
+    ::sigaction(SIGQUIT, &sa_orig_quit, nullptr);
+    return ErrnoToStatus(error, "fork");
+  }
+
+  if (pid == 0) {
+    ::sigaction(SIGINT, &sa_orig_int, nullptr);
+    ::sigaction(SIGQUIT, &sa_orig_quit, nullptr);
+    sigset_t set;
+    ::sigemptyset(&set);
+    ::sigprocmask(SIG_SETMASK, &set, nullptr);
+
+    ::execve(resolved.c_str(), argv.data(), envp.data());
+    ::_exit(kSpawnFailureStatus);
+  }
+
+  int status = 0;
+  pid_t waited = 0;
+  while ((waited = ::waitpid(pid, &status, 0)) < 0) {
+    if (errno != EINTR) {
+      break;
+    }
+  }
+
+  ::sigaction(SIGINT, &sa_orig_int, nullptr);
+  ::sigaction(SIGQUIT, &sa_orig_quit, nullptr);
+
+  if (waited < 0) {
+    return ErrnoToStatus(errno, "waitpid");
+  }
+  if (WIFEXITED(status) && WEXITSTATUS(status) == kSpawnFailureStatus) {
+    return NotFoundError("failed to execute {}", resolved);
+  }
+  if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+    return InternalError("{} exited with code {}", resolved,
+                         WEXITSTATUS(status));
+  }
+  if (WIFSIGNALED(status)) {
+    return InternalError("{} terminated by signal {}", resolved,
+                         WTERMSIG(status));
+  }
+  return absl::OkStatus();
 }
 
 }  // namespace puu::engine
