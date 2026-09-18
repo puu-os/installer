@@ -47,7 +47,9 @@
 #include "engine/step.h"
 #include "engine/util.h"
 #include "tui/logging.h"
+#include "tui/theme.h"
 #include "tui/timezone.h"
+#include "tui/widgets.h"
 
 namespace puu::tui {
 namespace {
@@ -66,6 +68,10 @@ constexpr int kMinColumns = 64;
 constexpr int kMinRows = 20;
 
 constexpr int kLogPaneChrome = 12;
+
+// Visible rows of a selection list embedded in a form.
+constexpr int kEmbeddedListRows = 4;
+
 struct LocaleChoice {
   std::string_view label;
   std::string_view name;
@@ -84,7 +90,15 @@ constexpr std::array<LocaleChoice, 10> kLocales{{
     {.label = "Spanish", .name = "es_ES.UTF-8"},
 }};
 
-constexpr std::array<std::string_view, 2> kShells{"Bash", "Zsh"};
+struct ShellChoice {
+  std::string_view label;
+  UserShell shell;
+};
+
+constexpr std::array<ShellChoice, 2> kShells{{
+    {.label = "Bash", .shell = UserShell::kBash},
+    {.label = "Zsh", .shell = UserShell::kZsh},
+}};
 
 enum class Route : std::uint8_t {
   kWelcome = 0,
@@ -95,6 +109,13 @@ enum class Route : std::uint8_t {
   kReview,
   kInstall,
   kReboot,
+};
+
+enum class SecureBootAction : std::uint8_t {
+  kBack,
+  kEnroll,
+  kSkip,
+  kRebootFirmware,
 };
 
 enum class ModalKind : std::uint8_t {
@@ -130,31 +151,51 @@ struct RouteInfo {
 };
 
 constexpr std::array<RouteInfo, 8> kRouteInfo = {{
-    {.subtitle = "READY  /  GUIDED SYSTEM INSTALLATION",
+    {.subtitle = "Guided system installation",
      .footer = "Up/Down move   Enter select   Esc quit"},
-    {.subtitle = "SETUP  1 / 5  /  TARGET DISK",
+    {.subtitle = "Choose the disk to erase and install to",
      .footer = "Up/Down move   Enter select   Ctrl-R rescan   Esc back"},
-    {.subtitle = "SETUP  2 / 5  /  SYSTEM IDENTITY",
-     .footer =
-         "Tab next field   Left/Right change   Enter continue   Esc back"},
-    {.subtitle = "SETUP  3 / 5  /  TIME ZONE",
-     .footer = "Type to filter   Up/Down move   Enter select   Esc back"},
-    {.subtitle = "SETUP  4 / 5  /  PLATFORM SECURITY",
+    {.subtitle = "Name the machine and create the first user",
+     .footer = "Tab next field   Up/Down move   Enter continue   Esc back"},
+    {.subtitle = "Set the system time zone",
+     .footer = "Type to filter   Tab to list   Enter select   Esc back"},
+    {.subtitle = "Decide how the firmware trusts this system",
      .footer = "Up/Down move   Enter select   Esc back"},
-    {.subtitle = "SETUP  5 / 5  /  REVIEW",
+    {.subtitle = "Confirm before anything is written",
      .footer = "Up/Down move   Enter select   Esc back"},
-    {.subtitle = "INSTALLATION IN PROGRESS",
+    {.subtitle = "Installation in progress",
      .footer = "PgUp/PgDn scroll log   Esc cancel"},
-    {.subtitle = "INSTALLATION COMPLETE",
+    {.subtitle = "Installation complete",
      .footer = "Any key cancels the countdown   Enter select"},
 }};
+
+constexpr std::array<std::string_view, 5> kWizardSteps{
+    "Target", "Identity", "Time zone", "Security", "Review"};
 
 std::string_view Subtitle(Route route) {
   return kRouteInfo[static_cast<size_t>(route)].subtitle;
 }
 
+std::optional<size_t> RailIndex(Route route) {
+  constexpr auto kFirst = static_cast<size_t>(Route::kTarget);
+  constexpr auto kLast = static_cast<size_t>(Route::kReview);
+  const auto index = static_cast<size_t>(route);
+  if (index < kFirst || index > kLast) {
+    return std::nullopt;
+  }
+  return index - kFirst;
+}
+
 std::string_view Footer(Route route) {
   return kRouteInfo[static_cast<size_t>(route)].footer;
+}
+
+// The entry of `choices` picked by a list selector, guarded against an index
+// that has not caught up with a shorter list.
+template <typename Choices>
+const auto& Chosen(const Choices& choices, int index) {
+  return choices[std::min(static_cast<size_t>(std::max(index, 0)),
+                          choices.size() - 1)];
 }
 
 std::string_view StepMarker(StepState state) {
@@ -274,6 +315,7 @@ class Installer::Impl {
   Component BuildModal();
 
   [[nodiscard]] Element RenderChrome(Element body) const;
+  [[nodiscard]] Element RenderSummary() const;
   [[nodiscard]] Element RenderInstall() const;
   [[nodiscard]] Element RenderSteps() const;
   [[nodiscard]] Element RenderLog() const;
@@ -284,11 +326,13 @@ class Installer::Impl {
   void OnDriveEnter();
   void OnIdentitySubmit();
   void OnTimezoneEnter();
+  void OnSecureBootEnter();
   void OnEnableSecureBoot();
   void OnTick();
 
   void ResetFlow();
   void RefreshDrives();
+  void RefreshSecureBootRows();
   void RefilterZones();
   [[nodiscard]] bool SetupModeOn() const;
 
@@ -316,20 +360,20 @@ class Installer::Impl {
 
   int route_index_ = static_cast<int>(Route::kWelcome);
 
+  std::vector<MenuRow> welcome_rows_;
   int welcome_index_ = 0;
 
   std::vector<DriveEntry> drives_;
-  std::vector<std::string> drive_rows_;
+  std::vector<MenuRow> drive_rows_;
   std::string drive_error_;
-  std::string target_notice_;
   int drive_index_ = 0;
   bool scanning_ = false;
   std::thread drive_thread_;
 
   int language_index_ = 0;
   int shell_index_ = 0;
-  std::vector<std::string> language_entries_;
-  std::vector<std::string> shell_entries_;
+  std::vector<MenuRow> language_rows_;
+  std::vector<MenuRow> shell_rows_;
   std::string hostname_;
   std::string username_;
   std::string password_;
@@ -339,10 +383,16 @@ class Installer::Impl {
   std::string validation_error_;
 
   std::string zone_filter_;
-  std::vector<std::string> zone_rows_;
+  std::vector<MenuRow> zone_rows_;
   int zone_index_ = 0;
 
   std::optional<engine::SetupMode> firmware_;
+  std::vector<MenuRow> secure_boot_rows_;
+  std::vector<SecureBootAction> secure_boot_actions_;
+  int secure_boot_index_ = 0;
+
+  std::vector<MenuRow> review_rows_;
+  int review_index_ = 0;
 
   bool modal_open_ = false;
 
@@ -379,6 +429,7 @@ class Installer::Impl {
   bool reboot_automatic_ = false;
   int reboot_remaining_ = kRebootDelaySeconds;
   std::chrono::steady_clock::time_point reboot_deadline_;
+  std::vector<MenuRow> reboot_rows_;
   int reboot_index_ = 0;
 };
 
@@ -460,18 +511,30 @@ bool Installer::Impl::OnGlobalEvent(const Event& event) {
 }
 
 Component Installer::Impl::BuildWelcome() {
-  ftxui::MenuOption option = ftxui::MenuOption::Vertical();
-  option.entries = std::vector<std::string>{
-      "Install system", "Open recovery shell", "Reboot machine"};
-  option.selected = &welcome_index_;
-  option.on_enter = [this] { OnWelcomeEnter(); };
-  Component const menu = ftxui::Menu(option);
+  welcome_rows_ = {
+      {.label = "Install system",
+       .detail = "erase a disk and deploy the image"},
+      {.label = "Open recovery shell",
+       .detail = "work on this machine without installing"},
+      {.label = "Reboot machine", .detail = "restart without any changes"},
+  };
+  Component const menu = SelectList({.rows = &welcome_rows_,
+                                     .selected = &welcome_index_,
+                                     .on_enter = [this] { OnWelcomeEnter(); }});
 
-  Component const body = ftxui::Renderer(menu, [menu] {
+  Component const body = ftxui::Renderer(menu, [this, menu] {
+    const std::string& brand = context_.config.branding.name.Value();
     return ftxui::vbox({
-        ftxui::text("Install a bootc system with guided disk, identity and "
-                    "security setup.") |
-            ftxui::dim,
+        ftxui::text(context_.image_version.has_value()
+                        ? fmt::format("{} {}", brand, *context_.image_version)
+                        : brand) |
+            theme::Brand(),
+        ftxui::text(fmt::format("Image: {}", context_.target_imgref.Value())) |
+            theme::Hint(),
+        ftxui::text(""),
+        ftxui::paragraph("This installer sets up the disk layout, the first "
+                         "user account, the time zone and Secure Boot, then "
+                         "deploys the system image."),
         ftxui::text(""),
         menu->Render(),
     });
@@ -514,6 +577,7 @@ void Installer::Impl::ResetFlow() {
   install_state_ = InstallState::kRunning;
   install_committed_ = false;
   reboot_automatic_ = false;
+  review_index_ = 0;
   zone_filter_.clear();
   RefilterZones();
   Goto(Route::kTarget);
@@ -521,15 +585,13 @@ void Installer::Impl::ResetFlow() {
 }
 
 Component Installer::Impl::BuildTarget() {
-  ftxui::MenuOption option = ftxui::MenuOption::Vertical();
-  option.entries = &drive_rows_;
-  option.selected = &drive_index_;
-  option.on_enter = [this] { OnDriveEnter(); };
-  Component const menu = ftxui::Menu(option);
+  Component const menu = SelectList({.rows = &drive_rows_,
+                                     .selected = &drive_index_,
+                                     .on_enter = [this] { OnDriveEnter(); }});
 
   Component const body = ftxui::Renderer(menu, [this, menu] {
     if (scanning_) {
-      return ftxui::text("Scanning for target disks...") | ftxui::bold;
+      return ftxui::text("Scanning for target disks...") | theme::Heading();
     }
     if (drive_rows_.empty()) {
       Element message =
@@ -538,20 +600,15 @@ Component Installer::Impl::BuildTarget() {
               : ftxui::text(
                     fmt::format("Disk scan failed: {}. Press Ctrl-R to retry.",
                                 drive_error_));
-      return std::move(message) | ftxui::bold | ftxui::color(ftxui::Color::Red);
+      return std::move(message) | theme::Alert();
     }
-    Elements rows{
-        ftxui::text("Busy disks are listed but cannot be installed to.") |
-            ftxui::dim,
+    return ftxui::vbox({
+        ftxui::paragraph("Everything on the selected disk is erased. Disks "
+                         "in use are shown but cannot be selected.") |
+            theme::Hint(),
         ftxui::text(""),
-        menu->Render() | ftxui::vscroll_indicator | ftxui::frame | ftxui::flex,
-    };
-    if (!target_notice_.empty()) {
-      rows.push_back(ftxui::text(""));
-      rows.push_back(ftxui::text(target_notice_) | ftxui::bold |
-                     ftxui::color(ftxui::Color::Red));
-    }
-    return ftxui::vbox(std::move(rows));
+        menu->Render() | ftxui::vscroll_indicator | ftxui::yframe | ftxui::flex,
+    });
   });
 
   return ftxui::CatchEvent(body, [this](const Event& event) {
@@ -583,7 +640,7 @@ void Installer::Impl::RefreshDrives() {
   drive_thread_ = std::thread([this] {
     StatusOr<std::vector<engine::Device>> devices = engine::ListDisks();
     std::vector<DriveEntry> entries;
-    std::vector<std::string> rows;
+    std::vector<MenuRow> rows;
 
     std::string error =
         devices.ok() ? "" : std::string(devices.status().message());
@@ -594,23 +651,23 @@ void Installer::Impl::RefreshDrives() {
             device.model.empty() ? "(unknown)" : device.model;
         const std::string bus =
             device.transport.empty() ? "-" : device.transport;
+        const bool busy = device.busy_reason.has_value();
+        const std::string reason =
+            busy ? std::string(engine::BusyReasonText(*device.busy_reason))
+                 : "";
         entries.push_back(DriveEntry{
             .path = device.path,
             .id = device.id,
             .size = device.size,
             .label =
                 fmt::format("{} - {}, {}", device.path.string(), model, size),
-            .busy = device.busy_reason.has_value(),
-            .busy_reason =
-                device.busy_reason.has_value()
-                    ? std::string(engine::BusyReasonText(*device.busy_reason))
-                    : ""});
-        rows.push_back(fmt::format(
-            "{:<14} {:>10}  {:<6} {:<28} {}", device.path.string(), size, bus,
-            model,
-            entries.back().busy
-                ? fmt::format("BUSY ({})", entries.back().busy_reason)
-                : "available"));
+            .busy = busy,
+            .busy_reason = reason});
+        rows.push_back(
+            MenuRow{.label = device.path.string(),
+                    .detail = fmt::format("{:>10}  {:<5} {}", size, bus, model),
+                    .note = busy ? fmt::format("in use: {}", reason) : "",
+                    .enabled = !busy});
       }
     }
     Post([this, entries = std::move(entries), rows = std::move(rows),
@@ -618,7 +675,6 @@ void Installer::Impl::RefreshDrives() {
       drives_ = std::move(entries);
       drive_rows_ = std::move(rows);
       drive_error_ = std::move(error);
-      target_notice_.clear();
       drive_index_ = 0;
       scanning_ = false;
     });
@@ -631,11 +687,8 @@ void Installer::Impl::OnDriveEnter() {
   }
   const DriveEntry& drive = drives_[static_cast<size_t>(drive_index_)];
   if (drive.busy) {
-    target_notice_ = fmt::format("{} cannot be selected: {}",
-                                 drive.path.string(), drive.busy_reason);
     return;
   }
-  target_notice_.clear();
   context_.drive = drive.path;
   // Recorded here so the install confirms it is erasing the disk shown on the
   // review screen, not whatever later occupies this kernel name.
@@ -646,15 +699,24 @@ void Installer::Impl::OnDriveEnter() {
 }
 
 Component Installer::Impl::BuildIdentity() {
-  language_entries_.assign(kLocales.size(), "");
-  for (size_t index = 0; index < kLocales.size(); ++index) {
-    language_entries_[index] = std::string(kLocales[index].label);
+  language_rows_.clear();
+  language_rows_.reserve(kLocales.size());
+  for (const LocaleChoice& locale : kLocales) {
+    language_rows_.push_back(MenuRow{.label = std::string(locale.label),
+                                     .detail = std::string(locale.name)});
   }
-  shell_entries_.assign(kShells.begin(), kShells.end());
+  shell_rows_.clear();
+  shell_rows_.reserve(kShells.size());
+  for (const ShellChoice& choice : kShells) {
+    shell_rows_.push_back(
+        MenuRow{.label = std::string(choice.label),
+                .detail = std::string(UserShellPath(choice.shell))});
+  }
 
-  const Component language =
-      ftxui::Toggle(&language_entries_, &language_index_);
-  const Component shell = ftxui::Toggle(&shell_entries_, &shell_index_);
+  Component const language =
+      SelectList({.rows = &language_rows_, .selected = &language_index_});
+  Component const shell =
+      SelectList({.rows = &shell_rows_, .selected = &shell_index_});
 
   auto make_input = [this](std::string* value, size_t max_bytes, bool secret) {
     ftxui::InputOption option;
@@ -693,33 +755,29 @@ Component Installer::Impl::BuildIdentity() {
   Component const form = ftxui::Container::Vertical(Components{
       language, hostname, username, password, repeated, reveal, shell, submit});
 
-  Component const body =
-      ftxui::Renderer(form, [this, language, hostname, username, password,
-                             repeated, reveal, shell, submit] {
-        Elements rows{
-            Field("Language", language->Render()),
-            Field("Hostname", hostname->Render() | ftxui::underlined),
-            Field("User name", username->Render() | ftxui::underlined),
-            Field("Password", password->Render() | ftxui::underlined),
-            Field("Repeat password", repeated->Render() | ftxui::underlined),
-            Field("", reveal->Render()),
-            Field("Shell", shell->Render()),
-            ftxui::text(""),
-            submit->Render(),
-        };
-        if (!validation_error_.empty()) {
-          rows.push_back(ftxui::text(""));
-          rows.push_back(ftxui::text(validation_error_) | ftxui::bold |
-                         ftxui::color(ftxui::Color::Red));
-        }
-
-        rows.push_back(ftxui::text(""));
-        rows.push_back(ftxui::text(fmt::format(
-                           "Keyboard layout: {} (from the configuration file)",
-                           context_.config.identity.keymap.Value())) |
-                       ftxui::dim);
-        return ftxui::vbox(std::move(rows));
-      });
+  Component const body = ftxui::Renderer(form, [this, language, hostname,
+                                                username, password, repeated,
+                                                reveal, shell, submit] {
+    Elements rows{
+        Field("Language",
+              language->Render() | ftxui::vscroll_indicator | ftxui::yframe |
+                  ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, kEmbeddedListRows)),
+        Field("Hostname", hostname->Render() | ftxui::underlined),
+        Field("User name", username->Render() | ftxui::underlined),
+        Field("Password", password->Render() | ftxui::underlined),
+        Field("Repeat password", repeated->Render() | ftxui::underlined),
+        Field("", reveal->Render()),
+        Field("Shell", shell->Render()),
+        ftxui::text(""),
+        submit->Render(),
+    };
+    Elements framed{ftxui::vbox(std::move(rows)) | ftxui::vscroll_indicator |
+                    ftxui::yframe | ftxui::flex};
+    if (!validation_error_.empty()) {
+      framed.push_back(ftxui::text(validation_error_) | theme::Alert());
+    }
+    return ftxui::vbox(std::move(framed));
+  });
 
   return ftxui::CatchEvent(body, [this](const Event& event) {
     if (event == Event::Return) {
@@ -767,13 +825,13 @@ void Installer::Impl::OnIdentitySubmit() {
   validation_error_.clear();
   context_.config.identity.hostname = *hostname;
   const StatusOr<SingleLine> locale =
-      SingleLine::Parse(kLocales[static_cast<size_t>(language_index_)].name);
+      SingleLine::Parse(Chosen(kLocales, language_index_).name);
   if (locale.ok()) {
     context_.config.identity.locale = *locale;
   }
   context_.username = *parsed_username;
   context_.user_password.Assign(password_);
-  context_.user_shell = shell_index_ == 1 ? UserShell::kZsh : UserShell::kBash;
+  context_.user_shell = Chosen(kShells, shell_index_).shell;
   Goto(Route::kTimezone);
 }
 
@@ -786,20 +844,20 @@ Component Installer::Impl::BuildTimezone() {
   filter_option.on_enter = [this] { OnTimezoneEnter(); };
   Component const filter = ftxui::Input(filter_option);
 
-  ftxui::MenuOption menu_option = ftxui::MenuOption::Vertical();
-  menu_option.entries = &zone_rows_;
-  menu_option.selected = &zone_index_;
-  menu_option.on_enter = [this] { OnTimezoneEnter(); };
-  Component const menu = ftxui::Menu(menu_option);
+  Component const menu = SelectList(
+      {.rows = &zone_rows_, .selected = &zone_index_, .on_enter = [this] {
+         OnTimezoneEnter();
+       }});
 
   Component const container =
       ftxui::Container::Vertical(Components{filter, menu});
   Component const body = ftxui::Renderer(container, [this, filter, menu] {
     return ftxui::vbox({
         Field("Filter", filter->Render() | ftxui::underlined),
-        ftxui::text(fmt::format("{} zones", zone_rows_.size())) | ftxui::dim,
+        ftxui::text(fmt::format("{} matching zones", zone_rows_.size())) |
+            theme::Hint(),
         ftxui::separator(),
-        menu->Render() | ftxui::vscroll_indicator | ftxui::frame | ftxui::flex,
+        menu->Render() | ftxui::vscroll_indicator | ftxui::yframe | ftxui::flex,
     });
   });
 
@@ -816,7 +874,7 @@ void Installer::Impl::RefilterZones() {
   const std::string needle = ToLower(zone_filter_);
   const std::string selected =
       (zone_index_ >= 0 && static_cast<size_t>(zone_index_) < zone_rows_.size())
-          ? zone_rows_[static_cast<size_t>(zone_index_)]
+          ? zone_rows_[static_cast<size_t>(zone_index_)].label
           : context_.config.identity.timezone.Value();
 
   zone_rows_.clear();
@@ -824,11 +882,13 @@ void Installer::Impl::RefilterZones() {
   const auto& lowered = LoweredTimezones();
   for (size_t index = 0; index < zones.size(); ++index) {
     if (needle.empty() || lowered[index].find(needle) != std::string::npos) {
-      zone_rows_.push_back(zones[index]);
+      zone_rows_.push_back(MenuRow{.label = zones[index]});
     }
   }
 
-  const auto found = std::ranges::find(zone_rows_, selected);
+  const auto found = std::ranges::find_if(
+      zone_rows_,
+      [&selected](const MenuRow& row) { return row.label == selected; });
   zone_index_ = found != zone_rows_.end()
                     ? static_cast<int>(found - zone_rows_.begin())
                     : 0;
@@ -840,13 +900,14 @@ void Installer::Impl::OnTimezoneEnter() {
     return;
   }
   const StatusOr<Timezone> zone =
-      Timezone::Parse(zone_rows_[static_cast<size_t>(zone_index_)]);
+      Timezone::Parse(zone_rows_[static_cast<size_t>(zone_index_)].label);
   if (!zone.ok()) {
     return;
   }
   context_.config.identity.timezone = *zone;
 
   firmware_ = engine::DetectSetupMode();
+  RefreshSecureBootRows();
   Goto(Route::kSecureBoot);
 }
 
@@ -855,47 +916,74 @@ bool Installer::Impl::SetupModeOn() const {
          firmware_->state == engine::SetupMode::State::kOn;
 }
 
-Component Installer::Impl::BuildSecureBoot() {
-  const ftxui::ButtonOption option = ftxui::ButtonOption::Ascii();
-  Component const back =
-      ftxui::Button("[ Back ]", [this] { Goto(Route::kTimezone); }, option);
-  Component const enable = ftxui::Button(
-      "[ Enable Secure Boot ]", [this] { OnEnableSecureBoot(); }, option);
-  Component const skip = ftxui::Button(
-                             "[ Continue without Secure Boot ]",
-                             [this] {
-                               context_.secure_boot =
-                                   engine::SecureBootMode::kSkip;
-                               Goto(Route::kReview);
-                             },
-                             option) |
-                         ftxui::Maybe([this] { return !SetupModeOn(); });
-  Component const reboot = ftxui::Button(
-                               "[ Reboot to firmware settings ]",
-                               [this] { SetTrap(Trap::kReboot); }, option) |
-                           ftxui::Maybe([this] { return !SetupModeOn(); });
+void Installer::Impl::RefreshSecureBootRows() {
+  secure_boot_rows_.clear();
+  secure_boot_actions_.clear();
+  const auto add = [this](SecureBootAction action, MenuRow row) {
+    secure_boot_actions_.push_back(action);
+    secure_boot_rows_.push_back(std::move(row));
+  };
+  add(SecureBootAction::kBack,
+      {.label = "Back", .detail = "return to the time zone"});
+  add(SecureBootAction::kEnroll, {.label = "Enable Secure Boot",
+                                  .detail = "enrol this system's own keys"});
+  if (!SetupModeOn()) {
+    add(SecureBootAction::kSkip,
+        {.label = "Continue without Secure Boot",
+         .detail = "leave the firmware keys untouched"});
+    add(SecureBootAction::kRebootFirmware,
+        {.label = "Reboot to firmware settings",
+         .detail = "clear the keys to enter Setup Mode"});
+  }
+  secure_boot_index_ = static_cast<int>(SecureBootAction::kEnroll);
+}
 
+void Installer::Impl::OnSecureBootEnter() {
+  if (secure_boot_index_ < 0 ||
+      static_cast<size_t>(secure_boot_index_) >= secure_boot_actions_.size()) {
+    return;
+  }
+  switch (secure_boot_actions_[static_cast<size_t>(secure_boot_index_)]) {
+    case SecureBootAction::kBack:
+      Goto(Route::kTimezone);
+      return;
+    case SecureBootAction::kEnroll:
+      OnEnableSecureBoot();
+      return;
+    case SecureBootAction::kSkip:
+      context_.secure_boot = engine::SecureBootMode::kSkip;
+      Goto(Route::kReview);
+      return;
+    case SecureBootAction::kRebootFirmware:
+      SetTrap(Trap::kRebootFirmware);
+      return;
+  }
+}
+
+Component Installer::Impl::BuildSecureBoot() {
   Component const menu =
-      ftxui::Container::Vertical(Components{back, enable, skip, reboot});
+      SelectList({.rows = &secure_boot_rows_,
+                  .selected = &secure_boot_index_,
+                  .on_enter = [this] { OnSecureBootEnter(); }});
   Component const body = ftxui::Renderer(menu, [this, menu] {
     Elements rows;
     if (SetupModeOn()) {
       rows.push_back(
-          ftxui::text(fmt::format("{} can enrol its own Secure Boot keys.",
-                                  context_.config.branding.name.Value())));
+          ftxui::paragraph(fmt::format("{} can enrol its own Secure Boot keys.",
+                                       context_.config.branding.name.Value())));
       rows.push_back(
-          ftxui::text("This writes firmware Secure Boot variables.") |
-          ftxui::bold | ftxui::color(ftxui::Color::Yellow));
+          ftxui::paragraph("This writes firmware Secure Boot variables.") |
+          theme::Caution());
     } else {
       const bool off = firmware_.has_value() &&
                        firmware_->state == engine::SetupMode::State::kOff;
       rows.push_back(
-          ftxui::text(off ? "Setup Mode is off; keys cannot be enrolled."
-                          : "Firmware Setup Mode could not be detected.") |
-          ftxui::bold | ftxui::color(ftxui::Color::Yellow));
+          ftxui::paragraph(off ? "Setup Mode is off; keys cannot be enrolled."
+                               : "Firmware Setup Mode could not be detected.") |
+          theme::Caution());
       if (firmware_.has_value() && !firmware_->reason.empty()) {
-        rows.push_back(ftxui::text(firmware_->reason) |
-                       ftxui::color(ftxui::Color::Red));
+        rows.push_back(ftxui::paragraph(firmware_->reason) |
+                       ftxui::color(theme::Danger()));
       }
     }
     rows.push_back(ftxui::text(""));
@@ -921,37 +1009,57 @@ void Installer::Impl::OnEnableSecureBoot() {
   Goto(Route::kReview);
 }
 
-Component Installer::Impl::BuildReview() {
-  const ftxui::ButtonOption option = ftxui::ButtonOption::Ascii();
-  Component const back =
-      ftxui::Button("[ Back ]", [this] { Goto(Route::kSecureBoot); }, option);
-  Component const start = ftxui::Button(
-      "[ Start installation ]",
-      [this] {
-        Goto(Route::kInstall);
-        StartInstall();
-      },
-      option);
+Element Installer::Impl::RenderSummary() const {
+  return ftxui::vbox({
+      Field("Target disk", ftxui::text(context_.drive.string())),
+      Field("Disk model", ftxui::text(context_.drive_label.value_or("-"))),
+      Field("Capacity", ftxui::text(engine::HumanSize(context_.drive_size))),
+      Field("Hostname", ftxui::text(context_.config.identity.hostname.Value())),
+      Field("User name", ftxui::text(context_.username.has_value()
+                                         ? context_.username->Value()
+                                         : "-")),
+      Field("Shell",
+            ftxui::text(std::string(UserShellPath(context_.user_shell)))),
+      Field("Language", ftxui::text(fmt::format(
+                            "{} ({})", Chosen(kLocales, language_index_).label,
+                            context_.config.identity.locale.Value()))),
+      Field("Keyboard", ftxui::text(context_.config.identity.keymap.Value())),
+      Field("Time zone",
+            ftxui::text(context_.config.identity.timezone.Value())),
+      Field("Secure Boot",
+            ftxui::text(context_.secure_boot == engine::SecureBootMode::kEnroll
+                            ? "Enabled"
+                            : "Disabled")),
+  });
+}
 
-  Component const menu = ftxui::Container::Vertical(Components{back, start});
+Component Installer::Impl::BuildReview() {
+  review_rows_ = {
+      {.label = "Back", .detail = "change the platform security choice"},
+      {.label = "Start installation",
+       .detail = "begin writing",
+       .note = "erases the target disk"},
+  };
+  Component const menu = SelectList(
+      {.rows = &review_rows_, .selected = &review_index_, .on_enter = [this] {
+         if (review_index_ == 0) {
+           Goto(Route::kSecureBoot);
+           return;
+         }
+         Goto(Route::kInstall);
+         StartInstall();
+       }});
   Component const body = ftxui::Renderer(menu, [this, menu] {
     return ftxui::vbox({
-        ftxui::text("Review these settings carefully. Starting the "
-                    "installation erases the target disk.") |
-            ftxui::bold | ftxui::color(ftxui::Color::Yellow),
-        ftxui::text(""),
-        Field("Target disk", ftxui::text(context_.drive_label.value_or("-"))),
-        Field("Hostname",
-              ftxui::text(context_.config.identity.hostname.Value())),
-        Field("Time zone",
-              ftxui::text(context_.config.identity.timezone.Value())),
-        Field("Secure Boot", ftxui::text(context_.secure_boot ==
-                                                 engine::SecureBootMode::kEnroll
-                                             ? "Enabled"
-                                             : "Disabled")),
-        ftxui::text(""),
-        menu->Render(),
-    });
+               ftxui::paragraph("Nothing has been written yet. Starting the "
+                                "installation erases the target disk.") |
+                   theme::Caution(),
+               ftxui::text(""),
+               RenderSummary(),
+               ftxui::text(""),
+               menu->Render(),
+           }) |
+           ftxui::vscroll_indicator | ftxui::yframe;
   });
 
   return ftxui::CatchEvent(body, [this](const Event& event) {
@@ -1100,23 +1208,26 @@ Element Installer::Impl::RenderInstall() const {
 }
 
 Component Installer::Impl::BuildReboot() {
-  const ftxui::ButtonOption option = ftxui::ButtonOption::Ascii();
-  Component const shell = ftxui::Button(
-      "[ Open shell ]", [this] { SetTrap(Trap::kShell); }, option);
-  Component const now = ftxui::Button(
-      "[ Reboot now ]", [this] { SetTrap(Trap::kReboot); }, option);
-
-  Component const menu =
-      ftxui::Container::Vertical(Components{shell, now}, &reboot_index_);
+  reboot_rows_ = {
+      {.label = "Reboot now", .detail = "start the installed system"},
+      {.label = "Open shell", .detail = "inspect the result before rebooting"},
+  };
+  Component const menu = SelectList(
+      {.rows = &reboot_rows_, .selected = &reboot_index_, .on_enter = [this] {
+         SetTrap(reboot_index_ == 0 ? Trap::kReboot : Trap::kShell);
+       }});
   Component const body = ftxui::Renderer(menu, [this, menu] {
     return ftxui::vbox({
-        Field("Target", ftxui::text(context_.drive_label.value_or("-"))),
+        ftxui::text(fmt::format("{} is installed on {}.",
+                                context_.config.branding.name.Value(),
+                                context_.drive.string())) |
+            theme::Brand(),
         ftxui::text(""),
         ftxui::text(reboot_automatic_
                         ? fmt::format("Automatic reboot in {} seconds",
                                       reboot_remaining_)
                         : "Automatic reboot cancelled.") |
-            ftxui::bold | ftxui::color(ftxui::Color::Cyan),
+            ftxui::bold | ftxui::color(theme::Accent()),
         ftxui::text(""),
         menu->Render(),
     });
@@ -1447,29 +1558,30 @@ Element Installer::Impl::RenderChrome(Element body) const {
            }) |
            ftxui::border;
   }
-  return ftxui::vbox({
-             ftxui::hbox({
-                 ftxui::text(Title()) | ftxui::bold,
-                 ftxui::filler(),
-                 ftxui::text(std::string(Subtitle(CurrentRoute()))) |
-                     ftxui::dim,
-             }),
-             ftxui::separator(),
-             std::move(body) | ftxui::flex,
-             ftxui::separator(),
-             ftxui::text(std::string(Footer(CurrentRoute()))) | ftxui::dim,
-         }) |
-         ftxui::border;
+  const std::optional<size_t> rail = RailIndex(CurrentRoute());
+  Elements rows{
+      ftxui::hbox({
+          ftxui::text(Title()) | theme::Brand(),
+          ftxui::filler(),
+          ftxui::text(std::string(Subtitle(CurrentRoute()))) | theme::Hint(),
+      }),
+      ftxui::separator(),
+  };
+  if (rail.has_value()) {
+    rows.push_back(StepRail(kWizardSteps, *rail));
+  }
+  rows.push_back(std::move(body) | ftxui::flex);
+  rows.push_back(ftxui::separator());
+  rows.push_back(ftxui::text(std::string(Footer(CurrentRoute()))) |
+                 theme::Hint());
+  return ftxui::vbox(std::move(rows)) | ftxui::border;
 }
 
 std::string Installer::Impl::Title() const {
   const std::string& brand = context_.config.branding.name.Value();
   switch (CurrentRoute()) {
     case Route::kWelcome:
-      return context_.image_version.has_value()
-                 ? fmt::format("{} {} Installer", brand,
-                               *context_.image_version)
-                 : fmt::format("{} Installer", brand);
+      return fmt::format("{} Installer", brand);
     case Route::kTarget:
       return "Select Target Drive";
     case Route::kIdentity:

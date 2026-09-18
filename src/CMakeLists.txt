@@ -32,7 +32,8 @@ set(installer_core_sources
 set(installer_tui_sources
   tui/app.cc
   tui/logging.cc
-  tui/timezone.cc)
+  tui/timezone.cc
+  tui/widgets.cc)
 
 add_library(puu-installer-core STATIC ${installer_core_sources})
 target_include_directories(puu-installer-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
