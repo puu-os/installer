@@ -35,6 +35,7 @@
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/color.hpp>
+#include <ftxui/screen/terminal.hpp>
 #include <openssl/crypto.h>
 #include <spdlog/spdlog.h>
 
@@ -277,9 +278,7 @@ Element Field(std::string_view label, Element value) {
 }
 
 [[nodiscard]] int LogPageLines() {
-  const ftxui::ScreenInteractive* screen = ftxui::ScreenInteractive::Active();
-  const int height = screen != nullptr ? screen->dimy() : kMinRows;
-  return std::max(4, height - kLogPaneChrome);
+  return std::max(4, ftxui::Terminal::Size().dimy - kLogPaneChrome);
 }
 
 }  // namespace
@@ -1546,9 +1545,10 @@ double Installer::Impl::OverallProgress() const {
 }
 
 Element Installer::Impl::RenderChrome(Element body) const {
-  const ftxui::ScreenInteractive* screen = ftxui::ScreenInteractive::Active();
-  if (screen != nullptr &&
-      (screen->dimx() < kMinColumns || screen->dimy() < kMinRows)) {
+  // ScreenInteractive::dimx()/dimy() are updated only after Render(), so
+  // they read 0x0 on the first frame; the terminal itself is authoritative.
+  const ftxui::Dimensions terminal = ftxui::Terminal::Size();
+  if (terminal.dimx < kMinColumns || terminal.dimy < kMinRows) {
     return ftxui::vbox({
                ftxui::filler(),
                ftxui::text(
