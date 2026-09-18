@@ -67,6 +67,10 @@ struct BootEntry {
 Status ManageBootEntry(const EfiPartitionLayout& layout, Arch arch,
                        std::string_view description);
 
+// Requests firmware setup mode on the next reboot by setting
+// EFI_OS_INDICATIONS_BOOT_TO_FW_UI in the OsIndications variable.
+Status RequestRebootToFirmware();
+
 }  // namespace puu::engine
 
 #endif  // PUU_ENGINE_FIRMWARE_H_

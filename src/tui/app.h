@@ -11,7 +11,7 @@
 
 namespace puu::tui {
 
-enum class Trap : std::uint8_t { kQuit, kReboot, kShell };
+enum class Trap : std::uint8_t { kQuit, kReboot, kRebootFirmware, kShell };
 
 class Installer {
  public:

@@ -110,23 +110,28 @@ StatusOr<std::vector<uint8_t>> Utf16LeBytes(std::string_view text) {
   return out;
 }
 
-void ClearImmutable(int fd) {
+void ClearImmutable(const std::filesystem::path& path) {
+  std::error_code error;
+  if (!std::filesystem::exists(path, error)) {
+    return;
+  }
+  const UniqueFd fd(::open(path.c_str(), O_RDONLY | O_CLOEXEC));
+  if (fd.Get() < 0) {
+    return;
+  }
   int flags = 0;
-  if (::ioctl(fd, FS_IOC_GETFLAGS, &flags) != 0) {
+  if (::ioctl(fd.Get(), FS_IOC_GETFLAGS, &flags) != 0) {
     return;
   }
   if ((flags & kFsImmutableFl) == 0) {
     return;
   }
   flags &= ~kFsImmutableFl;
-  static_cast<void>(::ioctl(fd, FS_IOC_SETFLAGS, &flags));
+  static_cast<void>(::ioctl(fd.Get(), FS_IOC_SETFLAGS, &flags));
 }
 
 Status DeleteEfiVariable(const std::filesystem::path& path) {
-  if (UniqueFd const fd(::open(path.c_str(), O_WRONLY | O_CLOEXEC));
-      fd.Get() >= 0) {
-    ClearImmutable(fd.Get());
-  }
+  ClearImmutable(path);
   std::error_code error;
   std::filesystem::remove(path, error);
   if (error) {
@@ -297,12 +302,12 @@ Status WriteEfiVariable(const std::filesystem::path& path, uint32_t attributes,
   AppendLe<uint32_t>(buffer, attributes);
   buffer.insert(buffer.end(), payload.begin(), payload.end());
 
+  ClearImmutable(path);
   UniqueFd const fd(::open(path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644));
   if (fd.Get() < 0) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("open {}", path.string()));
   }
-  ClearImmutable(fd.Get());
   const ssize_t written = ::write(fd.Get(), buffer.data(), buffer.size());
   if (written < 0) {
     const int error = errno;
@@ -442,6 +447,24 @@ Status ManageBootEntry(const EfiPartitionLayout& layout, Arch arch,
       "rollback BootOrder: {}",
       wrote_order.message(), *boot_id, StatusText(removed_entry),
       StatusText(restored_order));
+}
+
+Status RequestRebootToFirmware() {
+  const EfiGuid global = EfiGuid::Global();
+  const std::filesystem::path path = EfiVariablePath("OsIndications", global);
+
+  uint64_t indications = 0x0000'0000'0000'0001ULL;
+  std::error_code error;
+  if (std::filesystem::exists(path, error)) {
+    const StatusOr<std::vector<uint8_t>> raw = ReadFileBytes(path);
+    if (raw.ok() && raw->size() >= 4 + sizeof(uint64_t)) {
+      indications |= ReadLe<uint64_t>(*raw, 4);
+    }
+  }
+
+  std::vector<uint8_t> payload;
+  AppendLe<uint64_t>(payload, indications);
+  return WriteEfiVariable(path, kBootVariableAttributes, payload);
 }
 
 }  // namespace puu::engine

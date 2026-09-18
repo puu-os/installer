@@ -18,6 +18,7 @@
 #include "config.h"
 #include "engine/command.h"
 #include "engine/context.h"
+#include "engine/firmware.h"
 #include "engine/image.h"
 #include "engine/pipeline.h"
 #include "engine/util.h"
@@ -103,6 +104,19 @@ int RunInstaller(engine::Context context) {
         return EXIT_SUCCESS;
 
       case tui::Trap::kReboot: {
+        engine::SyncAll();
+        ::reboot(RB_AUTOBOOT);
+
+        std::fprintf(stderr, "puu-installer: reboot failed\n");
+        return EXIT_FAILURE;
+      }
+
+      case tui::Trap::kRebootFirmware: {
+        const Status status = engine::RequestRebootToFirmware();
+        if (!status.ok()) {
+          spdlog::warn("failed to set reboot to firmware setup: {}",
+                       status.message());
+        }
         engine::SyncAll();
         ::reboot(RB_AUTOBOOT);
 
