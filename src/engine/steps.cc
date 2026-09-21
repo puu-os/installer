@@ -435,11 +435,16 @@ Status StepBootcInstall(Runner& runner) {
   }
 
   CleanupStack cleanups;
-  const std::filesystem::path target_var_tmp = InTarget("/var/tmp");
-  PUU_RETURN_IF_ERROR(CreateDirectories(target_var_tmp));
-
-  PUU_RETURN_IF_ERROR(BindMount(kHostVarTmp, target_var_tmp));
-  cleanups.Push([target_var_tmp] { Unmount(target_var_tmp).IgnoreError(); });
+  const std::filesystem::path scratch = InTarget("/var/tmp");
+  PUU_RETURN_IF_ERROR(CreateDirectories(scratch));
+  PUU_RETURN_IF_ERROR(BindMount(scratch, scratch));
+  cleanups.Push([scratch] {
+    Unmount(scratch).IgnoreError();
+    std::error_code error;
+    std::filesystem::remove_all(scratch, error);
+  });
+  PUU_RETURN_IF_ERROR(BindMount(scratch, kHostVarTmp));
+  cleanups.Push([] { Unmount(kHostVarTmp).IgnoreError(); });
   PUU_RETURN_IF_ERROR(CreateDirectories(kBootcGraphRoot));
   PUU_RETURN_IF_ERROR(CreateDirectories(kContainersRunRoot));
   PUU_RETURN_IF_ERROR(WriteFile(
