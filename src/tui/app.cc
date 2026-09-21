@@ -1254,14 +1254,15 @@ Component Installer::Impl::BuildModal() {
   Component const buttons =
       ftxui::Container::Horizontal(Components{dismiss, confirm});
 
-  Component const body = ftxui::Renderer(buttons, [this, buttons] {
+  Component const body = ftxui::Renderer(buttons, [this, dismiss, confirm] {
     return ftxui::vbox({
                ftxui::text(modal_title_) | ftxui::bold,
                ftxui::separator(),
                ftxui::paragraph(modal_body_),
                ftxui::separator(),
-               ftxui::hbox(
-                   {ftxui::filler(), buttons->Render(), ftxui::filler()}),
+               ftxui::hbox({ftxui::filler(), dismiss->Render(),
+                            ftxui::text("  "), confirm->Render(),
+                            ftxui::filler()}),
            }) |
            ftxui::border | ftxui::size(ftxui::WIDTH, ftxui::LESS_THAN, 64) |
            ftxui::bgcolor(ftxui::Color::Black);
