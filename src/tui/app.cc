@@ -172,10 +172,6 @@ constexpr std::array<RouteInfo, 8> kRouteInfo = {{
 constexpr std::array<std::string_view, 5> kWizardSteps{
     "Target", "Identity", "Time zone", "Secure Boot", "Review"};
 
-std::string_view Subtitle(Route route) {
-  return kRouteInfo[static_cast<size_t>(route)].subtitle;
-}
-
 std::optional<size_t> RailIndex(Route route) {
   constexpr auto kFirst = static_cast<size_t>(Route::kTarget);
   constexpr auto kLast = static_cast<size_t>(Route::kReview);
@@ -184,10 +180,6 @@ std::optional<size_t> RailIndex(Route route) {
     return std::nullopt;
   }
   return index - kFirst;
-}
-
-std::string_view Footer(Route route) {
-  return kRouteInfo[static_cast<size_t>(route)].footer;
 }
 
 // The entry of `choices` picked by a list selector, guarded against an index
@@ -318,6 +310,8 @@ class Installer::Impl {
   [[nodiscard]] Element RenderSteps() const;
   [[nodiscard]] Element RenderLog() const;
   [[nodiscard]] std::string Title() const;
+  [[nodiscard]] std::string Subtitle() const;
+  [[nodiscard]] std::string Footer() const;
 
   bool OnGlobalEvent(const Event& event);
   void OnWelcomeEnter();
@@ -1549,7 +1543,7 @@ Element Installer::Impl::RenderChrome(Element body) const {
       ftxui::hbox({
           ftxui::text(Title()) | theme::Brand(),
           ftxui::filler(),
-          ftxui::text(std::string(Subtitle(CurrentRoute()))) | theme::Hint(),
+          ftxui::text(Subtitle()) | theme::Hint(),
       }),
       ftxui::separator(),
   };
@@ -1558,7 +1552,7 @@ Element Installer::Impl::RenderChrome(Element body) const {
   }
   rows.push_back(std::move(body) | ftxui::flex);
   rows.push_back(ftxui::separator());
-  rows.push_back(ftxui::text(std::string(Footer(CurrentRoute()))) |
+  rows.push_back(ftxui::text(Footer()) |
                  theme::Hint());
   return ftxui::vbox(std::move(rows)) | ftxui::border;
 }
@@ -1579,11 +1573,38 @@ std::string Installer::Impl::Title() const {
     case Route::kReview:
       return "Does this look right?";
     case Route::kInstall:
+      if (install_state_ == InstallState::kFailed) {
+        return "Installation Failed";
+      }
       return fmt::format("Installing {}", brand);
     case Route::kReboot:
       return "Install Complete";
   }
   return brand;
+}
+
+std::string Installer::Impl::Subtitle() const {
+  if (CurrentRoute() == Route::kInstall) {
+    if (install_state_ == InstallState::kFailed) {
+      return "Review log or exit";
+    }
+    if (install_committed_) {
+      return "Writing system to target disk";
+    }
+  }
+  return std::string(kRouteInfo[static_cast<size_t>(CurrentRoute())].subtitle);
+}
+
+std::string Installer::Impl::Footer() const {
+  if (CurrentRoute() == Route::kInstall) {
+    if (install_state_ == InstallState::kFailed) {
+      return "PgUp/PgDn scroll log   Enter / Esc return to start";
+    }
+    if (install_committed_) {
+      return "PgUp/PgDn scroll log";
+    }
+  }
+  return std::string(kRouteInfo[static_cast<size_t>(CurrentRoute())].footer);
 }
 
 void Installer::Impl::OnTick() {
