@@ -122,7 +122,6 @@ enum class SecureBootAction : std::uint8_t {
 enum class ModalKind : std::uint8_t {
   kWipe,
   kRebootConfirm,
-  kSetupMode,
   kFailure,
   kCancel,
 };
@@ -171,7 +170,7 @@ constexpr std::array<RouteInfo, 8> kRouteInfo = {{
 }};
 
 constexpr std::array<std::string_view, 5> kWizardSteps{
-    "Target", "Identity", "Time zone", "Security", "Review"};
+    "Target", "Identity", "Time zone", "Secure Boot", "Review"};
 
 std::string_view Subtitle(Route route) {
   return kRouteInfo[static_cast<size_t>(route)].subtitle;
@@ -326,7 +325,6 @@ class Installer::Impl {
   void OnIdentitySubmit();
   void OnTimezoneEnter();
   void OnSecureBootEnter();
-  void OnEnableSecureBoot();
   void OnTick();
 
   void ResetFlow();
@@ -921,11 +919,13 @@ void Installer::Impl::RefreshSecureBootRows() {
     secure_boot_actions_.push_back(action);
     secure_boot_rows_.push_back(std::move(row));
   };
-  add(SecureBootAction::kBack,
-      {.label = "Back", .detail = "return to the time zone"});
-  add(SecureBootAction::kEnroll, {.label = "Enable Secure Boot",
-                                  .detail = "enrol this system's own keys"});
-  if (!SetupModeOn()) {
+  if (SetupModeOn()) {
+    add(SecureBootAction::kEnroll, {.label = "Enable Secure Boot",
+                                    .detail = "enrol this system's own keys"});
+    add(SecureBootAction::kSkip,
+        {.label = "Continue without Secure Boot",
+         .detail = "leave the firmware keys untouched"});
+  } else {
     add(SecureBootAction::kSkip,
         {.label = "Continue without Secure Boot",
          .detail = "leave the firmware keys untouched"});
@@ -933,7 +933,9 @@ void Installer::Impl::RefreshSecureBootRows() {
         {.label = "Reboot to firmware settings",
          .detail = "clear the keys to enter Setup Mode"});
   }
-  secure_boot_index_ = static_cast<int>(SecureBootAction::kEnroll);
+  add(SecureBootAction::kBack,
+      {.label = "Back", .detail = "return to the time zone"});
+  secure_boot_index_ = 0;
 }
 
 void Installer::Impl::OnSecureBootEnter() {
@@ -946,7 +948,8 @@ void Installer::Impl::OnSecureBootEnter() {
       Goto(Route::kTimezone);
       return;
     case SecureBootAction::kEnroll:
-      OnEnableSecureBoot();
+      context_.secure_boot = engine::SecureBootMode::kEnroll;
+      Goto(Route::kReview);
       return;
     case SecureBootAction::kSkip:
       context_.secure_boot = engine::SecureBootMode::kSkip;
@@ -998,15 +1001,6 @@ Component Installer::Impl::BuildSecureBoot() {
   });
 }
 
-void Installer::Impl::OnEnableSecureBoot() {
-  if (!SetupModeOn()) {
-    OpenModal(ModalKind::kSetupMode);
-    return;
-  }
-  context_.secure_boot = engine::SecureBootMode::kEnroll;
-  Goto(Route::kReview);
-}
-
 Element Installer::Impl::RenderSummary() const {
   return ftxui::vbox({
       Field("Target disk", ftxui::text(context_.drive.string())),
@@ -1033,9 +1027,9 @@ Element Installer::Impl::RenderSummary() const {
 
 Component Installer::Impl::BuildReview() {
   review_rows_ = {
-      {.label = "Back", .detail = "change the platform security choice"},
+      {.label = "Back", .detail = "return to Secure Boot"},
       {.label = "Start installation",
-       .detail = "begin writing",
+       .detail = "deploy the system image",
        .note = "erases the target disk"},
   };
   Component const menu = SelectList(
@@ -1280,7 +1274,7 @@ struct ModalSpec {
   std::string_view confirm_label;
 };
 
-constexpr std::array<ModalSpec, 5> kModalSpecs = {{
+constexpr std::array<ModalSpec, 4> kModalSpecs = {{
     {.title = "Wipe target disk?",
      .body = "All data on this disk will be destroyed.",
      .dismiss_label = "No",
@@ -1289,13 +1283,6 @@ constexpr std::array<ModalSpec, 5> kModalSpecs = {{
      .body = "The machine will reboot immediately.",
      .dismiss_label = "No",
      .confirm_label = "Yes"},
-    {.title = "Enable Secure Boot?",
-     .body = "Custom keys can only be enrolled while firmware Setup Mode is "
-             "on. Reboot into the firmware settings and enable Setup Mode, "
-             "typically by clearing the Secure Boot keys, then run the "
-             "installer again.",
-     .dismiss_label = "Back",
-     .confirm_label = "Reboot"},
     {.title = "Installation failed",
      .body = "Unknown error",
      .dismiss_label = "View log",
@@ -1331,7 +1318,6 @@ void Installer::Impl::CloseModal(bool confirmed) {
       }
       break;
     case ModalKind::kRebootConfirm:
-    case ModalKind::kSetupMode:
       if (confirmed) {
         SetTrap(Trap::kReboot);
       }
