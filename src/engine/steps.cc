@@ -497,7 +497,11 @@ Status StepBootcInstall(Runner& runner) {
     const StatusOr<uint64_t> expected =
         EstimatedInstallBytes(*context.source_image, context.image_manifest);
     if (expected.ok()) {
-      progress.emplace(kTargetMount, *expected);
+      std::error_code error;
+      const uintmax_t archive_bytes =
+          std::filesystem::file_size(*context.source_image, error);
+      progress.emplace(kTargetMount,
+                       *expected + (error ? 0 : uint64_t{archive_bytes}));
       command.Track(&progress.value(), [&runner](double fraction) {
         runner.ReportProgress(fraction);
       });
