@@ -1552,8 +1552,7 @@ Element Installer::Impl::RenderChrome(Element body) const {
   }
   rows.push_back(std::move(body) | ftxui::flex);
   rows.push_back(ftxui::separator());
-  rows.push_back(ftxui::text(Footer()) |
-                 theme::Hint());
+  rows.push_back(ftxui::text(Footer()) | theme::Hint());
   return ftxui::vbox(std::move(rows)) | ftxui::border;
 }
 
