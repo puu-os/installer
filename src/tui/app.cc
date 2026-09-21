@@ -771,7 +771,7 @@ Component Installer::Impl::BuildIdentity() {
         Field("", reveal->Render()),
         Field("Shell", shell->Render()),
         ftxui::text(""),
-        submit->Render(),
+        Field("", submit->Render()),
     };
     Elements framed{ftxui::vbox(std::move(rows)) | ftxui::vscroll_indicator |
                     ftxui::yframe | ftxui::flex};
@@ -782,10 +782,6 @@ Component Installer::Impl::BuildIdentity() {
   });
 
   return ftxui::CatchEvent(body, [this](const Event& event) {
-    if (event == Event::Return) {
-      OnIdentitySubmit();
-      return true;
-    }
     if (event != Event::Escape) {
       return false;
     }
