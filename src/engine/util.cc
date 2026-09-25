@@ -34,7 +34,7 @@
 #include <vector>
 
 #include <absl/status/status.h>
-#include <fmt/base.h>
+#include <fmt/core.h>
 #include <fmt/format.h>
 #include <openssl/crypto.h>
 #include <openssl/err.h>

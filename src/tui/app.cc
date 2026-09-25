@@ -61,6 +61,9 @@ using ftxui::Element;
 using ftxui::Elements;
 using ftxui::Event;
 
+const auto kEventCtrlC = Event::Special("\x03");
+const auto kEventCtrlR = Event::Special("\x12");
+
 constexpr int kRebootDelaySeconds = 30;
 
 constexpr std::chrono::milliseconds kTickInterval{200};
@@ -428,7 +431,6 @@ class Installer::Impl {
 Trap Installer::Impl::Run() {
   auto screen = ftxui::ScreenInteractive::Fullscreen();
 
-  screen.ForceHandleCtrlC(false);
   {
     stopping_ = false;
     const std::lock_guard<std::mutex> lock(screen_mutex_);
@@ -483,9 +485,9 @@ void Installer::Impl::Goto(Route route) {
 
 bool Installer::Impl::OnGlobalEvent(const Event& event) {
   if (modal_open_) {
-    return event == Event::CtrlC;
+    return event == kEventCtrlC;
   }
-  if (event != Event::CtrlC) {
+  if (event != kEventCtrlC) {
     return false;
   }
 
@@ -606,7 +608,7 @@ Component Installer::Impl::BuildTarget() {
   });
 
   return ftxui::CatchEvent(body, [this](const Event& event) {
-    if (event == Event::CtrlR) {
+    if (event == kEventCtrlR) {
       RefreshDrives();
       return true;
     }
@@ -740,7 +742,8 @@ Component Installer::Impl::BuildIdentity() {
         ftxui::text((state.state ? "[x] " : "[ ] ") + state.label);
     return state.active ? label | ftxui::inverted : label;
   };
-  Component const reveal = ftxui::Checkbox(reveal_option);
+  Component const reveal =
+      ftxui::Checkbox("Show password", &reveal_password_, reveal_option);
 
   Component const submit = ftxui::Button(
       "[ Continue ]", [this] { OnIdentitySubmit(); },

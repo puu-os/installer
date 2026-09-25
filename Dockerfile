@@ -15,10 +15,15 @@ RUN apt-get -o APT::Retries=3 update \
         git \
         libabsl-dev \
         libblkid-dev \
+        libfmt-dev \
+        libftxui-dev \
         libmount-dev \
+        libspdlog-dev \
         libssl-dev \
         libudev-dev \
+        libyaml-cpp-dev \
         ninja-build \
+        nlohmann-json3-dev \
         pkg-config \
         shellcheck \
     && rm -rf /var/lib/apt/lists/*
