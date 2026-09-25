@@ -714,9 +714,9 @@ const auto& Sections() {
           .fields =
               std::array{
                   BindField("manifestPath", &FlatpakConfig::manifest_path,
-                            "/usr/share/puu-os/flatpaks.list"),
+                            "/usr/share/puu/flatpaks.list"),
                   BindField("syncHelper", &FlatpakConfig::sync_helper,
-                            "/usr/libexec/puu-os/flatpak-sync"),
+                            "/usr/libexec/puu/flatpak-sync"),
                   BindField("liveStore", &FlatpakConfig::live_store,
                             "/var/lib/flatpak")}},
       SectionEntry{
@@ -724,7 +724,7 @@ const auto& Sections() {
           .section = &Config::models,
           .fields =
               std::array{BindField("syncHelper", &ModelsConfig::sync_helper,
-                                   "/usr/libexec/puu-os/preseed-vllm-models"),
+                                   "/usr/libexec/puu/preseed-vllm-models"),
                          BindField("liveStore", &ModelsConfig::live_store,
                                    "/var/lib/vllm/models")}},
       SectionEntry{
@@ -732,7 +732,7 @@ const auto& Sections() {
           .section = &Config::k3s,
           .fields =
               std::array{BindField("helper", &K3sConfig::helper,
-                                   "/usr/libexec/puu-os/configure-k3s-cluster"),
+                                   "/usr/libexec/puu/configure-k3s-cluster"),
                          BindField("role", &K3sConfig::role, "server"),
                          BindField("serverUrl", &K3sConfig::server_url),
                          BindField("nodeName", &K3sConfig::node_name)}},
