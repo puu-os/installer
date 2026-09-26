@@ -17,7 +17,6 @@
 #include <cstddef>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -79,14 +78,6 @@ std::filesystem::perms PermissionBits(mode_t mode) {
   return std::filesystem::perms{mode} & std::filesystem::perms::mask;
 }
 
-Status RemoveTree(const std::filesystem::path& path) {
-  std::error_code error;
-  std::filesystem::remove_all(path, error);
-  if (error) {
-    return FilesystemError(error, fmt::format("remove {}", path.string()));
-  }
-  return absl::OkStatus();
-}
 
 StatusOr<std::vector<std::filesystem::path>> TeardownMountPoints() {
   PUU_ASSIGN_OR_RETURN(const Mounts mounts, Mounts::Read());
@@ -162,18 +153,6 @@ Status SetPermissions(const std::filesystem::path& path,
   return absl::OkStatus();
 }
 
-Status CopyFileContents(const std::filesystem::path& source,
-                        const std::filesystem::path& destination) {
-  std::error_code error;
-  std::filesystem::copy_file(source, destination,
-                             std::filesystem::copy_options::overwrite_existing,
-                             error);
-  if (error) {
-    return FilesystemError(error, fmt::format("copy {} to {}", source.string(),
-                                              destination.string()));
-  }
-  return absl::OkStatus();
-}
 
 using HardLinkMap = std::map<std::pair<dev_t, ino_t>, std::filesystem::path>;
 
@@ -206,18 +185,8 @@ Status CopyDirectory(const std::filesystem::path& source,
 
 Status CopySymlink(const std::filesystem::path& source,
                    const std::filesystem::path& destination) {
-  std::error_code error;
-  const std::filesystem::path target =
-      std::filesystem::read_symlink(source, error);
-  if (error) {
-    return FilesystemError(error, fmt::format("readlink {}", source.string()));
-  }
-  std::filesystem::create_symlink(target, destination, error);
-  if (error) {
-    return FilesystemError(error,
-                           fmt::format("symlink {}", destination.string()));
-  }
-  return absl::OkStatus();
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path target, ReadSymlink(source));
+  return CreateSymlink(target, destination);
 }
 
 Status CopyRegularFile(const std::filesystem::path& source,
@@ -237,7 +206,7 @@ Status CopyRegularFile(const std::filesystem::path& source,
       return absl::OkStatus();
     }
   }
-  PUU_RETURN_IF_ERROR(CopyFileContents(source, destination));
+  PUU_RETURN_IF_ERROR(CopyFile(source, destination));
   PUU_RETURN_IF_ERROR(
       SetPermissions(destination, PermissionBits(info.st_mode)));
   PUU_RETURN_IF_ERROR(CopyXattrs(source, destination));
@@ -294,9 +263,28 @@ Status CopyTreeFilesEntries(const std::filesystem::path& source,
       PUU_RETURN_IF_ERROR(CopyTreeFilesEntries(child, target));
       continue;
     }
-    PUU_RETURN_IF_ERROR(CopyFileContents(child, target));
+    PUU_RETURN_IF_ERROR(CopyFile(child, target));
   }
   return absl::OkStatus();
+}
+
+Status MountContextError(libmnt_context* cxt, int rc, std::string_view action,
+                         const std::filesystem::path& target,
+                         const std::filesystem::path& source = {}) {
+  char error_buf[512] = {};
+  mnt_context_get_excode(cxt, rc, error_buf, sizeof(error_buf));
+  const int error = mnt_context_get_syscall_errno(cxt);
+  const std::string desc =
+      source.empty() ? fmt::format("{} {}", action, target.string())
+                     : fmt::format("{} {} at {}", action, source.string(),
+                                   target.string());
+  if (error_buf[0] != '\0') {
+    return InternalError("failed to {}: {}", desc, error_buf);
+  }
+  if (error != 0) {
+    return ErrnoToStatus(error, desc);
+  }
+  return InternalError("failed to {}: code {}", desc, rc);
 }
 
 }  // namespace
@@ -359,115 +347,55 @@ Status MountTarget(const std::filesystem::path& source,
   if (rc == 0) {
     return absl::OkStatus();
   }
-  char error_buf[512] = {};
-  mnt_context_get_excode(cxt.get(), rc, error_buf, sizeof(error_buf));
-  const int error = mnt_context_get_syscall_errno(cxt.get());
-  if (error_buf[0] != '\0') {
-    return InternalError("failed to mount {} at {}: {}", source.string(),
-                         target.string(), error_buf);
-  }
-  if (error != 0) {
-    return ErrnoToStatus(
-        error, fmt::format("mount {} at {}", source.string(), target.string()));
-  }
-  return InternalError("failed to mount {} at {}: code {}", source.string(),
-                       target.string(), rc);
+  return MountContextError(cxt.get(), rc, "mount", target, source);
 }
 
 Status BindMount(const std::filesystem::path& source,
                  const std::filesystem::path& target) {
-  UniqueMountContext cxt(mnt_new_context());
-  if (!cxt) {
-    return InternalError("failed to allocate mount context");
-  }
-  mnt_context_force_unrestricted(cxt.get());
-  if (mnt_context_set_source(cxt.get(), source.c_str()) != 0 ||
-      mnt_context_set_target(cxt.get(), target.c_str()) != 0 ||
-      mnt_context_set_options(cxt.get(), "rbind") != 0) {
-    return InternalError("failed to configure bind-mount from {} to {}",
-                         source.string(), target.string());
-  }
-  const int rc = mnt_context_mount(cxt.get());
-  if (rc == 0) {
-    return absl::OkStatus();
-  }
-  char error_buf[512] = {};
-  mnt_context_get_excode(cxt.get(), rc, error_buf, sizeof(error_buf));
-  const int error = mnt_context_get_syscall_errno(cxt.get());
-  if (error_buf[0] != '\0') {
-    return InternalError("failed to bind-mount {} at {}: {}", source.string(),
-                         target.string(), error_buf);
-  }
-  if (error != 0) {
-    return ErrnoToStatus(error, fmt::format("bind-mount {} at {}",
-                                            source.string(), target.string()));
-  }
-  return InternalError("failed to bind-mount {} at {}: code {}",
-                       source.string(), target.string(), rc);
+  return MountTarget(source, target, /*filesystem_type=*/"", /*options=*/"rbind");
 }
 
 Status Unmount(const std::filesystem::path& target) {
-  struct UmountAttempt {
-    int rc;
-    int error;
-    std::string message;
-  };
-
   auto attempt = [](const std::filesystem::path& path,
-                    bool lazy) -> UmountAttempt {
+                    bool lazy) -> Status {
     UniqueMountContext cxt(mnt_new_context());
     if (!cxt) {
-      return {-1, ENOMEM, "failed to allocate mount context"};
+      return InternalError("failed to allocate mount context");
     }
     mnt_context_force_unrestricted(cxt.get());
     if (mnt_context_set_target(cxt.get(), path.c_str()) != 0) {
-      return {-1, EINVAL, "failed to configure umount target"};
+      return InternalError("failed to configure umount target {}",
+                           path.string());
     }
     if (lazy) {
       mnt_context_enable_lazy(cxt.get(), 1);
     }
     const int rc = mnt_context_umount(cxt.get());
-    const int err = mnt_context_get_syscall_errno(cxt.get());
-    char error_buf[512] = {};
-    mnt_context_get_excode(cxt.get(), rc, error_buf, sizeof(error_buf));
-    return {rc, err, std::string(error_buf)};
-  };
-
-  UmountAttempt res = attempt(target, false);
-  if (res.rc == 0) {
-    return absl::OkStatus();
-  }
-  if (res.error == EINVAL || res.error == ENOENT) {
-    return absl::OkStatus();
-  }
-  if (res.error == EBUSY) {
-    InstallationLogger()->warn("{} is busy, detaching lazily", target.string());
-    res = attempt(target, true);
-    if (res.rc == 0) {
+    if (rc == 0) {
       return absl::OkStatus();
     }
+    const int error = mnt_context_get_syscall_errno(cxt.get());
+    if (error == EINVAL || error == ENOENT) {
+      return absl::OkStatus();
+    }
+    if (error == EBUSY && !lazy) {
+      return absl::UnavailableError("busy");
+    }
+    return MountContextError(cxt.get(), rc, "unmount", path);
+  };
+
+  Status status = attempt(target, /*lazy=*/false);
+  if (status.ok() || !absl::IsUnavailable(status)) {
+    return status;
   }
 
-  if (!res.message.empty()) {
-    return InternalError("failed to unmount {}: {}", target.string(),
-                         res.message);
-  }
-  if (res.error != 0) {
-    return ErrnoToStatus(res.error, fmt::format("unmount {}", target.string()));
-  }
-  return InternalError("failed to unmount {}: code {}", target.string(),
-                       res.rc);
+  InstallationLogger()->warn("{} is busy, detaching lazily", target.string());
+  return attempt(target, /*lazy=*/true);
 }
 
 Status MountChrootBinds(const std::filesystem::path& root) {
-  PUU_ASSIGN_OR_RETURN(const Mounts mounts, Mounts::Read());
   for (const auto& [source, relative] : kChrootBindMounts) {
-    const std::filesystem::path target = root / relative;
-    PUU_RETURN_IF_ERROR(CreateDirectories(target));
-    if (mounts.IsMountPoint(target)) {
-      continue;
-    }
-    PUU_RETURN_IF_ERROR(BindMount(std::filesystem::path(source), target));
+    PUU_RETURN_IF_ERROR(BindMount(std::filesystem::path(source), root / relative));
   }
   return absl::OkStatus();
 }
@@ -602,8 +530,7 @@ StatusOr<std::filesystem::path> DeploymentRoot(
     }
     for (; deployments != end && !skipped; deployments.increment(skipped)) {
       const std::filesystem::path path = deployments->path();
-      std::error_code kind_error;
-      if (!std::filesystem::is_directory(path, kind_error)) {
+      if (!IsDirectory(path)) {
         continue;
       }
 
@@ -624,33 +551,27 @@ StatusOr<std::filesystem::path> DeploymentRoot(
 
 StatusOr<std::vector<std::string>> FlatpakManifestRefs(
     const std::filesystem::path& manifest) {
-  std::error_code error;
-  if (!std::filesystem::exists(manifest, error)) {
+  if (!Exists(manifest)) {
     return std::vector<std::string>();
   }
 
-  std::ifstream file(manifest);
-  if (!file.is_open()) {
-    const int failure = errno;
-    return ErrnoToStatus(failure, fmt::format("open {}", manifest.string()));
-  }
+  PUU_ASSIGN_OR_RETURN(const std::string content, ReadFile(manifest));
   std::vector<std::string> refs;
-  std::string line;
-  while (std::getline(file, line)) {
-    std::string_view value(line);
-    const size_t comment = value.find('#');
+  std::string_view remaining(content);
+  while (!remaining.empty()) {
+    const size_t newline = remaining.find('\n');
+    std::string_view line = remaining.substr(0, newline);
+    remaining = newline == std::string_view::npos
+                    ? std::string_view()
+                    : remaining.substr(newline + 1);
+    const size_t comment = line.find('#');
     if (comment != std::string_view::npos) {
-      value = value.substr(0, comment);
+      line = line.substr(0, comment);
     }
-    const size_t start = value.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) {
-      continue;
+    const std::string_view trimmed = Trim(line);
+    if (!trimmed.empty()) {
+      refs.emplace_back(trimmed);
     }
-    const size_t last = value.find_last_not_of(" \t\r\n");
-    refs.emplace_back(value.substr(start, last - start + 1));
-  }
-  if (file.bad()) {
-    return InternalError("failed to read {}", manifest.string());
   }
   return refs;
 }
