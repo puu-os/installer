@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
+#include <unistd.h>
+
 #include <array>
 #include <cassert>
 #include <cstdint>
@@ -9,8 +11,6 @@
 #include <string_view>
 #include <utility>
 #include <vector>
-
-#include <unistd.h>
 
 #include <absl/strings/match.h>
 #include <spdlog/spdlog.h>
@@ -354,9 +354,9 @@ void CheckEfiGuid() {
   assert(cert_pkcs7.ToString() == "4aafd29d-68df-49ee-8aa9-347d375665a7");
   assert(*EfiGuid::Parse("4aafd29d-68df-49ee-8aa9-347d375665a7") == cert_pkcs7);
 
-  constexpr EfiGuid custom = EfiGuid::FromParts(
-      0x12345678, 0x1234, 0x5678,
-      {0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0});
+  constexpr EfiGuid custom =
+      EfiGuid::FromParts(0x12345678, 0x1234, 0x5678,
+                         {0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0});
   assert(custom.ToString() == "12345678-1234-5678-1234-56789abcdef0");
 
   // Round-trip without dashes
@@ -370,7 +370,8 @@ void CheckEfiGuid() {
   assert(random_guid.ok());
   const std::string text = random_guid->ToString();
   assert(text.size() == 36);
-  assert(text[8] == '-' && text[13] == '-' && text[18] == '-' && text[23] == '-');
+  assert(text[8] == '-' && text[13] == '-' && text[18] == '-' &&
+         text[23] == '-');
   // RFC 4122 version 4 check: 3rd field starts with '4'
   assert(text[14] == '4');
   // RFC 4122 variant 1 check: 4th field starts with '8', '9', 'a', or 'b'

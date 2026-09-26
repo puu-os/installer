@@ -539,10 +539,10 @@ Status StepFirstboot(Runner& runner) {
 
   const std::filesystem::path localtime = etc / "localtime";
   PUU_RETURN_IF_ERROR(RemoveFile(localtime));
-  PUU_RETURN_IF_ERROR(CreateSymlink(
-      std::filesystem::path("../usr/share/zoneinfo") /
-          identity.timezone.Value(),
-      localtime));
+  PUU_RETURN_IF_ERROR(
+      CreateSymlink(std::filesystem::path("../usr/share/zoneinfo") /
+                        identity.timezone.Value(),
+                    localtime));
 
   if (!identity.keymap.Empty()) {
     PUU_RETURN_IF_ERROR(WriteFile(

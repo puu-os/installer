@@ -3,8 +3,8 @@
 
 #include "cli.h"
 
-#include <cstdio>
 #include <array>
+#include <cstdio>
 
 #include <argtable3.h>
 

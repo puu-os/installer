@@ -78,7 +78,6 @@ std::filesystem::perms PermissionBits(mode_t mode) {
   return std::filesystem::perms{mode} & std::filesystem::perms::mask;
 }
 
-
 StatusOr<std::vector<std::filesystem::path>> TeardownMountPoints() {
   PUU_ASSIGN_OR_RETURN(const Mounts mounts, Mounts::Read());
   return mounts.Below(kTargetMount);
@@ -152,7 +151,6 @@ Status SetPermissions(const std::filesystem::path& path,
   }
   return absl::OkStatus();
 }
-
 
 using HardLinkMap = std::map<std::pair<dev_t, ino_t>, std::filesystem::path>;
 
@@ -274,10 +272,10 @@ Status MountContextError(libmnt_context* cxt, int rc, std::string_view action,
   char error_buf[512] = {};
   mnt_context_get_excode(cxt, rc, error_buf, sizeof(error_buf));
   const int error = mnt_context_get_syscall_errno(cxt);
-  const std::string desc =
-      source.empty() ? fmt::format("{} {}", action, target.string())
-                     : fmt::format("{} {} at {}", action, source.string(),
-                                   target.string());
+  const std::string desc = source.empty()
+                               ? fmt::format("{} {}", action, target.string())
+                               : fmt::format("{} {} at {}", action,
+                                             source.string(), target.string());
   if (error_buf[0] != '\0') {
     return InternalError("failed to {}: {}", desc, error_buf);
   }
@@ -352,12 +350,12 @@ Status MountTarget(const std::filesystem::path& source,
 
 Status BindMount(const std::filesystem::path& source,
                  const std::filesystem::path& target) {
-  return MountTarget(source, target, /*filesystem_type=*/"", /*options=*/"rbind");
+  return MountTarget(source, target, /*filesystem_type=*/"",
+                     /*options=*/"rbind");
 }
 
 Status Unmount(const std::filesystem::path& target) {
-  auto attempt = [](const std::filesystem::path& path,
-                    bool lazy) -> Status {
+  auto attempt = [](const std::filesystem::path& path, bool lazy) -> Status {
     UniqueMountContext cxt(mnt_new_context());
     if (!cxt) {
       return InternalError("failed to allocate mount context");
@@ -395,7 +393,8 @@ Status Unmount(const std::filesystem::path& target) {
 
 Status MountChrootBinds(const std::filesystem::path& root) {
   for (const auto& [source, relative] : kChrootBindMounts) {
-    PUU_RETURN_IF_ERROR(BindMount(std::filesystem::path(source), root / relative));
+    PUU_RETURN_IF_ERROR(
+        BindMount(std::filesystem::path(source), root / relative));
   }
   return absl::OkStatus();
 }

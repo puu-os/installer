@@ -247,7 +247,6 @@ void Truncate(std::string* value, size_t max_bytes) {
   *value = TruncateUtf8(*value, max_bytes);
 }
 
-
 std::string FrameSafe(std::string_view text) {
   std::string out;
   out.reserve(text.size());

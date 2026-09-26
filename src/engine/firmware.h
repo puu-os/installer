@@ -18,7 +18,6 @@
 
 namespace puu::engine {
 
-
 // Reads the firmware Secure Boot setup state from efivarfs.
 //
 // Never fails: an unreadable or absent variable is reported as

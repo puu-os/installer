@@ -86,7 +86,6 @@ constexpr std::array<uint8_t, 39> kSpcPeImageDataValue = {
     0x62, 0x00, 0x73, 0x00, 0x6f, 0x00, 0x6c, 0x00, 0x65, 0x00,
     0x74, 0x00, 0x65, 0x00, 0x3e, 0x00, 0x3e, 0x00, 0x3e};
 
-
 template <typename T, auto Free>
 struct Deleter {
   void operator()(T* ptr) const { Free(ptr); }
@@ -761,7 +760,6 @@ Status WriteAuthVariable(std::string_view name, const EfiGuid& guid,
                           payload);
 }
 
-
 Status GenerateKeyPair(std::string_view common_name,
                        const std::filesystem::path& key_path,
                        const std::filesystem::path& certificate_path) {
@@ -927,8 +925,7 @@ StatusOr<KeyPair> KeyStore::Get(KeyKind kind) const {
       root_ / kKeyStoreSubdir / "keys" / name;
   KeyPair pair{.key_path = directory / fmt::format("{}.key", name),
                .certificate_path = directory / fmt::format("{}.pem", name)};
-  if (!IsRegularFile(pair.key_path) ||
-      !IsRegularFile(pair.certificate_path)) {
+  if (!IsRegularFile(pair.key_path) || !IsRegularFile(pair.certificate_path)) {
     return NotFoundError("Secure Boot {} key material is missing under {}",
                          name, directory.string());
   }
@@ -962,8 +959,7 @@ Status KeyStore::EnsureKeys() {
     const std::string name{KeyKindName(kind)};
     const std::filesystem::path directory = key_root / name;
 
-    const bool has_key =
-        IsRegularFile(directory / fmt::format("{}.key", name));
+    const bool has_key = IsRegularFile(directory / fmt::format("{}.key", name));
     const bool has_certificate =
         IsRegularFile(directory / fmt::format("{}.pem", name));
     complete = complete && has_key && has_certificate;

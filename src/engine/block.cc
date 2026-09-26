@@ -462,9 +462,8 @@ StatusOr<std::optional<std::filesystem::path>> FindDeviceByLabel(
 }
 
 Status WaitForUdevSettle(std::chrono::milliseconds timeout) {
-  const Status status = WaitUntil(
-      [] { return !Exists(kUdevQueuePath); },
-      timeout, kSettlePollInterval);
+  const Status status = WaitUntil([] { return !Exists(kUdevQueuePath); },
+                                  timeout, kSettlePollInterval);
   return WithContext(status, "waiting for udev to settle");
 }
 

@@ -139,8 +139,9 @@ Status Rename(const std::filesystem::path& source,
   std::error_code error;
   std::filesystem::rename(source, destination, error);
   if (error) {
-    return FilesystemError(error, fmt::format("rename {} to {}", source.string(),
-                                              destination.string()));
+    return FilesystemError(
+        error,
+        fmt::format("rename {} to {}", source.string(), destination.string()));
   }
   return absl::OkStatus();
 }
@@ -160,9 +161,9 @@ Status CreateSymlink(const std::filesystem::path& target,
   std::error_code error;
   std::filesystem::create_symlink(target, link_path, error);
   if (error) {
-    return FilesystemError(error,
-                           fmt::format("symlink {} to {}", link_path.string(),
-                                       target.string()));
+    return FilesystemError(
+        error,
+        fmt::format("symlink {} to {}", link_path.string(), target.string()));
   }
   return absl::OkStatus();
 }
@@ -223,8 +224,8 @@ Status WriteFile(const std::filesystem::path& path, std::string_view content,
                  mode_t mode, int extra_flags) {
   return WriteBytes(
       path,
-      std::span<const uint8_t>(
-          reinterpret_cast<const uint8_t*>(content.data()), content.size()),
+      std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(content.data()),
+                               content.size()),
       mode, extra_flags);
 }
 
@@ -270,8 +271,8 @@ Status ReplaceFile(const std::filesystem::path& path,
                    std::string_view content) {
   return ReplaceFileBytes(
       path,
-      std::span<const uint8_t>(
-          reinterpret_cast<const uint8_t*>(content.data()), content.size()));
+      std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(content.data()),
+                               content.size()));
 }
 
 StatusOr<std::set<std::filesystem::path>> MountedSources() {
@@ -314,9 +315,7 @@ void UniqueFd::Reset(int fd) noexcept {
   fd_ = fd;
 }
 
-int UniqueFd::Release() noexcept {
-  return std::exchange(fd_, -1);
-}
+int UniqueFd::Release() noexcept { return std::exchange(fd_, -1); }
 
 StatusOr<Pipe> CreatePipe(int flags) {
   std::array<int, 2> fds = {-1, -1};

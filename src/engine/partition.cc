@@ -46,10 +46,8 @@ constexpr uint64_t kPrimaryEntriesLba = 2;
 
 constexpr uint32_t kMbrMaxSectors = 0xFFFF'FFFF;
 
-
 uint32_t Crc32(std::span<const uint8_t> data);
 void EncodePartitionName(std::string_view name, std::span<uint8_t> field);
-
 
 constexpr size_t kOffCrc = 16;
 constexpr size_t kOffMyLba = 24;
@@ -160,7 +158,6 @@ Status ReadAt(const UniqueFd& drive, std::span<uint8_t> buffer,
   return absl::OkStatus();
 }
 
-
 std::vector<uint8_t> ProtectiveMbr(uint32_t sector_size,
                                    uint64_t disk_sectors) {
   std::vector<uint8_t> block(sector_size, 0);
@@ -198,7 +195,8 @@ void WriteEntry(std::span<uint8_t> entries, uint32_t number,
 std::vector<uint8_t> BuildHeader(uint32_t sector_size, uint64_t my_lba,
                                  uint64_t alternate_lba, uint64_t entries_lba,
                                  uint64_t first_usable, uint64_t last_usable,
-                                 const EfiGuid& disk_guid, uint32_t entries_crc) {
+                                 const EfiGuid& disk_guid,
+                                 uint32_t entries_crc) {
   std::vector<uint8_t> block(sector_size, 0);
   std::ranges::copy(kGptSignature, block.begin());
   PutLe<uint32_t>(block, 8, kGptRevision);
@@ -357,9 +355,9 @@ StatusOr<EfiPartitionLayout> PartitionDrive(const std::filesystem::path& drive,
                        config.partitions.home.Bytes()));
 
   constexpr std::array<std::string_view, 3> kNames = {"EFI", "root", "home"};
-  const std::array<EfiGuid, 3> types = {
-      EfiGuid::EspType(), EfiGuid::LinuxFilesystemType(),
-      EfiGuid::LinuxFilesystemType()};
+  const std::array<EfiGuid, 3> types = {EfiGuid::EspType(),
+                                        EfiGuid::LinuxFilesystemType(),
+                                        EfiGuid::LinuxFilesystemType()};
 
   EfiPartitionLayout efi = layout[0];
   std::vector<uint8_t> entries(size_t{kEntryCount} * kEntrySize, 0);

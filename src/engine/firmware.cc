@@ -318,7 +318,6 @@ std::filesystem::path EfiVariablePath(std::string_view name,
          fmt::format("{}-{}", name, guid.ToString());
 }
 
-
 SetupMode DetectSetupMode() {
   if (!Exists(kEfiSysfsDir)) {
     return SetupMode{.state = SetupMode::State::kUnknown,

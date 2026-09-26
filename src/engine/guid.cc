@@ -89,7 +89,8 @@ StatusOr<EfiGuid> EfiGuid::GenerateRandom() {
   // In mixed-endian format:
   // Data3 high byte is bytes[7]: set version 4 in top nibble (0x40..0x4f).
   bytes[7] = static_cast<uint8_t>((bytes[7] & 0x0fU) | 0x40U);
-  // Data4 first byte is bytes[8]: set RFC 4122 variant 1 in top 2 bits (0x80..0xbf).
+  // Data4 first byte is bytes[8]: set RFC 4122 variant 1 in top 2 bits
+  // (0x80..0xbf).
   bytes[8] = static_cast<uint8_t>((bytes[8] & 0x3fU) | 0x80U);
   return EfiGuid(bytes);
 }

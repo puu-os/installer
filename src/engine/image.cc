@@ -308,7 +308,6 @@ StatusOr<std::string> ManifestBlobPath(
   return fmt::format("blobs/sha256/{}", parsed.Hex());
 }
 
-
 StatusOr<uint64_t> LayerTotalBytes(std::span<const uint8_t> raw_manifest,
                                    const std::filesystem::path& source_image) {
   PUU_ASSIGN_OR_RETURN(

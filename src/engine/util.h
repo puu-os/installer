@@ -4,9 +4,8 @@
 #ifndef PUU_ENGINE_UTIL_H_
 #define PUU_ENGINE_UTIL_H_
 
-#include <sys/types.h>
-
 #include <fcntl.h>
+#include <sys/types.h>
 
 #include <array>
 #include <chrono>
@@ -51,8 +50,7 @@ Status WriteFile(const std::filesystem::path& path, std::string_view content,
                  mode_t mode, int extra_flags = 0);
 Status ReplaceFileBytes(const std::filesystem::path& path,
                         std::span<const uint8_t> data);
-Status ReplaceFile(const std::filesystem::path& path,
-                   std::string_view content);
+Status ReplaceFile(const std::filesystem::path& path, std::string_view content);
 
 // Device nodes backing mounts in /proc/self/mountinfo.
 StatusOr<std::set<std::filesystem::path>> MountedSources();

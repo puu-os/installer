@@ -12,8 +12,8 @@
 
 #include "base/secret_string.h"
 #include "config.h"
-#include "engine/image.h"
 #include "engine/guid.h"
+#include "engine/image.h"
 
 namespace puu::engine {
 

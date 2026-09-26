@@ -491,10 +491,9 @@ Status Command::Run() {
   logger->info("$ {}", command_line);
 
   PUU_ASSIGN_OR_RETURN(
-      Child child,
-      Spawn(program_, args_, env_,
-            ChildSetup{.chroot_dir = chroot_,
-                       .new_pid_namespace = new_pid_namespace_}));
+      Child child, Spawn(program_, args_, env_,
+                         ChildSetup{.chroot_dir = chroot_,
+                                    .new_pid_namespace = new_pid_namespace_}));
 
   std::deque<std::string> tail;
   const auto started = std::chrono::steady_clock::now();
