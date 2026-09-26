@@ -46,6 +46,23 @@ class SecretString {
   std::string value_;
 };
 
+// Cleanses and clears a std::string holding sensitive data.
+void WipeString(std::string* value);
+
+// Constant-time equality comparison to protect against timing attacks.
+[[nodiscard]] bool operator==(const SecretString& lhs,
+                              const SecretString& rhs) noexcept;
+[[nodiscard]] bool operator==(const SecretString& lhs,
+                              std::string_view rhs) noexcept;
+[[nodiscard]] bool operator==(std::string_view lhs,
+                              const SecretString& rhs) noexcept;
+[[nodiscard]] bool operator!=(const SecretString& lhs,
+                              const SecretString& rhs) noexcept;
+[[nodiscard]] bool operator!=(const SecretString& lhs,
+                              std::string_view rhs) noexcept;
+[[nodiscard]] bool operator!=(std::string_view lhs,
+                              const SecretString& rhs) noexcept;
+
 }  // namespace puu
 
 #endif  // PUU_BASE_SECRET_STRING_H_

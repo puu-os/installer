@@ -36,7 +36,6 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/color.hpp>
 #include <ftxui/screen/terminal.hpp>
-#include <openssl/crypto.h>
 #include <spdlog/spdlog.h>
 
 #include "base/status.h"
@@ -248,10 +247,6 @@ void Truncate(std::string* value, size_t max_bytes) {
   *value = TruncateUtf8(*value, max_bytes);
 }
 
-void WipeString(std::string* value) {
-  OPENSSL_cleanse(value->data(), value->size());
-  value->clear();
-}
 
 std::string FrameSafe(std::string_view text) {
   std::string out;

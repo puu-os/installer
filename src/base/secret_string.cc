@@ -3,6 +3,7 @@
 
 #include "base/secret_string.h"
 
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -10,20 +11,35 @@
 
 namespace puu {
 
+void WipeString(std::string* value) {
+  if (value == nullptr) {
+    return;
+  }
+  if (!value->empty()) {
+    OPENSSL_cleanse(value->data(), value->size());
+  }
+  const size_t cap = value->capacity();
+  if (cap > 0) {
+    value->resize(cap, '\0');
+    OPENSSL_cleanse(value->data(), cap);
+  }
+  value->clear();
+}
+
 SecretString::SecretString(std::string_view text) : value_(text) {}
 
 SecretString::~SecretString() { Wipe(); }
 
 SecretString::SecretString(SecretString&& other) noexcept
     : value_(std::move(other.value_)) {
-  other.Clear();
+  other.Wipe();
 }
 
 SecretString& SecretString::operator=(SecretString&& other) noexcept {
   if (this != &other) {
-    Clear();
+    Wipe();
     value_ = std::move(other.value_);
-    other.Clear();
+    other.Wipe();
   }
   return *this;
 }
@@ -35,15 +51,38 @@ void SecretString::Assign(std::string_view text) {
   value_.assign(text.data(), text.size());
 }
 
-void SecretString::Clear() {
-  Wipe();
-  value_.clear();
+void SecretString::Clear() { Wipe(); }
+
+void SecretString::Wipe() { WipeString(&value_); }
+
+bool operator==(const SecretString& lhs, const SecretString& rhs) noexcept {
+  if (lhs.Size() != rhs.Size()) {
+    return false;
+  }
+  return CRYPTO_memcmp(lhs.Value().data(), rhs.Value().data(), lhs.Size()) == 0;
 }
 
-void SecretString::Wipe() {
-  if (!value_.empty()) {
-    OPENSSL_cleanse(value_.data(), value_.size());
+bool operator==(const SecretString& lhs, std::string_view rhs) noexcept {
+  if (lhs.Size() != rhs.size()) {
+    return false;
   }
+  return CRYPTO_memcmp(lhs.Value().data(), rhs.data(), lhs.Size()) == 0;
+}
+
+bool operator==(std::string_view lhs, const SecretString& rhs) noexcept {
+  return rhs == lhs;
+}
+
+bool operator!=(const SecretString& lhs, const SecretString& rhs) noexcept {
+  return !(lhs == rhs);
+}
+
+bool operator!=(const SecretString& lhs, std::string_view rhs) noexcept {
+  return !(lhs == rhs);
+}
+
+bool operator!=(std::string_view lhs, const SecretString& rhs) noexcept {
+  return !(lhs == rhs);
 }
 
 }  // namespace puu
