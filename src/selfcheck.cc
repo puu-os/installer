@@ -10,20 +10,24 @@
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+
 #include <absl/strings/match.h>
 #include <spdlog/spdlog.h>
 
+#include "base/secret_string.h"
 #include "base/status.h"
 #include "config.h"
+#include "engine/block.h"
 #include "engine/command.h"
 #include "engine/context.h"
+#include "engine/firmware.h"
+#include "engine/guid.h"
 #include "engine/le_bytes.h"
-#include "engine/partition.cc"  // NOLINT(bugprone-suspicious-include)
 #include "engine/partition.h"
-#include "engine/passwd.cc"  // NOLINT(bugprone-suspicious-include)
 #include "engine/passwd.h"
 #include "engine/pipeline.h"
-#include "engine/secureboot.cc"  // NOLINT(bugprone-suspicious-include)
+#include "engine/secureboot.h"
 #include "engine/util.h"
 
 namespace puu::engine {
@@ -226,6 +230,216 @@ void CheckMounts() {
   assert(sources.ok());
 }
 
+void CheckFileUtils() {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "puu-selfcheck-fileutils.tmp";
+  RemoveFile(path).IgnoreError();
+
+  assert(!Exists(path));
+  assert(!IsRegularFile(path));
+
+  const Status write_status = WriteFile(path, "hello world\n", 0600);
+  assert(write_status.ok());
+  assert(Exists(path));
+  assert(IsRegularFile(path));
+
+  const StatusOr<std::string> read_content = ReadFile(path);
+  assert(read_content.ok());
+  assert(*read_content == "hello world\n");
+
+  const Status replace_status = ReplaceFile(path, "replaced\n");
+  assert(replace_status.ok());
+
+  const StatusOr<std::string> replaced_content = ReadFile(path);
+  assert(replaced_content.ok());
+  assert(*replaced_content == "replaced\n");
+
+  const std::filesystem::path copy_path =
+      std::filesystem::temp_directory_path() / "puu-selfcheck-copy.tmp";
+  RemoveFile(copy_path).IgnoreError();
+  assert(CopyFile(path, copy_path).ok());
+  assert(Exists(copy_path));
+  assert(IsRegularFile(copy_path));
+  const StatusOr<std::string> copy_content = ReadFile(copy_path);
+  assert(copy_content.ok() && *copy_content == "replaced\n");
+
+  const std::filesystem::path symlink_path =
+      std::filesystem::temp_directory_path() / "puu-selfcheck-symlink.tmp";
+  RemoveFile(symlink_path).IgnoreError();
+  assert(CreateSymlink(copy_path, symlink_path).ok());
+  assert(Exists(symlink_path));
+  const StatusOr<std::filesystem::path> target = ReadSymlink(symlink_path);
+  assert(target.ok() && *target == copy_path);
+
+  const std::filesystem::path dir_path =
+      std::filesystem::temp_directory_path() / "puu-selfcheck-tree.tmp";
+  RemoveTree(dir_path).IgnoreError();
+  assert(CreateDirectories(dir_path / "subdir").ok());
+  assert(WriteFile(dir_path / "subdir" / "leaf.txt", "data", 0600).ok());
+  assert(Exists(dir_path / "subdir" / "leaf.txt"));
+  assert(RemoveTree(dir_path).ok());
+  assert(!Exists(dir_path));
+
+  assert(RemoveFile(symlink_path).ok());
+  assert(!Exists(symlink_path));
+  const std::filesystem::path renamed_path =
+      std::filesystem::temp_directory_path() / "puu-selfcheck-renamed.tmp";
+  RemoveFile(renamed_path).IgnoreError();
+  assert(Rename(copy_path, renamed_path).ok());
+  assert(!Exists(copy_path));
+  assert(Exists(renamed_path));
+  assert(RemoveFile(renamed_path).ok());
+  assert(!Exists(renamed_path));
+  assert(RemoveFile(path).ok());
+  assert(!Exists(path));
+}
+
+void CheckCreatePipe() {
+  const StatusOr<Pipe> pipe = CreatePipe();
+  assert(pipe.ok());
+  assert(pipe->read);
+  assert(pipe->write);
+
+  constexpr std::string_view kData = "pipe selfcheck test";
+  const ssize_t written =
+      ::write(pipe->write.Get(), kData.data(), kData.size());
+  assert(written == static_cast<ssize_t>(kData.size()));
+
+  std::array<char, 32> buffer = {};
+  const ssize_t read_bytes =
+      ::read(pipe->read.Get(), buffer.data(), buffer.size());
+  assert(read_bytes == static_cast<ssize_t>(kData.size()));
+  assert(std::string_view(buffer.data(), static_cast<size_t>(read_bytes)) ==
+         kData);
+}
+
+void CheckBlockProbing() {
+  const StatusOr<std::optional<std::filesystem::path>> missing_device =
+      FindDeviceByLabel("puu-nonexistent-label-test");
+  assert(missing_device.ok());
+  assert(!missing_device->has_value());
+
+  const StatusOr<std::string> missing_type =
+      ProbeFilesystemType("/nonexistent/puu-test-block");
+  assert(!missing_type.ok());
+}
+
+void CheckEfiGuid() {
+  const EfiGuid global = EfiGuid::Global();
+  assert(global.ToString() == "8be4df61-93ca-11d2-aa0d-00e098032b8c");
+  const StatusOr<EfiGuid> parsed_global =
+      EfiGuid::Parse("8be4df61-93ca-11d2-aa0d-00e098032b8c");
+  assert(parsed_global.ok());
+  assert(*parsed_global == global);
+
+  const EfiGuid sec_db = EfiGuid::ImageSecurityDatabase();
+  assert(sec_db.ToString() == "d719b2cb-3d3a-4596-a3bc-dad00e67656f");
+  const StatusOr<EfiGuid> parsed_sec_db =
+      EfiGuid::Parse("d719b2cb-3d3a-4596-a3bc-dad00e67656f");
+  assert(parsed_sec_db.ok());
+  assert(*parsed_sec_db == sec_db);
+
+  const EfiGuid esp = EfiGuid::EspType();
+  assert(esp.ToString() == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b");
+  assert(*EfiGuid::Parse("c12a7328-f81f-11d2-ba4b-00a0c93ec93b") == esp);
+
+  const EfiGuid linux_fs = EfiGuid::LinuxFilesystemType();
+  assert(linux_fs.ToString() == "0fc63daf-8483-4772-8e79-3d69d8477de4");
+  assert(*EfiGuid::Parse("0fc63daf-8483-4772-8e79-3d69d8477de4") == linux_fs);
+  const EfiGuid cert_x509 = EfiGuid::CertX509();
+  assert(cert_x509.ToString() == "a5c059a1-94e4-4aa7-87b5-ab155c2bf072");
+  assert(*EfiGuid::Parse("a5c059a1-94e4-4aa7-87b5-ab155c2bf072") == cert_x509);
+
+  const EfiGuid cert_pkcs7 = EfiGuid::CertPkcs7();
+  assert(cert_pkcs7.ToString() == "4aafd29d-68df-49ee-8aa9-347d375665a7");
+  assert(*EfiGuid::Parse("4aafd29d-68df-49ee-8aa9-347d375665a7") == cert_pkcs7);
+
+  constexpr EfiGuid custom = EfiGuid::FromParts(
+      0x12345678, 0x1234, 0x5678,
+      {0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0});
+  assert(custom.ToString() == "12345678-1234-5678-1234-56789abcdef0");
+
+  // Round-trip without dashes
+  const StatusOr<EfiGuid> no_dashes =
+      EfiGuid::Parse("8be4df6193ca11d2aa0d00e098032b8c");
+  assert(no_dashes.ok());
+  assert(*no_dashes == global);
+
+  // Random generation checks
+  const StatusOr<EfiGuid> random_guid = EfiGuid::GenerateRandom();
+  assert(random_guid.ok());
+  const std::string text = random_guid->ToString();
+  assert(text.size() == 36);
+  assert(text[8] == '-' && text[13] == '-' && text[18] == '-' && text[23] == '-');
+  // RFC 4122 version 4 check: 3rd field starts with '4'
+  assert(text[14] == '4');
+  // RFC 4122 variant 1 check: 4th field starts with '8', '9', 'a', or 'b'
+  const char variant_char = text[19];
+  assert(variant_char == '8' || variant_char == '9' || variant_char == 'a' ||
+         variant_char == 'b');
+  const StatusOr<EfiGuid> parsed_random = EfiGuid::Parse(text);
+  assert(parsed_random.ok());
+  assert(*parsed_random == *random_guid);
+
+  // Error cases
+  assert(!EfiGuid::Parse("").ok());
+  assert(!EfiGuid::Parse("8be4df61-93ca-11d2-aa0d-00e098032b8").ok());
+  assert(!EfiGuid::Parse("8be4df61-93ca-11d2-aa0d-00e098032b8ccc").ok());
+  assert(!EfiGuid::Parse("8be4df61-93ca-11d2-aa0d-00e098032b8g").ok());
+}
+
+void CheckSecretString() {
+  SecretString empty;
+  assert(empty.Empty());
+  assert(empty.Size() == 0);
+  assert(empty.Value().empty());
+  assert(empty == "");
+  assert("" == empty);
+
+  SecretString secret("super-secret-password");
+  assert(!secret.Empty());
+  assert(secret.Size() == 21);
+  assert(secret.Value() == "super-secret-password");
+  assert(secret == "super-secret-password");
+  assert("super-secret-password" == secret);
+  assert(secret != "wrong-password");
+  assert(secret != "");
+  assert(empty != secret);
+
+  // Clone
+  SecretString clone = secret.Clone();
+  assert(clone == secret);
+  assert(clone.Value() == secret.Value());
+
+  // Assign and Clear
+  secret.Assign("new-secret");
+  assert(secret == "new-secret");
+  assert(secret != clone);
+  secret.Clear();
+  assert(secret.Empty());
+  assert(secret.Size() == 0);
+
+  // Move construction
+  SecretString moved(std::move(clone));
+  assert(moved == "super-secret-password");
+  assert(clone.Empty());
+  assert(clone.Size() == 0);
+
+  // Move assignment
+  SecretString target;
+  target = std::move(moved);
+  assert(target == "super-secret-password");
+  assert(moved.Empty());
+  assert(moved.Size() == 0);
+
+  // WipeString helper
+  std::string regular = "temporary-plaintext-password";
+  WipeString(&regular);
+  assert(regular.empty());
+  assert(regular.size() == 0);
+  WipeString(nullptr);
+}
+
 }  // namespace
 }  // namespace puu::engine
 
@@ -241,6 +455,11 @@ int main() {
   puu::engine::CheckNewPidNamespace();
   puu::engine::CheckRunInteractive();
   puu::engine::CheckMounts();
+  puu::engine::CheckFileUtils();
+  puu::engine::CheckCreatePipe();
+  puu::engine::CheckBlockProbing();
+  puu::engine::CheckEfiGuid();
+  puu::engine::CheckSecretString();
   std::puts("selfcheck: ok");
   return 0;
 }

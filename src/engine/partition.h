@@ -4,6 +4,7 @@
 #ifndef PUU_ENGINE_PARTITION_H_
 #define PUU_ENGINE_PARTITION_H_
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 
@@ -18,6 +19,13 @@ namespace puu::engine {
 inline constexpr uint32_t kEfiPartitionNumber = 1;
 inline constexpr uint32_t kRootPartitionNumber = 2;
 inline constexpr uint32_t kHomePartitionNumber = 3;
+inline constexpr uint64_t kAlignmentBytes = 1024ULL * 1024;
+
+uint64_t FirstUsableLba(uint32_t sector_size);
+uint64_t LastUsableLba(uint64_t disk_sectors, uint32_t sector_size);
+StatusOr<std::array<EfiPartitionLayout, 3>> ComputeGptLayout(
+    uint64_t disk_sectors, uint32_t sector_size, uint64_t efi_bytes,
+    uint64_t home_bytes);
 
 // Derives a partition device path from a whole-disk path. Disks whose name ends
 // in a digit take a "p" separator, so /dev/nvme0n1 yields /dev/nvme0n1p1 while

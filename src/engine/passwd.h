@@ -19,6 +19,8 @@ inline constexpr int kSha512CryptRounds = 5000;
 //
 // The result is safe to write to disk; the plaintext is not retained.
 StatusOr<std::string> HashPassword(std::string_view password);
+StatusOr<std::string> Sha512Crypt(std::string_view password,
+                                  std::string_view salt);
 
 }  // namespace puu::engine
 

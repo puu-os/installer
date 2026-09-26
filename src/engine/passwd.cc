@@ -111,6 +111,7 @@ std::string EncodeDigest(const Digest512& digest) {
   emit(digest[63], 2);
   return out;
 }
+}  // namespace
 
 StatusOr<std::string> Sha512Crypt(std::string_view password,
                                   std::string_view salt) {
@@ -178,8 +179,6 @@ StatusOr<std::string> Sha512Crypt(std::string_view password,
   }
   return encoded;
 }
-
-}  // namespace
 
 StatusOr<std::string> HashPassword(std::string_view password) {
   std::array<uint8_t, kSaltChars> random = {};
