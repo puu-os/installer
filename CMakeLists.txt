@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.31)
 
 project(
   puu-installer
-  VERSION 1.0.59
+  VERSION 1.0.60
   LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
