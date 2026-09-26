@@ -4,7 +4,7 @@
 #include "cli.h"
 
 #include <cstdio>
-#include <vector>
+#include <array>
 
 #include <argtable3.h>
 
@@ -16,9 +16,11 @@ namespace {
 
 constexpr const char* kProgramName = "puu-installer";
 
+template <size_t N>
 class ArgTable {
  public:
   template <typename... Entries>
+    requires(sizeof...(Entries) == N)
   explicit ArgTable(Entries*... entries)
       : entries_{static_cast<void*>(entries)...} {}
 
@@ -30,8 +32,11 @@ class ArgTable {
   void** Data() { return entries_.data(); }
 
  private:
-  std::vector<void*> entries_;
+  std::array<void*, N> entries_;
 };
+
+template <typename... Entries>
+ArgTable(Entries*...) -> ArgTable<sizeof...(Entries)>;
 
 void PrintHelp(void** table) {
   std::printf("Usage: %s", kProgramName);
@@ -115,8 +120,9 @@ ParseResult ParseCommandLine(int argc, char** argv) {
   if (k3s_role->count > 0) {
     StatusOr<K3sRole> role = ParseK3sRole(k3s_role->sval[0]);
     if (!role.ok()) {
-      std::fprintf(stderr, "%s: --k3s-role: %s\n", kProgramName,
-                   std::string(role.status().message()).c_str());
+      const auto message = role.status().message();
+      std::fprintf(stderr, "%s: --k3s-role: %.*s\n", kProgramName,
+                   static_cast<int>(message.size()), message.data());
       return result;
     }
     result.options.k3s_role = *role;
