@@ -12,9 +12,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
-#include <ios>
-#include <iterator>
 #include <optional>
 #include <span>
 #include <string>
@@ -62,36 +59,6 @@ constexpr std::string_view kBootcGraphRoot =
     "/run/puu-installer/target/var/tmp/puu-bootc-storage/containers/storage";
 constexpr std::string_view kContainersRunRoot = "/run/containers/storage";
 constexpr std::string_view kHostVarTmp = "/var/tmp";
-
-bool IsRegularFile(const std::filesystem::path& path) {
-  std::error_code error;
-  return std::filesystem::is_regular_file(path, error);
-}
-
-bool Exists(const std::filesystem::path& path) {
-  std::error_code error;
-  return std::filesystem::exists(std::filesystem::symlink_status(path, error));
-}
-
-Status WriteFile(const std::filesystem::path& path, std::string_view content,
-                 mode_t mode, int extra_flags = 0) {
-  return WriteBytes(
-      path, {reinterpret_cast<const uint8_t*>(content.data()), content.size()},
-      mode, extra_flags);
-}
-
-StatusOr<std::string> ReadFile(const std::filesystem::path& path) {
-  std::ifstream file(path, std::ios::binary);
-  if (!file.is_open()) {
-    return InternalError("failed to open {}", path.string());
-  }
-  std::string text{std::istreambuf_iterator<char>(file),
-                   std::istreambuf_iterator<char>()};
-  if (file.bad()) {
-    return InternalError("failed to read {}", path.string());
-  }
-  return text;
-}
 
 std::filesystem::path InTarget(const std::filesystem::path& path) {
   return std::filesystem::path(kTargetMount) / path.relative_path();
@@ -440,8 +407,7 @@ Status StepBootcInstall(Runner& runner) {
   PUU_RETURN_IF_ERROR(BindMount(scratch, scratch));
   cleanups.Push([scratch] {
     Unmount(scratch).IgnoreError();
-    std::error_code error;
-    std::filesystem::remove_all(scratch, error);
+    RemoveTree(scratch).IgnoreError();
   });
   PUU_RETURN_IF_ERROR(BindMount(scratch, kHostVarTmp));
   cleanups.Push([] { Unmount(kHostVarTmp).IgnoreError(); });
@@ -572,19 +538,11 @@ Status StepFirstboot(Runner& runner) {
   }
 
   const std::filesystem::path localtime = etc / "localtime";
-  std::error_code error;
-  std::filesystem::remove(localtime, error);
-  if (error) {
-    return FilesystemError(error, fmt::format("remove {}", localtime.string()));
-  }
-  std::filesystem::create_symlink(
+  PUU_RETURN_IF_ERROR(RemoveFile(localtime));
+  PUU_RETURN_IF_ERROR(CreateSymlink(
       std::filesystem::path("../usr/share/zoneinfo") /
           identity.timezone.Value(),
-      localtime, error);
-  if (error) {
-    return FilesystemError(error,
-                           fmt::format("symlink {}", localtime.string()));
-  }
+      localtime));
 
   if (!identity.keymap.Empty()) {
     PUU_RETURN_IF_ERROR(WriteFile(
@@ -645,10 +603,7 @@ Status StepConfigureK3s(Runner& runner) {
           return ErrnoToStatus(errno, "create k3s token directory");
         }
         cleanups.Push([&record_cleanup, directory] {
-          std::error_code error;
-          std::filesystem::remove_all(directory, error);
-          record_cleanup(FilesystemError(
-              error, fmt::format("remove k3s token directory {}", directory)));
+          record_cleanup(RemoveTree(directory));
         });
 
         const std::filesystem::path token =
@@ -774,22 +729,10 @@ Status StepInstallBootloader(Runner& runner) {
   PUU_RETURN_IF_ERROR(CreateDirectories(systemd_dir));
   PUU_RETURN_IF_ERROR(CreateDirectories(fallback_dir));
 
-  std::error_code error;
-  const auto options = std::filesystem::copy_options::overwrite_existing;
-  std::filesystem::copy_file(
-      source, systemd_dir / fmt::format("systemd-boot{}.efi", suffix), options,
-      error);
-  if (error) {
-    return FilesystemError(error,
-                           fmt::format("copy {} to the ESP", source.string()));
-  }
-
-  std::filesystem::copy_file(
-      source, fallback_dir / fmt::format("BOOT{}.EFI", upper), options, error);
-  if (error) {
-    return FilesystemError(error,
-                           fmt::format("copy {} to the ESP", source.string()));
-  }
+  PUU_RETURN_IF_ERROR(CopyFile(
+      source, systemd_dir / fmt::format("systemd-boot{}.efi", suffix)));
+  PUU_RETURN_IF_ERROR(
+      CopyFile(source, fallback_dir / fmt::format("BOOT{}.EFI", upper)));
   InstallationLogger()->info("installed systemd-boot on the ESP");
   return absl::OkStatus();
 }

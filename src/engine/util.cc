@@ -106,11 +106,83 @@ bool IsDirectory(const std::filesystem::path& path) {
   return std::filesystem::is_directory(path, error);
 }
 
+bool IsRegularFile(const std::filesystem::path& path) {
+  std::error_code error;
+  return std::filesystem::is_regular_file(path, error);
+}
+
+bool Exists(const std::filesystem::path& path) {
+  std::error_code error;
+  return std::filesystem::exists(std::filesystem::symlink_status(path, error));
+}
+
 std::filesystem::path Canonical(const std::filesystem::path& path) {
   std::error_code error;
   std::filesystem::path const resolved =
       std::filesystem::canonical(path, error);
   return error ? path : resolved;
+}
+Status CopyFile(const std::filesystem::path& source,
+                const std::filesystem::path& destination) {
+  std::error_code error;
+  std::filesystem::copy_file(source, destination,
+                             std::filesystem::copy_options::overwrite_existing,
+                             error);
+  if (error) {
+    return FilesystemError(error, fmt::format("copy {} to {}", source.string(),
+                                              destination.string()));
+  }
+  return absl::OkStatus();
+}
+Status Rename(const std::filesystem::path& source,
+              const std::filesystem::path& destination) {
+  std::error_code error;
+  std::filesystem::rename(source, destination, error);
+  if (error) {
+    return FilesystemError(error, fmt::format("rename {} to {}", source.string(),
+                                              destination.string()));
+  }
+  return absl::OkStatus();
+}
+
+StatusOr<std::filesystem::path> ReadSymlink(const std::filesystem::path& path) {
+  std::error_code error;
+  const std::filesystem::path target =
+      std::filesystem::read_symlink(path, error);
+  if (error) {
+    return FilesystemError(error, fmt::format("readlink {}", path.string()));
+  }
+  return target;
+}
+
+Status CreateSymlink(const std::filesystem::path& target,
+                     const std::filesystem::path& link_path) {
+  std::error_code error;
+  std::filesystem::create_symlink(target, link_path, error);
+  if (error) {
+    return FilesystemError(error,
+                           fmt::format("symlink {} to {}", link_path.string(),
+                                       target.string()));
+  }
+  return absl::OkStatus();
+}
+
+Status RemoveFile(const std::filesystem::path& path) {
+  std::error_code error;
+  std::filesystem::remove(path, error);
+  if (error) {
+    return FilesystemError(error, fmt::format("remove {}", path.string()));
+  }
+  return absl::OkStatus();
+}
+
+Status RemoveTree(const std::filesystem::path& path) {
+  std::error_code error;
+  std::filesystem::remove_all(path, error);
+  if (error) {
+    return FilesystemError(error, fmt::format("remove {}", path.string()));
+  }
+  return absl::OkStatus();
 }
 
 Status WriteBytes(const std::filesystem::path& path,
@@ -118,7 +190,7 @@ Status WriteBytes(const std::filesystem::path& path,
   const UniqueFd fd(
       ::open(path.c_str(),
              O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | extra_flags, mode));
-  if (fd.Get() < 0) {
+  if (!fd) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("open {}", path.string()));
   }
@@ -147,13 +219,22 @@ Status WriteBytes(const std::filesystem::path& path,
   return absl::OkStatus();
 }
 
+Status WriteFile(const std::filesystem::path& path, std::string_view content,
+                 mode_t mode, int extra_flags) {
+  return WriteBytes(
+      path,
+      std::span<const uint8_t>(
+          reinterpret_cast<const uint8_t*>(content.data()), content.size()),
+      mode, extra_flags);
+}
+
 Status ReplaceFileBytes(const std::filesystem::path& path,
                         std::span<const uint8_t> data) {
   const std::filesystem::path temporary =
       path.parent_path() / ("." + path.filename().string() + ".tmp");
   UniqueFd fd(::open(temporary.c_str(),
                      O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644));
-  if (fd.Get() < 0) {
+  if (!fd) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("open {}", temporary.string()));
   }
@@ -174,7 +255,7 @@ Status ReplaceFileBytes(const std::filesystem::path& path,
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("fsync {}", temporary.string()));
   }
-  fd = UniqueFd();
+  fd.Reset();
   if (::rename(temporary.c_str(), path.c_str()) != 0) {
     const int error = errno;
     std::error_code ignored;
@@ -183,6 +264,14 @@ Status ReplaceFileBytes(const std::filesystem::path& path,
                                             temporary.string(), path.string()));
   }
   return absl::OkStatus();
+}
+
+Status ReplaceFile(const std::filesystem::path& path,
+                   std::string_view content) {
+  return ReplaceFileBytes(
+      path,
+      std::span<const uint8_t>(
+          reinterpret_cast<const uint8_t*>(content.data()), content.size()));
 }
 
 StatusOr<std::set<std::filesystem::path>> MountedSources() {
@@ -207,18 +296,35 @@ StatusOr<std::set<std::filesystem::path>> MountedSources() {
 
 UniqueFd::UniqueFd(int fd) : fd_(fd) {}
 
-UniqueFd::~UniqueFd() {
+UniqueFd::~UniqueFd() { Reset(); }
+
+UniqueFd::UniqueFd(UniqueFd&& other) noexcept : fd_(other.Release()) {}
+
+UniqueFd& UniqueFd::operator=(UniqueFd&& other) noexcept {
+  if (this != &other) {
+    Reset(other.Release());
+  }
+  return *this;
+}
+
+void UniqueFd::Reset(int fd) noexcept {
   if (fd_ >= 0) {
     ::close(fd_);
   }
+  fd_ = fd;
 }
 
-UniqueFd::UniqueFd(UniqueFd&& other) noexcept
-    : fd_(std::exchange(other.fd_, -1)) {}
+int UniqueFd::Release() noexcept {
+  return std::exchange(fd_, -1);
+}
 
-UniqueFd& UniqueFd::operator=(UniqueFd&& other) noexcept {
-  std::swap(fd_, other.fd_);
-  return *this;
+StatusOr<Pipe> CreatePipe(int flags) {
+  std::array<int, 2> fds = {-1, -1};
+  if (::pipe2(fds.data(), flags) != 0) {
+    const int error = errno;
+    return ErrnoToStatus(error, "pipe2");
+  }
+  return Pipe{.read = UniqueFd(fds[0]), .write = UniqueFd(fds[1])};
 }
 
 Status RandomBytes(std::span<uint8_t> buffer) {
@@ -363,7 +469,7 @@ StatusOr<std::string> ReadFirstLine(const std::filesystem::path& path) {
 
 StatusOr<SecretString> ReadFirstSecretLine(const std::filesystem::path& path) {
   const UniqueFd fd(::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
-  if (fd.Get() < 0) {
+  if (!fd) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("open {}", path.string()));
   }
@@ -423,6 +529,19 @@ StatusOr<std::vector<uint8_t>> ReadFileBytes(
     return InternalError("failed to read {}", path.string());
   }
   return bytes;
+}
+
+StatusOr<std::string> ReadFile(const std::filesystem::path& path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return InternalError("failed to open {}", path.string());
+  }
+  std::string content{std::istreambuf_iterator<char>(file),
+                      std::istreambuf_iterator<char>()};
+  if (file.bad()) {
+    return InternalError("failed to read {}", path.string());
+  }
+  return content;
 }
 
 std::string_view Trim(std::string_view text) {

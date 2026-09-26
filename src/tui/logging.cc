@@ -28,6 +28,7 @@
 
 #include "base/status.h"
 #include "engine/pipeline.h"
+#include "engine/util.h"
 
 namespace puu::tui {
 
@@ -78,13 +79,8 @@ class LineBuffer {
 
 class DescriptorSink final : public spdlog::sinks::base_sink<std::mutex> {
  public:
-  explicit DescriptorSink(int descriptor) : descriptor_(descriptor) {}
-
-  ~DescriptorSink() override {
-    if (descriptor_ >= 0) {
-      ::close(descriptor_);
-    }
-  }
+  explicit DescriptorSink(engine::UniqueFd descriptor)
+      : descriptor_(std::move(descriptor)) {}
 
   DescriptorSink(const DescriptorSink&) = delete;
   DescriptorSink& operator=(const DescriptorSink&) = delete;
@@ -100,22 +96,21 @@ class DescriptorSink final : public spdlog::sinks::base_sink<std::mutex> {
 
  private:
   void Write(std::string_view text) {
-    while (descriptor_ >= 0 && !text.empty()) {
-      const ssize_t written = ::write(descriptor_, text.data(), text.size());
+    while (descriptor_ && !text.empty()) {
+      const ssize_t written =
+          ::write(descriptor_.Get(), text.data(), text.size());
       if (written < 0) {
         if (errno == EINTR) {
           continue;
         }
-
-        ::close(descriptor_);
-        descriptor_ = -1;
+        descriptor_.Reset();
         return;
       }
       text.remove_prefix(static_cast<size_t>(written));
     }
   }
 
-  int descriptor_;
+  engine::UniqueFd descriptor_;
 };
 
 class ScreenSink final : public spdlog::sinks::base_sink<std::mutex> {
@@ -147,7 +142,7 @@ class ScreenSink final : public spdlog::sinks::base_sink<std::mutex> {
   void flush_() override {}
 };
 
-StatusOr<int> OpenLogFile() {
+StatusOr<engine::UniqueFd> OpenLogFile() {
   if (::mkdir(kLogDirectory, 0700) != 0 && errno != EEXIST) {
     return ErrnoToStatus(errno, "mkdir /run/puu-installer");
   }
@@ -155,14 +150,14 @@ StatusOr<int> OpenLogFile() {
   if (::chmod(kLogDirectory, 0700) != 0) {
     return ErrnoToStatus(errno, "chmod /run/puu-installer");
   }
-  const int opened = ::open(
-      kLogPath, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
-  if (opened < 0) {
+
+  engine::UniqueFd opened(::open(
+      kLogPath, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600));
+  if (!opened) {
     return ErrnoToStatus(errno, "open /run/puu-installer/install.log");
   }
-  if (::fchmod(opened, 0600) != 0) {
+  if (::fchmod(opened.Get(), 0600) != 0) {
     const int error = errno;
-    ::close(opened);
     return ErrnoToStatus(error, "fchmod /run/puu-installer/install.log");
   }
   return opened;
@@ -171,11 +166,10 @@ StatusOr<int> OpenLogFile() {
 }  // namespace
 
 Status Init() {
-  PUU_ASSIGN_OR_RETURN(const int descriptor, OpenLogFile());
+  PUU_ASSIGN_OR_RETURN(engine::UniqueFd descriptor, OpenLogFile());
 
   try {
-    auto file_sink = std::make_shared<DescriptorSink>(descriptor);
-
+    auto file_sink = std::make_shared<DescriptorSink>(std::move(descriptor));
     file_sink->set_pattern("%Y-%m-%dT%H:%M:%S.%e %l %v");
     const std::vector<spdlog::sink_ptr> sinks{std::move(file_sink),
                                               std::make_shared<ScreenSink>()};

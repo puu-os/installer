@@ -27,12 +27,12 @@
 
 #include <absl/status/status.h>
 #include <absl/strings/match.h>
-#include <blkid/blkid.h>
 #include <fmt/format.h>
 #include <nlohmann/json.hpp>
 
 #include "base/status.h"
 #include "config.h"
+#include "engine/block.h"
 #include "engine/pipeline.h"
 #include "engine/util.h"
 
@@ -87,17 +87,10 @@ StatusOr<std::optional<nlohmann::json>> ReadSidecar(
     const std::filesystem::path& source_image) {
   const std::filesystem::path path =
       source_image.parent_path() / kManifestFilename;
-  std::error_code error;
-  const std::filesystem::file_status status =
-      std::filesystem::status(path, error);
-  if (error == std::errc::no_such_file_or_directory ||
-      status.type() == std::filesystem::file_type::not_found) {
+  if (!Exists(path)) {
     return std::nullopt;
   }
-  if (error) {
-    return FilesystemError(error, fmt::format("inspect {}", path.string()));
-  }
-  if (!std::filesystem::is_regular_file(status)) {
+  if (!IsRegularFile(path)) {
     return FailedPreconditionError("image manifest '{}' is not a regular file",
                                    path.string());
   }
@@ -315,41 +308,6 @@ StatusOr<std::string> ManifestBlobPath(
   return fmt::format("blobs/sha256/{}", parsed.Hex());
 }
 
-StatusOr<std::optional<std::filesystem::path>> FindByLabel(
-    std::string_view label) {
-  const std::string wanted(label);
-
-  char* device = blkid_evaluate_tag("LABEL", wanted.c_str(), nullptr);
-  if (device == nullptr) {
-    return std::nullopt;
-  }
-  const std::unique_ptr<char, decltype(&free)> owned(device, &free);
-  return std::filesystem::path(owned.get());
-}
-
-StatusOr<std::string> ProbeFilesystemType(const std::filesystem::path& device) {
-  blkid_probe probe = blkid_new_probe_from_filename(device.c_str());
-  if (probe == nullptr) {
-    return FailedPreconditionError("cannot probe {}", device.string());
-  }
-  const std::unique_ptr<blkid_struct_probe, decltype(&blkid_free_probe)> owned(
-      probe, &blkid_free_probe);
-
-  blkid_probe_enable_superblocks(probe, 1);
-  blkid_probe_set_superblocks_flags(probe, BLKID_SUBLKS_TYPE);
-
-  if (blkid_do_safeprobe(probe) != 0) {
-    return FailedPreconditionError("{} has no unambiguous filesystem",
-                                   device.string());
-  }
-  const char* type = nullptr;
-  if (blkid_probe_lookup_value(probe, "TYPE", &type, nullptr) != 0 ||
-      type == nullptr) {
-    return FailedPreconditionError("{} has no filesystem type",
-                                   device.string());
-  }
-  return std::string(type);
-}
 
 StatusOr<uint64_t> LayerTotalBytes(std::span<const uint8_t> raw_manifest,
                                    const std::filesystem::path& source_image) {
@@ -451,8 +409,7 @@ StatusOr<std::optional<std::filesystem::path>> DefaultSourceImage(
   const std::filesystem::path& mount_point = config.image.source_mount;
   std::filesystem::path image = mount_point / kImageFilename;
 
-  std::error_code error;
-  if (std::filesystem::is_regular_file(image, error)) {
+  if (IsRegularFile(image)) {
     return image;
   }
 
@@ -473,7 +430,7 @@ StatusOr<std::optional<std::filesystem::path>> DefaultSourceImage(
   }
 
   PUU_ASSIGN_OR_RETURN(const std::optional<std::filesystem::path> device,
-                       FindByLabel(config.image.source_label->Value()));
+                       FindDeviceByLabel(config.image.source_label->Value()));
   if (!device.has_value()) {
     return NotFoundError(
         "no filesystem labelled \"{}\" holds the install image",
@@ -485,7 +442,7 @@ StatusOr<std::optional<std::filesystem::path>> DefaultSourceImage(
   PUU_RETURN_IF_ERROR(MountTarget(*device, mount_point, filesystem_type,
                                   "ro,nosuid,nodev,noexec"));
 
-  if (!std::filesystem::is_regular_file(image, error)) {
+  if (!IsRegularFile(image)) {
     Unmount(mount_point).IgnoreError();
     return NotFoundError("{} holds no {}", device->string(), kImageFilename);
   }
@@ -505,8 +462,7 @@ StatusOr<ImageRef> LoadTargetImgRef(const ImageManifest& manifest,
 
 StatusOr<std::vector<uint8_t>> RawManifest(
     const std::filesystem::path& source_image, const ImageManifest& manifest) {
-  std::error_code error;
-  if (std::filesystem::is_directory(source_image, error)) {
+  if (IsDirectory(source_image)) {
     return ReadFileBytes(source_image / "manifest.json");
   }
 

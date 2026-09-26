@@ -73,6 +73,9 @@ StatusOr<std::string> CaptureUuid(const std::filesystem::path& partition);
 // GPT PARTUUID of `partition`. The ESP is referenced this way because FAT has
 // no stable filesystem UUID.
 StatusOr<std::string> CapturePartUuid(const std::filesystem::path& partition);
+StatusOr<std::string> ProbeFilesystemType(const std::filesystem::path& device);
+StatusOr<std::optional<std::filesystem::path>> FindDeviceByLabel(
+    std::string_view label);
 
 Status WaitForUdevSettle(std::chrono::milliseconds timeout);
 

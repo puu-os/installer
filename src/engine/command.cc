@@ -30,7 +30,6 @@
 #include <utility>
 #include <vector>
 
-#include <absl/cleanup/cleanup.h>
 #include <absl/status/status.h>
 #include <absl/strings/str_join.h>
 #include <fmt/format.h>
@@ -137,7 +136,7 @@ std::string FormatArgv(std::string_view program,
 
 struct Child {
   pid_t pid = -1;
-  int output_fd = -1;
+  UniqueFd output_fd;
 };
 
 // Everything the child needs, resolved before the fork so that the child side
@@ -307,10 +306,8 @@ std::vector<std::string> MakeEnvironment(
   return entries;
 }
 
-StatusOr<Child> Spawn(
-    const std::string& program, const std::vector<std::string>& args,
-    const std::vector<std::pair<std::string, std::string>>& env,
-    const ChildSetup& setup) {
+std::vector<char*> BuildArgv(const std::string& program,
+                             const std::vector<std::string>& args) {
   std::vector<char*> argv;
   argv.reserve(args.size() + 2);
   argv.push_back(const_cast<char*>(program.c_str()));
@@ -318,32 +315,35 @@ StatusOr<Child> Spawn(
     argv.push_back(const_cast<char*>(argument.c_str()));
   }
   argv.push_back(nullptr);
-  const std::string resolved = ResolveProgram(program);
-  const std::vector<std::string> environment = MakeEnvironment(env);
+  return argv;
+}
+
+std::vector<char*> BuildEnvp(const std::vector<std::string>& environment) {
   std::vector<char*> envp;
   envp.reserve(environment.size() + 1);
   for (const std::string& entry : environment) {
     envp.push_back(const_cast<char*>(entry.data()));
   }
   envp.push_back(nullptr);
+  return envp;
+}
 
-  std::array<int, 2> output_fds = {-1, -1};
-  if (::pipe2(output_fds.data(), O_CLOEXEC) != 0) {
-    const int error = errno;
-    return ErrnoToStatus(error, "pipe for command output");
-  }
-  std::array<int, 2> status_fds = {-1, -1};
-  if (::pipe2(status_fds.data(), O_CLOEXEC) != 0) {
-    const int error = errno;
-    ::close(output_fds[0]);
-    ::close(output_fds[1]);
-    return ErrnoToStatus(error, "pipe for spawn status");
-  }
+StatusOr<Child> Spawn(
+    const std::string& program, const std::vector<std::string>& args,
+    const std::vector<std::pair<std::string, std::string>>& env,
+    const ChildSetup& setup) {
+  const std::string resolved = ResolveProgram(program);
+  const std::vector<std::string> environment = MakeEnvironment(env);
+  const std::vector<char*> argv = BuildArgv(program, args);
+  const std::vector<char*> envp = BuildEnvp(environment);
+
+  PUU_ASSIGN_OR_RETURN(Pipe output_pipe, CreatePipe());
+  PUU_ASSIGN_OR_RETURN(Pipe status_pipe, CreatePipe());
 
   const ChildParams params{
-      .output_read_fd = output_fds[0],
-      .output_write_fd = output_fds[1],
-      .status_fd = status_fds[1],
+      .output_read_fd = output_pipe.read.Get(),
+      .output_write_fd = output_pipe.write.Get(),
+      .status_fd = status_pipe.write.Get(),
       .program = resolved.c_str(),
       .argv = argv.data(),
       .envp = envp.data(),
@@ -354,23 +354,19 @@ StatusOr<Child> Spawn(
   const pid_t pid = ::fork();
   if (pid < 0) {
     const int error = errno;
-    ::close(output_fds[0]);
-    ::close(output_fds[1]);
-    ::close(status_fds[0]);
-    ::close(status_fds[1]);
     return ErrnoToStatus(error, fmt::format("fork for {}", program));
   }
   if (pid == 0) {
     RunChild(params);
   }
 
-  ::close(output_fds[1]);
-  ::close(status_fds[1]);
+  output_pipe.write.Reset();
+  status_pipe.write.Reset();
   const StatusOr<std::optional<ChildFailure>> failure =
-      ReadChildFailure(status_fds[0]);
-  ::close(status_fds[0]);
+      ReadChildFailure(status_pipe.read.Get());
+  status_pipe.read.Reset();
   if (!failure.ok() || failure->has_value()) {
-    ::close(output_fds[0]);
+    output_pipe.read.Reset();
     Reap(pid);
     if (!failure.ok()) {
       return failure.status();
@@ -379,7 +375,7 @@ StatusOr<Child> Spawn(
         (*failure)->error,
         fmt::format("{} for {}", ChildStepName((*failure)->step), program));
   }
-  return Child{.pid = pid, .output_fd = output_fds[0]};
+  return Child{.pid = pid, .output_fd = std::move(output_pipe.read)};
 }
 
 StatusOr<std::optional<std::string>> WaitForChild(pid_t pid,
@@ -495,11 +491,10 @@ Status Command::Run() {
   logger->info("$ {}", command_line);
 
   PUU_ASSIGN_OR_RETURN(
-      const Child child,
+      Child child,
       Spawn(program_, args_, env_,
             ChildSetup{.chroot_dir = chroot_,
                        .new_pid_namespace = new_pid_namespace_}));
-  const absl::Cleanup close_output = [&child] { ::close(child.output_fd); };
 
   std::deque<std::string> tail;
   const auto started = std::chrono::steady_clock::now();
@@ -539,7 +534,7 @@ Status Command::Run() {
     }
   };
 
-  const Status pumped = PumpOutput(child.output_fd, on_line, on_idle);
+  const Status pumped = PumpOutput(child.output_fd.Get(), on_line, on_idle);
   if (!pumped.ok()) {
     KillSession(child.pid);
   }
@@ -561,13 +556,12 @@ Status Command::Run() {
 StatusOr<std::string> CaptureOutput(std::string_view program,
                                     const std::vector<std::string>& args) {
   const std::string program_name(program);
-  PUU_ASSIGN_OR_RETURN(const Child child,
+  PUU_ASSIGN_OR_RETURN(Child child,
                        Spawn(program_name, args, {}, ChildSetup{}));
-  const absl::Cleanup close_output = [&child] { ::close(child.output_fd); };
 
   std::string output;
   const Status pumped = PumpOutput(
-      child.output_fd,
+      child.output_fd.Get(),
       [&output](std::string_view line) { output.append(line).push_back('\n'); },
       [] {});
   if (!pumped.ok()) {
@@ -588,20 +582,8 @@ Status RunInteractive(const std::filesystem::path& program,
                       const std::vector<std::string>& args) {
   const std::string resolved = ResolveProgram(program.string());
   const std::vector<std::string> environment = MakeEnvironment({});
-  std::vector<char*> envp;
-  envp.reserve(environment.size() + 1);
-  for (const std::string& entry : environment) {
-    envp.push_back(const_cast<char*>(entry.data()));
-  }
-  envp.push_back(nullptr);
-
-  std::vector<char*> argv;
-  argv.reserve(args.size() + 2);
-  argv.push_back(const_cast<char*>(resolved.c_str()));
-  for (const std::string& argument : args) {
-    argv.push_back(const_cast<char*>(argument.c_str()));
-  }
-  argv.push_back(nullptr);
+  const std::vector<char*> envp = BuildEnvp(environment);
+  const std::vector<char*> argv = BuildArgv(resolved, args);
 
   struct sigaction sa_ignore{}, sa_orig_int{}, sa_orig_quit{};
   sa_ignore.sa_handler = SIG_IGN;

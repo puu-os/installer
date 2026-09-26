@@ -188,18 +188,10 @@ StatusOr<std::vector<std::string>> PartitionSysnames(std::string_view disk) {
 }
 
 StatusOr<std::set<std::filesystem::path>> SwapDevices() {
-  std::error_code exists_error;
-  if (!std::filesystem::exists(kSwapsPath, exists_error)) {
-    if (exists_error) {
-      return FilesystemError(exists_error,
-                             fmt::format("inspect {}", kSwapsPath));
-    }
+  if (!Exists(kSwapsPath)) {
     return std::set<std::filesystem::path>();
   }
-  PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> bytes,
-                       ReadFileBytes(kSwapsPath));
-  const std::string text(reinterpret_cast<const char*>(bytes.data()),
-                         bytes.size());
+  PUU_ASSIGN_OR_RETURN(const std::string text, ReadFile(kSwapsPath));
   std::set<std::filesystem::path> devices;
   std::istringstream file(text);
   std::string line;
@@ -275,12 +267,8 @@ StatusOr<std::string> ProbeValue(const std::filesystem::path& device,
 }
 
 bool OpensSuccessfully(const std::filesystem::path& path) {
-  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-  if (fd < 0) {
-    return false;
-  }
-  ::close(fd);
-  return true;
+  const UniqueFd fd(::open(path.c_str(), O_RDONLY | O_CLOEXEC));
+  return static_cast<bool>(fd);
 }
 
 }  // namespace
@@ -407,9 +395,8 @@ StatusOr<std::optional<BusyReason>> DiskBusy(const std::filesystem::path& drive,
     if (holder.has_value()) {
       return HolderReason(*holder);
     }
-    const int fd = ::open(devnode.c_str(), O_RDONLY | O_EXCL | O_CLOEXEC);
-    if (fd >= 0) {
-      ::close(fd);
+    const UniqueFd fd(::open(devnode.c_str(), O_RDONLY | O_EXCL | O_CLOEXEC));
+    if (fd) {
       continue;
     }
     const int error = errno;
@@ -459,13 +446,24 @@ StatusOr<std::string> CaptureUuid(const std::filesystem::path& partition) {
 StatusOr<std::string> CapturePartUuid(const std::filesystem::path& partition) {
   return ProbeValue(partition, "PART_ENTRY_UUID", /*partitions=*/true);
 }
+StatusOr<std::string> ProbeFilesystemType(const std::filesystem::path& device) {
+  return ProbeValue(device, "TYPE", /*partitions=*/false);
+}
+
+StatusOr<std::optional<std::filesystem::path>> FindDeviceByLabel(
+    std::string_view label) {
+  const std::string wanted(label);
+  char* device = blkid_evaluate_tag("LABEL", wanted.c_str(), nullptr);
+  if (device == nullptr) {
+    return std::nullopt;
+  }
+  const std::unique_ptr<char, decltype(&std::free)> owned(device, &std::free);
+  return std::filesystem::path(owned.get());
+}
 
 Status WaitForUdevSettle(std::chrono::milliseconds timeout) {
   const Status status = WaitUntil(
-      [] {
-        std::error_code error;
-        return !std::filesystem::exists(kUdevQueuePath, error);
-      },
+      [] { return !Exists(kUdevQueuePath); },
       timeout, kSettlePollInterval);
   return WithContext(status, "waiting for udev to settle");
 }

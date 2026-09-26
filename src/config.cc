@@ -13,10 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <functional>
-#include <ios>
-#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
@@ -43,6 +40,7 @@
 #include <yaml-cpp/node/parse.h>
 
 #include "base/status.h"
+#include "engine/util.h"
 
 namespace puu {
 namespace {
@@ -813,17 +811,18 @@ StatusOr<Config> Config::ParseYaml(std::string_view yaml) {
         std::optional<Status> matched;
         std::apply(
             [&config, &matched, key, &value, &field](const auto&... sections) {
-              ((key == sections.key
-                    ? (matched = sections.Parse(field, value, &config), true)
-                    : false) ||
-               ...);
+              static_cast<void>((
+                  (key == sections.key
+                       ? (matched = sections.Parse(field, value, &config), true)
+                       : false) ||
+                  ...));
             },
             Sections());
         return matched.has_value() ? *matched : UnknownKeyError(field);
       }));
 
-  constexpr uint64_t kMiB = 1 << 20;
-  constexpr uint64_t kGiB = 1 << 30;
+  constexpr uint64_t kMiB = uint64_t{1} << 20;
+  constexpr uint64_t kGiB = uint64_t{1} << 30;
   struct SizeFloor {
     std::string_view field;
     uint64_t configured;
@@ -851,17 +850,11 @@ StatusOr<Config> Config::ParseYaml(std::string_view yaml) {
 }
 
 StatusOr<Config> Config::Load(const std::filesystem::path& path) {
-  std::ifstream file(path, std::ios::binary);
-  if (!file) {
+  const StatusOr<std::string> text = engine::ReadFile(path);
+  if (!text.ok()) {
     return InvalidArgumentError("failed to read config {}", path.string());
   }
-  std::string const text{std::istreambuf_iterator<char>(file),
-                         std::istreambuf_iterator<char>()};
-
-  if (file.bad()) {
-    return InvalidArgumentError("failed to read config {}", path.string());
-  }
-  StatusOr<Config> config = ParseYaml(text);
+  StatusOr<Config> config = ParseYaml(*text);
   if (!config.ok()) {
     return WithContext(config.status(),
                        fmt::format("failed to parse config {}", path.string()));

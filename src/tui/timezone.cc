@@ -5,8 +5,6 @@
 
 #include <algorithm>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,6 +15,7 @@
 #include <absl/strings/string_view.h>
 
 #include "config.h"
+#include "engine/util.h"
 #include "tui/zone1970_tab.inc"
 
 namespace puu::tui {
@@ -27,14 +26,9 @@ constexpr std::string_view kZoneTabPath = "/usr/share/zoneinfo/zone1970.tab";
 constexpr std::string_view kUtc = "UTC";
 
 std::vector<std::string> ReadZoneTab() {
-  std::ifstream file{std::filesystem::path{kZoneTabPath}};
-  if (file) {
-    std::string const contents{std::istreambuf_iterator<char>(file),
-                               std::istreambuf_iterator<char>()};
-
-    if (!file.bad()) {
-      return ParseZoneTab(contents);
-    }
+  const StatusOr<std::string> contents = engine::ReadFile(kZoneTabPath);
+  if (contents.ok()) {
+    return ParseZoneTab(*contents);
   }
   return ParseZoneTab(kEmbeddedZone1970Tab);
 }
