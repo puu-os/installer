@@ -22,6 +22,7 @@ set(installer_core_sources
   engine/command.cc
   engine/der.cc
   engine/firmware.cc
+  engine/guid.cc
   engine/image.cc
   engine/partition.cc
   engine/passwd.cc

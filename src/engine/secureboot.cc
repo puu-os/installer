@@ -86,13 +86,6 @@ constexpr std::array<uint8_t, 39> kSpcPeImageDataValue = {
     0x62, 0x00, 0x73, 0x00, 0x6f, 0x00, 0x6c, 0x00, 0x65, 0x00,
     0x74, 0x00, 0x65, 0x00, 0x3e, 0x00, 0x3e, 0x00, 0x3e};
 
-constexpr std::array<uint8_t, 16> kEfiCertX509Guid = {
-    0xa1, 0x59, 0xc0, 0xa5, 0xe4, 0x94, 0xa7, 0x4a,
-    0x87, 0xb5, 0xab, 0x15, 0x5c, 0x2b, 0xf0, 0x72};
-
-constexpr std::array<uint8_t, 16> kEfiCertTypePkcs7Guid = {
-    0x9d, 0xd2, 0xaf, 0x4a, 0xdf, 0x68, 0xee, 0x49,
-    0x8a, 0xa9, 0x34, 0x7d, 0x37, 0x56, 0x65, 0xa7};
 
 template <typename T, auto Free>
 struct Deleter {
@@ -755,8 +748,8 @@ StatusOr<std::vector<uint8_t>> AuthenticatedPayload(
   AppendLe<uint32_t>(out, static_cast<uint32_t>(win_cert_length));
   AppendLe<uint16_t>(out, kWinCertRevision20);
   AppendLe<uint16_t>(out, kWinCertTypeEfiGuid);
-  out.insert(out.end(), kEfiCertTypePkcs7Guid.begin(),
-             kEfiCertTypePkcs7Guid.end());
+  const auto pkcs7_guid = EfiGuid::CertPkcs7();
+  out.insert(out.end(), pkcs7_guid.Bytes().begin(), pkcs7_guid.Bytes().end());
   out.insert(out.end(), pkcs7.begin(), pkcs7.end());
   out.insert(out.end(), signature_list.begin(), signature_list.end());
   return out;
@@ -768,66 +761,6 @@ Status WriteAuthVariable(std::string_view name, const EfiGuid& guid,
                           payload);
 }
 
-StatusOr<std::string> RandomUuidText() {
-  std::array<uint8_t, 16> bytes{};
-  PUU_RETURN_IF_ERROR(RandomBytes(bytes));
-
-  bytes[6] = static_cast<uint8_t>((bytes[6] & 0x0fU) | 0x40U);
-  bytes[8] = static_cast<uint8_t>((bytes[8] & 0x3fU) | 0x80U);
-  std::string text;
-  for (size_t i = 0; i < bytes.size(); ++i) {
-    if (i == 4 || i == 6 || i == 8 || i == 10) {
-      text.push_back('-');
-    }
-    text += fmt::format("{:02x}", bytes[i]);
-  }
-  return text;
-}
-
-StatusOr<EfiGuid> ParseEfiGuid(std::string_view text) {
-  std::array<uint8_t, 16> big_endian{};
-  size_t nibble = 0;
-  for (const char c : text) {
-    if (c == '-') {
-      continue;
-    }
-    uint8_t value = 0;
-    if (c >= '0' && c <= '9') {
-      value = static_cast<uint8_t>(c - '0');
-    } else if (c >= 'a' && c <= 'f') {
-      value = static_cast<uint8_t>(c - 'a' + 10);
-    } else if (c >= 'A' && c <= 'F') {
-      value = static_cast<uint8_t>(c - 'A' + 10);
-    } else {
-      return InvalidArgumentError("invalid character in UUID '{}'", text);
-    }
-    if (nibble >= 32) {
-      return InvalidArgumentError("UUID '{}' is too long", text);
-    }
-    if (nibble % 2 == 0) {
-      big_endian[nibble / 2] = static_cast<uint8_t>(value << 4U);
-    } else {
-      big_endian[nibble / 2] =
-          static_cast<uint8_t>(big_endian[nibble / 2] | value);
-    }
-    ++nibble;
-  }
-  if (nibble != 32) {
-    return InvalidArgumentError("UUID '{}' is too short", text);
-  }
-
-  std::array<uint8_t, 16> mixed{};
-  mixed[0] = big_endian[3];
-  mixed[1] = big_endian[2];
-  mixed[2] = big_endian[1];
-  mixed[3] = big_endian[0];
-  mixed[4] = big_endian[5];
-  mixed[5] = big_endian[4];
-  mixed[6] = big_endian[7];
-  mixed[7] = big_endian[6];
-  std::copy(big_endian.begin() + 8, big_endian.end(), mixed.begin() + 8);
-  return EfiGuid(mixed);
-}
 
 Status GenerateKeyPair(std::string_view common_name,
                        const std::filesystem::path& key_path,
@@ -939,8 +872,26 @@ Status GenerateKeyPair(std::string_view common_name,
 
 size_t AlignCertificateEntry(size_t size) { return (size + 7) & ~size_t{7}; }
 
-[[maybe_unused]] StatusOr<std::vector<std::pair<size_t, size_t>>>
-AuthenticodeSkippedRanges(std::span<const uint8_t> image) {
+std::vector<uint8_t> BuildSignatureList(std::span<const uint8_t> cert_der,
+                                        const EfiGuid& owner) {
+  const size_t signature_size = 16 + cert_der.size();
+  const size_t list_size = 28 + signature_size;
+  std::vector<uint8_t> out;
+  out.reserve(list_size);
+  const auto x509_guid = EfiGuid::CertX509();
+  out.insert(out.end(), x509_guid.Bytes().begin(), x509_guid.Bytes().end());
+  AppendLe<uint32_t>(out, static_cast<uint32_t>(list_size));
+  AppendLe<uint32_t>(out, 0);
+  AppendLe<uint32_t>(out, static_cast<uint32_t>(signature_size));
+  out.insert(out.end(), owner.Bytes().begin(), owner.Bytes().end());
+  out.insert(out.end(), cert_der.begin(), cert_der.end());
+  return out;
+}
+
+}  // namespace
+
+StatusOr<std::vector<std::pair<size_t, size_t>>> AuthenticodeSkippedRanges(
+    std::span<const uint8_t> image) {
   PUU_ASSIGN_OR_RETURN(const AuthenticodeLayout layout,
                        ComputeAuthenticodeLayout(image));
   std::vector<std::pair<size_t, size_t>> ranges;
@@ -955,23 +906,6 @@ AuthenticodeSkippedRanges(std::span<const uint8_t> image) {
   }
   return ranges;
 }
-
-std::vector<uint8_t> BuildSignatureList(std::span<const uint8_t> cert_der,
-                                        const EfiGuid& owner) {
-  const size_t signature_size = 16 + cert_der.size();
-  const size_t list_size = 28 + signature_size;
-  std::vector<uint8_t> out;
-  out.reserve(list_size);
-  out.insert(out.end(), kEfiCertX509Guid.begin(), kEfiCertX509Guid.end());
-  AppendLe<uint32_t>(out, static_cast<uint32_t>(list_size));
-  AppendLe<uint32_t>(out, 0);
-  AppendLe<uint32_t>(out, static_cast<uint32_t>(signature_size));
-  out.insert(out.end(), owner.Bytes().begin(), owner.Bytes().end());
-  out.insert(out.end(), cert_der.begin(), cert_der.end());
-  return out;
-}
-
-}  // namespace
 
 std::string_view KeyKindName(KeyKind kind) {
   switch (kind) {
@@ -993,9 +927,8 @@ StatusOr<KeyPair> KeyStore::Get(KeyKind kind) const {
       root_ / kKeyStoreSubdir / "keys" / name;
   KeyPair pair{.key_path = directory / fmt::format("{}.key", name),
                .certificate_path = directory / fmt::format("{}.pem", name)};
-  std::error_code error;
-  if (!std::filesystem::is_regular_file(pair.key_path, error) ||
-      !std::filesystem::is_regular_file(pair.certificate_path, error)) {
+  if (!IsRegularFile(pair.key_path) ||
+      !IsRegularFile(pair.certificate_path)) {
     return NotFoundError("Secure Boot {} key material is missing under {}",
                          name, directory.string());
   }
@@ -1004,14 +937,12 @@ StatusOr<KeyPair> KeyStore::Get(KeyKind kind) const {
 
 StatusOr<EfiGuid> KeyStore::OwnerGuid() const {
   const std::filesystem::path path = root_ / kKeyStoreSubdir / "GUID";
-  PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> raw, ReadFileBytes(path));
-  const std::string text(raw.begin(), raw.end());
-  const size_t first = text.find_first_not_of(" \t\r\n");
-  const size_t last = text.find_last_not_of(" \t\r\n");
-  if (first == std::string::npos) {
+  PUU_ASSIGN_OR_RETURN(const std::string text, ReadFile(path));
+  const std::string_view trimmed = Trim(text);
+  if (trimmed.empty()) {
     return InvalidArgumentError("{} is empty", path.string());
   }
-  StatusOr<EfiGuid> guid = ParseEfiGuid(text.substr(first, last - first + 1));
+  StatusOr<EfiGuid> guid = EfiGuid::Parse(trimmed);
   if (!guid.ok()) {
     return WithContext(guid.status(),
                        fmt::format("failed to read {}", path.string()));
@@ -1025,17 +956,16 @@ Status KeyStore::EnsureKeys() {
   const std::filesystem::path base = root_ / kKeyStoreSubdir;
   const std::filesystem::path key_root = base / "keys";
 
-  std::error_code error;
   bool complete = true;
   bool any_present = false;
   for (const KeyKind kind : kKinds) {
     const std::string name{KeyKindName(kind)};
     const std::filesystem::path directory = key_root / name;
 
-    const bool has_key = std::filesystem::is_regular_file(
-        directory / fmt::format("{}.key", name), error);
-    const bool has_certificate = std::filesystem::is_regular_file(
-        directory / fmt::format("{}.pem", name), error);
+    const bool has_key =
+        IsRegularFile(directory / fmt::format("{}.key", name));
+    const bool has_certificate =
+        IsRegularFile(directory / fmt::format("{}.pem", name));
     complete = complete && has_key && has_certificate;
     any_present = any_present || has_key || has_certificate;
   }
@@ -1049,51 +979,29 @@ Status KeyStore::EnsureKeys() {
 
   if (!complete) {
     const std::filesystem::path staging = base / "keys.staging";
-    std::filesystem::remove_all(staging, error);
-    if (error) {
-      return InternalError("failed to remove {}: {}", staging.string(),
-                           error.message());
-    }
+    PUU_RETURN_IF_ERROR(RemoveTree(staging));
     for (const KeyKind kind : kKinds) {
       const std::string name{KeyKindName(kind)};
       const std::filesystem::path directory = staging / name;
-      std::filesystem::create_directories(directory, error);
-      if (error) {
-        return InternalError("failed to create {}: {}", directory.string(),
-                             error.message());
-      }
+      PUU_RETURN_IF_ERROR(CreateDirectories(directory));
       PUU_RETURN_IF_ERROR(WithContext(
           GenerateKeyPair(name, directory / fmt::format("{}.key", name),
                           directory / fmt::format("{}.pem", name)),
           fmt::format("failed to generate the Secure Boot {} key", name)));
     }
 
-    if (std::filesystem::exists(key_root, error)) {
-      std::filesystem::remove(key_root, error);
-      if (error) {
-        return InternalError("failed to remove {}: {}", key_root.string(),
-                             error.message());
-      }
+    if (Exists(key_root)) {
+      PUU_RETURN_IF_ERROR(RemoveTree(key_root));
     }
-    std::filesystem::rename(staging, key_root, error);
-    if (error) {
-      return InternalError("failed to publish {}: {}", key_root.string(),
-                           error.message());
-    }
+    PUU_RETURN_IF_ERROR(Rename(staging, key_root));
   }
 
-  std::filesystem::create_directories(base, error);
-  if (error) {
-    return InternalError("failed to create {}: {}", base.string(),
-                         error.message());
-  }
+  PUU_RETURN_IF_ERROR(CreateDirectories(base));
   const std::filesystem::path guid_path = base / "GUID";
-  if (!std::filesystem::exists(guid_path, error)) {
-    PUU_ASSIGN_OR_RETURN(const std::string uuid, RandomUuidText());
-    const std::string line = fmt::format("{}\n", uuid);
-    PUU_RETURN_IF_ERROR(WriteBytes(
-        guid_path, {reinterpret_cast<const uint8_t*>(line.data()), line.size()},
-        0644));
+  if (!Exists(guid_path)) {
+    PUU_ASSIGN_OR_RETURN(const EfiGuid guid, EfiGuid::GenerateRandom());
+    const std::string line = fmt::format("{}\n", guid.ToString());
+    PUU_RETURN_IF_ERROR(WriteFile(guid_path, line, 0644));
   }
   return absl::OkStatus();
 }
@@ -1150,7 +1058,7 @@ StatusOr<std::vector<std::filesystem::path>> TargetEfiBinaries(
     if (extension != ".efi" && !name.starts_with("vmlinuz")) {
       continue;
     }
-    if (!std::filesystem::is_regular_file(it->path(), error)) {
+    if (!IsRegularFile(it->path())) {
       continue;
     }
     found.push_back(it->path());
@@ -1208,8 +1116,7 @@ Status EnrollKeys(const KeyStore& store) {
     std::vector<uint8_t> esl = BuildSignatureList(db_der, owner);
     const std::filesystem::path current_path =
         EfiVariablePath("db", image_security_db);
-    std::error_code exists_error;
-    if (std::filesystem::exists(current_path, exists_error)) {
+    if (Exists(current_path)) {
       PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> raw,
                            ReadFileBytes(current_path));
 

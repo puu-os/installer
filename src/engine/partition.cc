@@ -27,6 +27,7 @@
 #include "base/status.h"
 #include "config.h"
 #include "engine/context.h"
+#include "engine/guid.h"
 #include "engine/le_bytes.h"
 #include "engine/util.h"
 
@@ -43,29 +44,12 @@ constexpr size_t kNameFieldBytes = 72;
 constexpr uint64_t kPrimaryHeaderLba = 1;
 constexpr uint64_t kPrimaryEntriesLba = 2;
 
-constexpr uint64_t kAlignmentBytes = 1024ULL * 1024;
-
 constexpr uint32_t kMbrMaxSectors = 0xFFFF'FFFF;
 
-constexpr size_t kGuidBytes = 16;
-using Guid = std::array<uint8_t, kGuidBytes>;
 
 uint32_t Crc32(std::span<const uint8_t> data);
 void EncodePartitionName(std::string_view name, std::span<uint8_t> field);
 
-constexpr Guid GuidBytes(uint32_t first, uint16_t second, uint16_t third,
-                         const std::array<uint8_t, 8>& rest) {
-  Guid guid{};
-  PutLe<uint32_t>(guid, 0, first);
-  PutLe<uint16_t>(guid, 4, second);
-  PutLe<uint16_t>(guid, 6, third);
-  std::ranges::copy(rest, guid.begin() + 8);
-  return guid;
-}
-
-constexpr Guid kEspTypeGuid =
-    GuidBytes(0xC12A'7328, 0xF81F, 0x11D2,
-              {0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B});
 
 constexpr size_t kOffCrc = 16;
 constexpr size_t kOffMyLba = 24;
@@ -99,12 +83,12 @@ uint64_t AlignDown(uint64_t value, uint64_t alignment) {
 }
 
 StatusOr<UniqueFd> OpenDrive(const std::filesystem::path& drive, int flags) {
-  const int fd = ::open(drive.c_str(), flags | O_CLOEXEC);
-  if (fd < 0) {
+  UniqueFd fd(::open(drive.c_str(), flags | O_CLOEXEC));
+  if (!fd) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("open {}", drive.string()));
   }
-  return UniqueFd(fd);
+  return fd;
 }
 
 StatusOr<uint32_t> SectorSize(const UniqueFd& drive,
@@ -176,11 +160,6 @@ Status ReadAt(const UniqueFd& drive, std::span<uint8_t> buffer,
   return absl::OkStatus();
 }
 
-StatusOr<Guid> RandomGuid() {
-  Guid guid{};
-  PUU_RETURN_IF_ERROR(RandomBytes(guid));
-  return guid;
-}
 
 std::vector<uint8_t> ProtectiveMbr(uint32_t sector_size,
                                    uint64_t disk_sectors) {
@@ -203,13 +182,13 @@ std::vector<uint8_t> ProtectiveMbr(uint32_t sector_size,
   return block;
 }
 
-void WriteEntry(std::span<uint8_t> entries, uint32_t number, const Guid& type,
-                const Guid& unique, uint64_t first_lba, uint64_t last_lba,
-                std::string_view name) {
+void WriteEntry(std::span<uint8_t> entries, uint32_t number,
+                const EfiGuid& type, const EfiGuid& unique, uint64_t first_lba,
+                uint64_t last_lba, std::string_view name) {
   const std::span<uint8_t> entry =
       entries.subspan(static_cast<size_t>(number - 1) * kEntrySize, kEntrySize);
-  std::ranges::copy(type, entry.begin() + kOffTypeGuid);
-  std::ranges::copy(unique, entry.begin() + kOffUniqueGuid);
+  std::ranges::copy(type.Bytes(), entry.begin() + kOffTypeGuid);
+  std::ranges::copy(unique.Bytes(), entry.begin() + kOffUniqueGuid);
   PutLe<uint64_t>(entry, kOffFirstLba, first_lba);
   PutLe<uint64_t>(entry, kOffLastLba, last_lba);
   PutLe<uint64_t>(entry, kOffAttributes, 0);
@@ -219,7 +198,7 @@ void WriteEntry(std::span<uint8_t> entries, uint32_t number, const Guid& type,
 std::vector<uint8_t> BuildHeader(uint32_t sector_size, uint64_t my_lba,
                                  uint64_t alternate_lba, uint64_t entries_lba,
                                  uint64_t first_usable, uint64_t last_usable,
-                                 const Guid& disk_guid, uint32_t entries_crc) {
+                                 const EfiGuid& disk_guid, uint32_t entries_crc) {
   std::vector<uint8_t> block(sector_size, 0);
   std::ranges::copy(kGptSignature, block.begin());
   PutLe<uint32_t>(block, 8, kGptRevision);
@@ -228,7 +207,7 @@ std::vector<uint8_t> BuildHeader(uint32_t sector_size, uint64_t my_lba,
   PutLe<uint64_t>(block, kOffAlternateLba, alternate_lba);
   PutLe<uint64_t>(block, kOffFirstUsable, first_usable);
   PutLe<uint64_t>(block, kOffLastUsable, last_usable);
-  std::ranges::copy(disk_guid, block.begin() + kOffDiskGuid);
+  std::ranges::copy(disk_guid.Bytes(), block.begin() + kOffDiskGuid);
   PutLe<uint64_t>(block, kOffEntriesLba, entries_lba);
   PutLe<uint32_t>(block, kOffEntryCount, kEntryCount);
   PutLe<uint32_t>(block, kOffEntrySize, kEntrySize);
@@ -270,6 +249,7 @@ void EncodePartitionName(std::string_view name, std::span<uint8_t> field) {
     field[2 * i] = character < 0x80 ? character : uint8_t{'?'};
   }
 }
+}  // namespace
 
 uint64_t FirstUsableLba(uint32_t sector_size) {
   return kPrimaryEntriesLba +
@@ -336,8 +316,6 @@ StatusOr<std::array<EfiPartitionLayout, 3>> ComputeGptLayout(
   };
 }
 
-}  // namespace
-
 std::filesystem::path PartitionPath(const std::filesystem::path& drive,
                                     uint32_t number) {
   std::string path = drive.string();
@@ -378,16 +356,15 @@ StatusOr<EfiPartitionLayout> PartitionDrive(const std::filesystem::path& drive,
       ComputeGptLayout(disk_sectors, sector_size, config.partitions.efi.Bytes(),
                        config.partitions.home.Bytes()));
 
-  const Guid linux_type =
-      GuidBytes(0x0FC6'3DAF, 0x8483, 0x4772,
-                {0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4});
   constexpr std::array<std::string_view, 3> kNames = {"EFI", "root", "home"};
-  const std::array<Guid, 3> types = {kEspTypeGuid, linux_type, linux_type};
+  const std::array<EfiGuid, 3> types = {
+      EfiGuid::EspType(), EfiGuid::LinuxFilesystemType(),
+      EfiGuid::LinuxFilesystemType()};
 
   EfiPartitionLayout efi = layout[0];
   std::vector<uint8_t> entries(size_t{kEntryCount} * kEntrySize, 0);
   for (size_t i = 0; i < layout.size(); ++i) {
-    PUU_ASSIGN_OR_RETURN(const Guid unique, RandomGuid());
+    PUU_ASSIGN_OR_RETURN(const EfiGuid unique, EfiGuid::GenerateRandom());
     WriteEntry(entries, layout[i].partition_number, types[i], unique,
                layout[i].start_lba,
                layout[i].start_lba + layout[i].size_lba - 1, kNames[i]);
@@ -396,7 +373,7 @@ StatusOr<EfiPartitionLayout> PartitionDrive(const std::filesystem::path& drive,
     }
   }
 
-  PUU_ASSIGN_OR_RETURN(const Guid disk_guid, RandomGuid());
+  PUU_ASSIGN_OR_RETURN(const EfiGuid disk_guid, EfiGuid::GenerateRandom());
   const uint32_t entries_crc = Crc32(entries);
   const uint64_t first_usable = FirstUsableLba(sector_size);
   const uint64_t last_usable = LastUsableLba(disk_sectors, sector_size);
@@ -498,8 +475,9 @@ StatusOr<EfiPartitionLayout> LoadPartitionLayout(
     const std::span<const uint8_t> entry =
         std::span<const uint8_t>(entries).subspan(
             static_cast<size_t>(index) * entry_size, entry_size);
-    if (!std::equal(kEspTypeGuid.begin(), kEspTypeGuid.end(),
-                    entry.begin() + kOffTypeGuid)) {
+    std::array<uint8_t, 16> type_bytes{};
+    std::ranges::copy(entry.subspan(kOffTypeGuid, 16), type_bytes.begin());
+    if (EfiGuid(type_bytes) != EfiGuid::EspType()) {
       continue;
     }
     const auto start = ReadLe<uint64_t>(entry, kOffFirstLba);
@@ -508,13 +486,12 @@ StatusOr<EfiPartitionLayout> LoadPartitionLayout(
       return InternalError("EFI partition on {} has an invalid range",
                            drive.string());
     }
-    Guid unique{};
-    std::copy(entry.begin() + kOffUniqueGuid,
-              entry.begin() + kOffUniqueGuid + kGuidBytes, unique.begin());
+    std::array<uint8_t, 16> unique_bytes{};
+    std::ranges::copy(entry.subspan(kOffUniqueGuid, 16), unique_bytes.begin());
     return EfiPartitionLayout{.partition_number = index + 1,
                               .start_lba = start,
                               .size_lba = end - start + 1,
-                              .unique_guid = unique};
+                              .unique_guid = EfiGuid(unique_bytes)};
   }
   return NotFoundError("no EFI partition found on {}", drive.string());
 }

@@ -13,6 +13,7 @@
 #include "base/secret_string.h"
 #include "config.h"
 #include "engine/image.h"
+#include "engine/guid.h"
 
 namespace puu::engine {
 
@@ -44,7 +45,7 @@ struct EfiPartitionLayout {
   uint32_t partition_number = 0;
   uint64_t start_lba = 0;
   uint64_t size_lba = 0;
-  std::array<uint8_t, 16> unique_guid{};
+  EfiGuid unique_guid{};
 };
 
 // Partition device paths and identifiers discovered during installation.

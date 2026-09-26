@@ -4,13 +4,16 @@
 #ifndef PUU_ENGINE_SECUREBOOT_H_
 #define PUU_ENGINE_SECUREBOOT_H_
 
+#include <cstddef>
+#include <span>
+#include <utility>
 #include <cstdint>
 #include <filesystem>
 #include <string_view>
 #include <vector>
 
 #include "base/status.h"
-#include "engine/firmware.h"
+#include "engine/guid.h"
 
 namespace puu::engine {
 
@@ -67,6 +70,9 @@ StatusOr<std::vector<std::filesystem::path>> TargetEfiBinaries(
 // platform key, because enrolling PK closes Setup Mode and refuses any further
 // unsigned update.
 Status EnrollKeys(const KeyStore& store);
+
+StatusOr<std::vector<std::pair<size_t, size_t>>> AuthenticodeSkippedRanges(
+    std::span<const uint8_t> image);
 
 }  // namespace puu::engine
 

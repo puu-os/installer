@@ -14,26 +14,10 @@
 #include "base/status.h"
 #include "config.h"
 #include "engine/context.h"
+#include "engine/guid.h"
 
 namespace puu::engine {
 
-// An EFI variable vendor GUID, stored in its 16-byte mixed-endian form.
-class EfiGuid {
- public:
-  constexpr EfiGuid() = default;
-  explicit constexpr EfiGuid(std::array<uint8_t, 16> bytes) : bytes_(bytes) {}
-
-  // The EFI global variable namespace, 8be4df61-93ca-11d2-aa0d-00e098032b8c.
-  static EfiGuid Global();
-  // The image security database namespace, used for "db" and "dbx".
-  static EfiGuid ImageSecurityDatabase();
-
-  [[nodiscard]] const std::array<uint8_t, 16>& Bytes() const { return bytes_; }
-  [[nodiscard]] std::string ToString() const;
-
- private:
-  std::array<uint8_t, 16> bytes_{};
-};
 
 // Reads the firmware Secure Boot setup state from efivarfs.
 //

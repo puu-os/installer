@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -111,12 +112,11 @@ StatusOr<std::vector<uint8_t>> Utf16LeBytes(std::string_view text) {
 }
 
 void ClearImmutable(const std::filesystem::path& path) {
-  std::error_code error;
-  if (!std::filesystem::exists(path, error)) {
+  if (!Exists(path)) {
     return;
   }
   const UniqueFd fd(::open(path.c_str(), O_RDONLY | O_CLOEXEC));
-  if (fd.Get() < 0) {
+  if (!fd) {
     return;
   }
   int flags = 0;
@@ -132,26 +132,20 @@ void ClearImmutable(const std::filesystem::path& path) {
 
 Status DeleteEfiVariable(const std::filesystem::path& path) {
   ClearImmutable(path);
-  std::error_code error;
-  std::filesystem::remove(path, error);
-  if (error) {
-    return InternalError("failed to delete {}: {}", path.string(),
-                         error.message());
-  }
-  return absl::OkStatus();
+  return RemoveFile(path);
 }
 
 std::optional<std::filesystem::path> FindEfiVariable(
     std::string_view name, const std::filesystem::path& root) {
   std::filesystem::path exact =
       root / fmt::format("{}-{}", name, EfiGuid::Global().ToString());
-  std::error_code error;
-  if (std::filesystem::exists(exact, error)) {
+  if (Exists(exact)) {
     return exact;
   }
 
   const std::string prefix = fmt::format("{}-", name);
   std::optional<std::filesystem::path> best;
+  std::error_code error;
   const std::filesystem::directory_iterator it(root, error);
   if (error) {
     return std::nullopt;
@@ -190,7 +184,8 @@ StatusOr<std::vector<uint8_t>> BuildDevicePath(const EfiPartitionLayout& layout,
   AppendLe<uint32_t>(out, layout.partition_number);
   AppendLe<uint64_t>(out, layout.start_lba);
   AppendLe<uint64_t>(out, layout.size_lba);
-  out.insert(out.end(), layout.unique_guid.begin(), layout.unique_guid.end());
+  out.insert(out.end(), layout.unique_guid.Bytes().begin(),
+             layout.unique_guid.Bytes().end());
   out.push_back(kHardDriveFormatGpt);
   out.push_back(kHardDriveSignatureTypeGuid);
 
@@ -231,17 +226,14 @@ StatusOr<std::vector<uint8_t>> BuildLoadOption(
 }
 
 std::optional<uint16_t> ParseHex4(std::string_view text) {
+  if (text.size() != 4) {
+    return std::nullopt;
+  }
   uint16_t value = 0;
-  for (const char c : text) {
-    uint16_t digit = 0;
-    if (c >= '0' && c <= '9') {
-      digit = static_cast<uint16_t>(c - '0');
-    } else if (c >= 'A' && c <= 'F') {
-      digit = static_cast<uint16_t>(c - 'A' + 10);
-    } else {
-      return std::nullopt;
-    }
-    value = static_cast<uint16_t>(value << 4U | digit);
+  const auto [stop, error] =
+      std::from_chars(text.data(), text.data() + text.size(), value, 16);
+  if (error != std::errc() || stop != text.data() + text.size()) {
+    return std::nullopt;
   }
   return value;
 }
@@ -304,7 +296,7 @@ Status WriteEfiVariable(const std::filesystem::path& path, uint32_t attributes,
 
   ClearImmutable(path);
   UniqueFd const fd(::open(path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644));
-  if (fd.Get() < 0) {
+  if (!fd) {
     const int error = errno;
     return ErrnoToStatus(error, fmt::format("open {}", path.string()));
   }
@@ -326,36 +318,14 @@ std::filesystem::path EfiVariablePath(std::string_view name,
          fmt::format("{}-{}", name, guid.ToString());
 }
 
-EfiGuid EfiGuid::Global() {
-  return EfiGuid(std::array<uint8_t, 16>{0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93,
-                                         0xd2, 0x11, 0xaa, 0x0d, 0x00, 0xe0,
-                                         0x98, 0x03, 0x2b, 0x8c});
-}
-
-EfiGuid EfiGuid::ImageSecurityDatabase() {
-  return EfiGuid(std::array<uint8_t, 16>{0xcb, 0xb2, 0x19, 0xd7, 0x3a, 0x3d,
-                                         0x96, 0x45, 0xa3, 0xbc, 0xda, 0xd0,
-                                         0x0e, 0x67, 0x65, 0x6f});
-}
-
-std::string EfiGuid::ToString() const {
-  const auto data1 = ReadLe<uint32_t>(bytes_, 0);
-  const auto data2 = ReadLe<uint16_t>(bytes_, 4);
-  const auto data3 = ReadLe<uint16_t>(bytes_, 6);
-  return fmt::format(
-      "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-      data1, data2, data3, bytes_[8], bytes_[9], bytes_[10], bytes_[11],
-      bytes_[12], bytes_[13], bytes_[14], bytes_[15]);
-}
 
 SetupMode DetectSetupMode() {
-  std::error_code error;
-  if (!std::filesystem::exists(std::filesystem::path(kEfiSysfsDir), error)) {
+  if (!Exists(kEfiSysfsDir)) {
     return SetupMode{.state = SetupMode::State::kUnknown,
                      .reason = "UEFI firmware variables are unavailable"};
   }
   const std::filesystem::path root{kEfiVarsDir};
-  if (!std::filesystem::exists(root, error)) {
+  if (!Exists(root)) {
     return SetupMode{.state = SetupMode::State::kUnknown,
                      .reason = "efivarfs is not mounted"};
   }
@@ -374,8 +344,7 @@ SetupMode DetectSetupMode() {
 
 Status ManageBootEntry(const EfiPartitionLayout& layout, Arch arch,
                        std::string_view description) {
-  std::error_code error;
-  if (!std::filesystem::exists(std::filesystem::path(kEfiVarsDir), error)) {
+  if (!Exists(kEfiVarsDir)) {
     return FailedPreconditionError("efivarfs is not mounted at {}",
                                    kEfiVarsDir);
   }
@@ -383,7 +352,7 @@ Status ManageBootEntry(const EfiPartitionLayout& layout, Arch arch,
   const EfiGuid global = EfiGuid::Global();
   const std::filesystem::path boot_order_path =
       EfiVariablePath("BootOrder", global);
-  const bool had_boot_order = std::filesystem::exists(boot_order_path, error);
+  const bool had_boot_order = Exists(boot_order_path);
 
   std::vector<uint16_t> previous_order;
   if (had_boot_order) {
@@ -439,7 +408,7 @@ Status ManageBootEntry(const EfiPartitionLayout& layout, Arch arch,
   if (had_boot_order) {
     restored_order = WriteEfiVariable(boot_order_path, kBootVariableAttributes,
                                       EncodeBootOrder(previous_order));
-  } else if (std::filesystem::exists(boot_order_path, error)) {
+  } else if (Exists(boot_order_path)) {
     restored_order = DeleteEfiVariable(boot_order_path);
   }
   return InternalError(
@@ -454,8 +423,7 @@ Status RequestRebootToFirmware() {
   const std::filesystem::path path = EfiVariablePath("OsIndications", global);
 
   uint64_t indications = 0x0000'0000'0000'0001ULL;
-  std::error_code error;
-  if (std::filesystem::exists(path, error)) {
+  if (Exists(path)) {
     const StatusOr<std::vector<uint8_t>> raw = ReadFileBytes(path);
     if (raw.ok() && raw->size() >= 4 + sizeof(uint64_t)) {
       indications |= ReadLe<uint64_t>(*raw, 4);

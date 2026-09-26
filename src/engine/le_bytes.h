@@ -41,7 +41,8 @@ template <typename T>
 constexpr T ReadLe(std::span<const uint8_t> buffer, size_t offset) {
   T value = 0;
   for (size_t index = 0; index < sizeof(T); ++index) {
-    value |= static_cast<T>(buffer[offset + index]) << (8 * index);
+    value = static_cast<T>(
+        value | (static_cast<T>(buffer[offset + index]) << (8 * index)));
   }
   return value;
 }
