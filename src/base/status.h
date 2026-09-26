@@ -9,16 +9,18 @@
 
 #include <absl/status/status.h>
 #include <absl/status/statusor.h>
+#if __has_include(<fmt/base.h>)
+#include <fmt/base.h>
+#else
 #include <fmt/core.h>
+#endif
 #include <fmt/format.h>
 
-template <>
-struct fmt::formatter<absl::string_view> : fmt::formatter<std::string_view> {
-  auto format(absl::string_view s, fmt::format_context& ctx) const {
-    return fmt::formatter<std::string_view>::format(
-        std::string_view(s.data(), s.size()), ctx);
-  }
-};
+namespace absl {
+inline auto format_as(string_view s) noexcept -> std::string_view {
+  return std::string_view(s.data(), s.size());
+}
+}  // namespace absl
 
 namespace puu {
 

@@ -30,7 +30,11 @@ class SelectListBase : public ftxui::ComponentBase {
   explicit SelectListBase(SelectListOptions options)
       : options_(std::move(options)) {}
 
+#if defined(FTXUI_VERSION_MAJOR) && FTXUI_VERSION_MAJOR < 6
   Element Render() override {
+#else
+  Element OnRender() override {
+#endif
     const std::vector<MenuRow>& rows = *options_.rows;
     if (rows.empty()) {
       return ftxui::text("");

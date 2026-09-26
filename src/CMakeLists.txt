@@ -9,6 +9,9 @@ if(PUU_SANITIZE)
 endif()
 add_compile_options(${PUU_COMPILE_OPTIONS})
 add_compile_definitions(PUU_INSTALLER_VERSION="${PROJECT_VERSION}")
+if(ftxui_VERSION_MAJOR)
+  add_compile_definitions(FTXUI_VERSION_MAJOR=${ftxui_VERSION_MAJOR})
+endif()
 
 set(installer_core_sources
   base/secret_string.cc

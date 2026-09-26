@@ -46,6 +46,10 @@ check_cxx_compiler_flag(-fstack-protector-strong PUU_HAS_STACK_PROTECTOR_STRONG)
 if(PUU_HAS_STACK_PROTECTOR_STRONG)
   list(APPEND PUU_COMPILE_OPTIONS -fstack-protector-strong)
 endif()
+check_cxx_compiler_flag(-Wno-missing-designated-field-initializers PUU_HAS_WNO_MISSING_DESIGNATED_FIELD_INITIALIZERS)
+if(PUU_HAS_WNO_MISSING_DESIGNATED_FIELD_INITIALIZERS)
+  list(APPEND PUU_COMPILE_OPTIONS -Wno-missing-designated-field-initializers)
+endif()
 
 include(FetchContent)
 
