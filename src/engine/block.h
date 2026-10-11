@@ -24,6 +24,7 @@ enum class BusyReason : std::uint8_t {
   kRaid,
   kSwap,
   kInUse,
+  kNoMedia,
 };
 
 std::string_view BusyReasonText(BusyReason reason);

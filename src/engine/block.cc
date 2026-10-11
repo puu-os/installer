@@ -287,6 +287,8 @@ std::string_view BusyReasonText(BusyReason reason) {
       return "swap";
     case BusyReason::kInUse:
       return "in use";
+    case BusyReason::kNoMedia:
+      return "no medium";
   }
   return "in use";
 }
@@ -402,6 +404,9 @@ StatusOr<std::optional<BusyReason>> DiskBusy(const std::filesystem::path& drive,
     const int error = errno;
     if (error == EBUSY) {
       return BusyReason::kInUse;
+    }
+    if (error == ENOMEDIUM) {
+      return BusyReason::kNoMedia;
     }
     return ErrnoToStatus(error,
                          fmt::format("open {} exclusively", devnode.string()));
