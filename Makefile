@@ -29,7 +29,7 @@ ci: ## Build and test Linux arm64 and amd64 in containers
 format: ## Reformat the sources in place
 	find src -name '*.cc' -o -name '*.h' | xargs clang-format -i
 
-publish: ## Publish a GitLab release
+publish: ## Publish a GitHub release
 	./scripts/publish.sh "$(VERSION)"
 
 clean: ## Remove build artifacts

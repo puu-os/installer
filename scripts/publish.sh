@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) Opinsys Oy 2026
 #
-# Publishes a GitLab release from the tag and its annotations.
+# Publishes a GitHub release from the tag and its annotations.
 
 set -euo pipefail
 
@@ -11,7 +11,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=project-version.sh
 source "$script_dir/project-version.sh"
 
-GLAB="${GLAB:-glab}"
+GH="${GH:-gh}"
 
 cleanup() {
   local status=$?
@@ -45,11 +45,13 @@ latest_semver_tag() {
 }
 
 require_command git
-require_command "$GLAB"
+require_command "$GH"
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" \
   || die "not inside a Git repository"
 cd "$repo_root"
+
+"$GH" repo view >/dev/null 2>&1 || die "cannot access the GitHub repository"
 
 git symbolic-ref --quiet --short HEAD >/dev/null \
   || die "HEAD is detached; check out the release branch before publishing"
@@ -84,11 +86,11 @@ notes="$workdir/release-notes.md"
 git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' \
   "refs/tags/$version" >"$notes"
 
-if "$GLAB" release view "$version" >/dev/null 2>&1; then
+if "$GH" release view "$version" >/dev/null 2>&1; then
   die "release $version already exists"
 fi
 
-"$GLAB" release create "$version" --name "puu-installer $version" \
+"$GH" release create "$version" --title "puu-installer $version" \
   --notes-file "$notes"
 
 printf 'published puu-installer %s\n' "$version"
