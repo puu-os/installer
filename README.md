@@ -41,7 +41,6 @@ models:
   syncHelper: /usr/libexec/puu/model-sync
   liveStore: /var/lib/vllm/models
 k3s:
-  helper: /usr/libexec/puu/configure-k3s-cluster
   role: server          # "server" or "agent"
   serverUrl: ""         # required when role is "agent"
   nodeName: ""

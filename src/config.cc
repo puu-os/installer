@@ -728,12 +728,9 @@ const auto& Sections() {
       SectionEntry{
           .key = "k3s",
           .section = &Config::k3s,
-          .fields =
-              std::array{BindField("helper", &K3sConfig::helper,
-                                   "/usr/libexec/puu/configure-k3s-cluster"),
-                         BindField("role", &K3sConfig::role, "server"),
-                         BindField("serverUrl", &K3sConfig::server_url),
-                         BindField("nodeName", &K3sConfig::node_name)}},
+          .fields = std::array{BindField("role", &K3sConfig::role, "server"),
+                               BindField("serverUrl", &K3sConfig::server_url),
+                               BindField("nodeName", &K3sConfig::node_name)}},
       SectionEntry{
           .key = "homed",
           .section = &Config::homed,

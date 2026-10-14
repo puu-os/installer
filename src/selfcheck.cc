@@ -186,9 +186,6 @@ flatpak:
   syncHelper: /usr/libexec/puu/flatpak-sync
   liveStore: /var/lib/flatpak
 
-k3s:
-  helper: /usr/libexec/puu/configure-k3s-cluster
-
 serialConsole:
   x86_64: console=ttyS0,115200
   aarch64: console=ttyAMA0,115200
@@ -200,13 +197,16 @@ void CheckShippedConfigSchema() {
   assert(config->identity.hostname.Value() == "puu");
   assert(config->flatpak.manifest_path == "/usr/share/puu/flatpaks.list");
   assert(config->flatpak.sync_helper == "/usr/libexec/puu/flatpak-sync");
-  assert(config->k3s.helper == "/usr/libexec/puu/configure-k3s-cluster");
   assert(config->serial_console.at("x86_64").Value() == "console=ttyS0,115200");
 
   // Defaults must satisfy the schema too, and unknown keys must still fail.
   assert(Config::Defaults().flatpak.manifest_path ==
          "/usr/share/puu/flatpaks.list");
   assert(!Config::ParseYaml("flatpak:\n  nosuchkey: x\n").ok());
+  const auto obsolete = Config::ParseYaml("k3s:\n  helper: obsolete\n");
+  assert(!obsolete.ok());
+  assert(absl::StrContains(obsolete.status().message(),
+                           "unknown configuration key \"k3s.helper\""));
 }
 
 void CheckValidatedString() {

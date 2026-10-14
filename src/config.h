@@ -223,7 +223,6 @@ struct ModelsConfig {
 };
 
 struct K3sConfig {
-  std::filesystem::path helper;
   K3sRole role = K3sRole::kServer;
   std::optional<ServerUrl> server_url;
   std::optional<Hostname> node_name;
