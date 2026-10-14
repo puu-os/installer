@@ -33,6 +33,7 @@
 #include "engine/context.h"
 #include "engine/firmware.h"
 #include "engine/image.h"
+#include "engine/k3s.h"
 #include "engine/partition.h"
 #include "engine/passwd.h"
 #include "engine/pipeline.h"
@@ -556,78 +557,16 @@ Status StepFirstboot(Runner& runner) {
 
 Status StepConfigureK3s(Runner& runner) {
   Context& context = runner.GetContext();
+  SecretString token(std::move(context.k3s_token));
   const K3sConfig& k3s = context.config.k3s;
-
   if (k3s.role == K3sRole::kServer && !k3s.node_name.has_value()) {
     InstallationLogger()->info(
         "k3s cluster: using image default server configuration");
     return absl::OkStatus();
   }
-
-  std::vector<std::string> args = {"--role",
-                                   std::string(K3sRoleName(k3s.role))};
-  if (k3s.server_url.has_value()) {
-    args.emplace_back("--server-url");
-    args.push_back(k3s.server_url->Value());
-  }
-
-  if (k3s.node_name.has_value()) {
-    args.emplace_back("--node-name");
-    args.push_back(k3s.node_name->Value());
-  }
-
   PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
                        DeploymentRoot(kTargetMount));
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
-  const std::filesystem::path deployment_var = deployment / "var";
-
-  Status result;
-  const auto record_cleanup = [&result](const Status& status) {
-    if (!status.ok()) {
-      InstallationLogger()->error("k3s cluster cleanup: {}", status.ToString());
-      result.Update(status);
-    }
-  };
-  {
-    CleanupStack cleanups;
-    result = [&]() -> Status {
-      PUU_RETURN_IF_ERROR(CreateDirectories(deployment_var));
-      PUU_RETURN_IF_ERROR(BindMount(state / "var", deployment_var));
-      cleanups.Push([&record_cleanup, deployment_var] {
-        record_cleanup(Unmount(deployment_var));
-      });
-
-      if (!context.k3s_token.Empty()) {
-        std::string directory = (state / "var/.puu-k3s-XXXXXX").string();
-        if (::mkdtemp(directory.data()) == nullptr) {
-          return ErrnoToStatus(errno, "create k3s token directory");
-        }
-        cleanups.Push([&record_cleanup, directory] {
-          record_cleanup(RemoveTree(directory));
-        });
-
-        const std::filesystem::path token =
-            std::filesystem::path(directory) / "token";
-        std::string content;
-        content.reserve(context.k3s_token.Size() + 1);
-        content.assign(context.k3s_token.Value());
-        content.push_back('\n');
-        const Status written =
-            WriteFile(token, content, kSecretFileMode, O_NOFOLLOW | O_EXCL);
-        OPENSSL_cleanse(content.data(), content.size());
-        PUU_RETURN_IF_ERROR(written);
-        args.emplace_back("--token-file");
-        args.push_back(
-            (std::filesystem::path("/") / token.lexically_relative(state))
-                .string());
-      }
-
-      Command command(k3s.helper.string());
-      return command.Args(args).Chroot(deployment).Run();
-    }();
-  }
-  context.k3s_token.Clear();
-  PUU_RETURN_IF_ERROR(result);
+  PUU_RETURN_IF_ERROR(StageK3s(deployment, k3s, std::move(token)));
   InstallationLogger()->info("k3s cluster: staged {} configuration",
                              K3sRoleName(k3s.role));
   return absl::OkStatus();

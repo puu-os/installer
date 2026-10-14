@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) Opinsys Oy 2026
 
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <array>
 #include <cassert>
+#include <cerrno>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -23,12 +30,53 @@
 #include "engine/context.h"
 #include "engine/firmware.h"
 #include "engine/guid.h"
+#include "engine/k3s.h"
 #include "engine/le_bytes.h"
 #include "engine/partition.h"
 #include "engine/passwd.h"
 #include "engine/pipeline.h"
 #include "engine/secureboot.h"
+#include "engine/step.h"
 #include "engine/util.h"
+
+namespace {
+enum class K3sFailure { kNone, kFileRename, kFileSync, kLinkRename, kLinkSync };
+K3sFailure k3s_failure = K3sFailure::kNone;
+bool fail_next_sync = false;
+}  // namespace
+
+extern "C" int __real_renameat(int, const char*, int, const char*);
+extern "C" int __real_fsync(int);
+
+extern "C" int __wrap_renameat(int old_parent, const char* old_name,
+                               int new_parent, const char* new_name) {
+  const std::string_view destination(new_name);
+  const bool environment = destination == "puu-cluster.env";
+  const bool link = destination == "k3s.service.env";
+  if ((environment && k3s_failure == K3sFailure::kFileRename) ||
+      (link && k3s_failure == K3sFailure::kLinkRename)) {
+    k3s_failure = K3sFailure::kNone;
+    errno = EIO;
+    return -1;
+  }
+  const int result =
+      __real_renameat(old_parent, old_name, new_parent, new_name);
+  if (result == 0 && ((environment && k3s_failure == K3sFailure::kFileSync) ||
+                      (link && k3s_failure == K3sFailure::kLinkSync))) {
+    fail_next_sync = true;
+  }
+  return result;
+}
+
+extern "C" int __wrap_fsync(int fd) {
+  if (fail_next_sync) {
+    fail_next_sync = false;
+    k3s_failure = K3sFailure::kNone;
+    errno = EIO;
+    return -1;
+  }
+  return __real_fsync(fd);
+}
 
 namespace puu::engine {
 namespace {
@@ -389,6 +437,318 @@ void CheckEfiGuid() {
   assert(!EfiGuid::Parse("8be4df61-93ca-11d2-aa0d-00e098032b8g").ok());
 }
 
+struct K3sFixture {
+  std::filesystem::path root;
+  std::filesystem::path defaults;
+  std::filesystem::path environment;
+  std::filesystem::path link;
+
+  K3sFixture() {
+    std::string pattern =
+        (std::filesystem::temp_directory_path() / "puu-selfcheck-k3s-XXXXXX")
+            .string();
+    assert(::mkdtemp(pattern.data()) != nullptr);
+    root = pattern;
+    defaults = root / "usr/lib/systemd/system/k3s.service.env";
+    environment = root / "etc/rancher/k3s/puu-cluster.env";
+    link = root / "etc/systemd/system/k3s.service.env";
+  }
+  ~K3sFixture() { assert(RemoveTree(root).ok()); }
+
+  void Defaults(std::string_view text) const {
+    assert(CreateDirectories(defaults.parent_path()).ok());
+    assert(WriteFile(defaults, text, 0644).ok());
+  }
+
+  Status Stage(const K3sConfig& config,
+               std::string_view text = "test-token") const {
+    SecretString token(text);
+    const Status status = StageK3s(root, config, std::move(token));
+    assert(token.Empty());
+    return status;
+  }
+
+  void NoTemporaries() const {
+    for (const auto& entry :
+         std::filesystem::recursive_directory_iterator(root)) {
+      assert(!entry.path().filename().string().starts_with(".puu-k3s-"));
+    }
+  }
+};
+
+void CheckK3sStaging() {
+  constexpr std::string_view defaults =
+      "# image defaults\nPATH='/image/bin:/usr/bin'\n"
+      "K3S_EXEC='server --cluster-init --disable=traefik'\n"
+      "K3S_KUBECONFIG_MODE=0644\nK3S_NODE_NAME=old-name\n"
+      "IMAGE_OPTION=keep\\ this\\ value\n";
+  K3sConfig server;
+  K3sConfig named;
+  named.node_name = *Hostname::Parse("node-one");
+  K3sConfig agent;
+  agent.role = K3sRole::kAgent;
+  agent.server_url = *ServerUrl::Parse("https://cluster.example:6443");
+
+  K3sFixture fixture;
+  assert(fixture.Stage(server).ok());
+  assert(std::filesystem::is_empty(fixture.root));
+  assert(!fixture.Stage(named).ok());
+  fixture.Defaults(defaults);
+  const mode_t mask = ::umask(0);
+  const Status staged = fixture.Stage(named);
+  ::umask(mask);
+  assert(staged.ok());
+  struct stat st{};
+  assert(::stat(fixture.environment.parent_path().c_str(), &st) == 0);
+  assert((st.st_mode & 07777) == 0700);
+  assert(::stat(fixture.environment.c_str(), &st) == 0);
+  assert((st.st_mode & 07777) == 0600);
+  const auto named_text = ReadFile(fixture.environment);
+  assert(named_text.ok());
+  assert(*named_text == std::string(defaults) + "K3S_NODE_NAME=\"node-one\"\n");
+  assert(*ReadFile(fixture.defaults) == defaults);
+  assert(*ReadSymlink(fixture.link) == "/etc/rancher/k3s/puu-cluster.env");
+  assert(fixture.Stage(server).ok());
+  assert(*ReadFile(fixture.environment) == *named_text);
+
+  assert(
+      fixture.Stage(agent, " \tquote\"slash\\dollar$backtick`' #; ä\t ").ok());
+  const auto agent_text = ReadFile(fixture.environment);
+  assert(agent_text.ok());
+  assert(*agent_text ==
+         "PATH=\"/image/bin:/usr/bin\"\nK3S_EXEC=\"agent\"\n"
+         "K3S_URL=\"https://cluster.example:6443\"\n"
+         "K3S_TOKEN=\"quote\\\"slash\\\\dollar\\$backtick\\`' #; ä\"\n");
+  agent.node_name = *Hostname::Parse("agent-one");
+  assert(fixture.Stage(agent).ok());
+  assert(absl::StrContains(*ReadFile(fixture.environment),
+                           "K3S_NODE_NAME=\"agent-one\"\n"));
+  const std::string long_token(8192, '$');
+  assert(fixture.Stage(agent, long_token).ok());
+  assert(absl::StrContains(*ReadFile(fixture.environment),
+                           "K3S_TOKEN=\"\\$\\$\\$"));
+  fixture.NoTemporaries();
+
+  for (const std::string_view invalid :
+       {std::string_view("a\0b", 3), std::string_view("a\nb"),
+        std::string_view("a\rb"), std::string_view("token\n"),
+        std::string_view("\xc0\xaf"), std::string_view("\x80"),
+        std::string_view("\xe2\x82"), std::string_view("\xed\xa0\x80"),
+        std::string_view("\xf4\x90\x80\x80"), std::string_view("\xef\xbb\xbf"),
+        std::string_view("\xef\xb7\x90"), std::string_view("\xef\xbf\xbf")}) {
+    const Status status = fixture.Stage(agent, invalid);
+    assert(absl::IsInvalidArgument(status));
+  }
+  assert(!fixture.Stage(agent, " \t ").ok());
+  K3sConfig missing_url = agent;
+  missing_url.server_url.reset();
+  assert(!fixture.Stage(missing_url).ok());
+  K3sConfig invalid_role = agent;
+  invalid_role.role = static_cast<K3sRole>(99);
+  assert(!fixture.Stage(invalid_role).ok());
+  K3sConfig invalid_url = agent;
+  invalid_url.server_url = *ServerUrl::Parse("https://example/\xff");
+  assert(!fixture.Stage(invalid_url).ok());
+  K3sConfig invalid_node = named;
+  invalid_node.node_name = Hostname();
+  assert(!fixture.Stage(invalid_node).ok());
+  invalid_node = agent;
+  invalid_node.node_name = Hostname();
+  assert(!fixture.Stage(invalid_node).ok());
+  fixture.NoTemporaries();
+
+  for (const std::string_view invalid :
+       {"K3S_EXEC=server\n", "PATH=\nK3S_EXEC=server\n",
+        "PATH=/image/\xff\nK3S_EXEC=server\n"}) {
+    fixture.Defaults(invalid);
+    assert(!fixture.Stage(agent).ok());
+    fixture.NoTemporaries();
+  }
+  fixture.Defaults("PATH=/image/bin\n");
+  assert(fixture.Stage(agent).ok());
+  assert(fixture.Stage(named).ok());
+  fixture.Defaults("K3S_EXEC=server");
+  assert(fixture.Stage(named).ok());
+  assert(*ReadFile(fixture.environment) ==
+         "K3S_EXEC=server\nK3S_NODE_NAME=\"node-one\"\n");
+  fixture.Defaults("PATH=\"/image/\"bin\nnot-an-assignment\n");
+  assert(fixture.Stage(agent).ok());
+  assert(absl::StrContains(*ReadFile(fixture.environment),
+                           "PATH=\"/image/bin\"\n"));
+  for (const std::string_view encoded :
+       {"PATH=\"/custom\\$bin:/a\\\\b:/quote\\\"bin\"\n",
+        "PATH='/custom$bin:/a\\b:/quote\"bin'\n",
+        "PATH=/custom$bin:/a\\\\b:/quote\"bin\n"}) {
+    fixture.Defaults(encoded);
+    assert(fixture.Stage(agent).ok());
+    assert(absl::StrContains(*ReadFile(fixture.environment),
+                             "PATH=\"/custom\\$bin:/a\\\\b:/quote\\\"bin\"\n"));
+  }
+  fixture.Defaults("PATH=\\\n'/image/bin'\n");
+  assert(fixture.Stage(agent).ok());
+  assert(absl::StrContains(*ReadFile(fixture.environment),
+                           "PATH=\"'/image/bin'\"\n"));
+  fixture.Defaults("PATH=/image/\\\nbin\nK3S_EXEC=server\n");
+  assert(fixture.Stage(agent).ok());
+  assert(absl::StrContains(*ReadFile(fixture.environment),
+                           "PATH=\"/image/bin\"\n"));
+  fixture.Defaults("PATH=/image/bin\\ \nK3S_EXEC=server\n");
+  assert(fixture.Stage(agent).ok());
+  assert(absl::StrContains(*ReadFile(fixture.environment),
+                           "PATH=\"/image/bin \"\n"));
+  fixture.Defaults(
+      "PATH='/image/bin'\nK3S_EXEC=\"server\n--cluster-init\"\n"
+      "IMAGE_OPTION='line one\nline two'\n");
+  assert(fixture.Stage(named).ok());
+  assert(absl::StrContains(*ReadFile(fixture.environment),
+                           "K3S_EXEC=\"server\n--cluster-init\"\n"));
+  assert(absl::StrContains(*ReadFile(fixture.environment),
+                           "IMAGE_OPTION='line one\nline two'\n"));
+  fixture.Defaults(defaults);
+  assert(::chmod(fixture.environment.parent_path().c_str(), 0777) == 0);
+  assert(::chmod(fixture.environment.c_str(), 0644) == 0);
+  assert(fixture.Stage(agent).ok());
+  assert(::stat(fixture.environment.parent_path().c_str(), &st) == 0);
+  assert((st.st_mode & 07777) == 0700);
+  assert(::stat(fixture.environment.c_str(), &st) == 0);
+  assert((st.st_mode & 07777) == 0600);
+
+  for (const bool existing : {false, true}) {
+    for (const K3sFailure failure :
+         {K3sFailure::kFileRename, K3sFailure::kFileSync,
+          K3sFailure::kLinkRename, K3sFailure::kLinkSync}) {
+      K3sFixture failed;
+      failed.Defaults(defaults);
+      if (existing) {
+        assert(failed.Stage(agent, "previous-token").ok());
+        assert(RemoveFile(failed.link).ok());
+        assert(WriteFile(failed.link, "previous-link", 0644).ok());
+      }
+      const std::string before = existing ? *ReadFile(failed.environment) : "";
+      k3s_failure = failure;
+      assert(!failed.Stage(agent, "replacement-token").ok());
+      assert(k3s_failure == K3sFailure::kNone);
+      if (existing) {
+        assert(*ReadFile(failed.environment) == before);
+        assert(*ReadFile(failed.link) == "previous-link");
+      } else {
+        assert(!std::filesystem::exists(failed.environment));
+        assert(!std::filesystem::is_symlink(failed.link));
+      }
+      failed.NoTemporaries();
+    }
+  }
+
+  K3sFixture outside;
+  assert(::chmod(outside.root.c_str(), 0755) == 0);
+  const auto sentinel = outside.root / "sentinel";
+  assert(WriteFile(sentinel, "untouched", 0644).ok());
+  assert(RemoveFile(fixture.environment).ok());
+  assert(CreateSymlink(sentinel, fixture.environment).ok());
+  assert(RemoveFile(fixture.link).ok());
+  assert(CreateSymlink(sentinel, fixture.link).ok());
+  assert(fixture.Stage(agent).ok());
+  assert(*ReadFile(sentinel) == "untouched");
+  assert(::stat(sentinel.c_str(), &st) == 0);
+  assert((st.st_mode & 07777) == 0644);
+  assert(!std::filesystem::is_symlink(fixture.environment));
+  assert(::stat(fixture.environment.c_str(), &st) == 0);
+  assert((st.st_mode & 07777) == 0600);
+  assert(RemoveFile(fixture.link).ok());
+  assert(WriteFile(fixture.link, "old regular file", 0644).ok());
+  assert(fixture.Stage(named).ok());
+  assert(std::filesystem::is_symlink(fixture.link));
+
+  for (const auto* parent :
+       {"etc", "etc/rancher", "etc/rancher/k3s", "etc/systemd",
+        "etc/systemd/system", "usr", "usr/lib", "usr/lib/systemd",
+        "usr/lib/systemd/system"}) {
+    K3sFixture hostile;
+    hostile.Defaults(defaults);
+    const auto path = hostile.root / parent;
+    assert(RemoveTree(path).ok());
+    assert(CreateDirectories(path.parent_path()).ok());
+    assert(CreateSymlink(outside.root, path).ok());
+    assert(!hostile.Stage(agent).ok());
+    hostile.NoTemporaries();
+    assert(std::filesystem::directory_iterator(outside.root) !=
+           std::filesystem::directory_iterator());
+    assert(std::distance(std::filesystem::directory_iterator(outside.root),
+                         std::filesystem::directory_iterator()) == 1);
+    assert(*ReadFile(sentinel) == "untouched");
+    assert(::stat(outside.root.c_str(), &st) == 0);
+    assert((st.st_mode & 07777) == 0755);
+  }
+  K3sFixture hostile_defaults;
+  hostile_defaults.Defaults(defaults);
+  assert(RemoveFile(hostile_defaults.defaults).ok());
+  assert(CreateSymlink(sentinel, hostile_defaults.defaults).ok());
+  assert(!hostile_defaults.Stage(agent).ok());
+  assert(RemoveFile(hostile_defaults.defaults).ok());
+  assert(::mkfifo(hostile_defaults.defaults.c_str(), 0600) == 0);
+  assert(!hostile_defaults.Stage(agent).ok());
+  assert(RemoveFile(hostile_defaults.defaults).ok());
+  hostile_defaults.Defaults(std::string_view("PATH=/image/bin\0\n", 17));
+  assert(!hostile_defaults.Stage(agent).ok());
+  hostile_defaults.NoTemporaries();
+  const auto root_link = outside.root / "deployment-link";
+  assert(CreateSymlink(fixture.root, root_link).ok());
+  assert(!StageK3s(root_link, agent, SecretString("test-token")).ok());
+  assert(RemoveFile(root_link).ok());
+
+  const std::string previous = *ReadFile(fixture.environment);
+  assert(RemoveFile(fixture.link).ok());
+  assert(CreateDirectories(fixture.link).ok());
+  assert(!fixture.Stage(agent).ok());
+  assert(*ReadFile(fixture.environment) == previous);
+  fixture.NoTemporaries();
+  assert(RemoveTree(fixture.link).ok());
+  assert(fixture.Stage(agent).ok());
+  const std::string before_failure = *ReadFile(fixture.environment);
+  struct rlimit saved_limit{};
+  assert(::getrlimit(RLIMIT_FSIZE, &saved_limit) == 0);
+  struct sigaction ignore{};
+  struct sigaction saved_action{};
+  ignore.sa_handler = SIG_IGN;
+  assert(::sigemptyset(&ignore.sa_mask) == 0);
+  assert(::sigaction(SIGXFSZ, &ignore, &saved_action) == 0);
+  struct rlimit limit = saved_limit;
+  limit.rlim_cur = 200;
+  assert(::setrlimit(RLIMIT_FSIZE, &limit) == 0);
+  const Status failed_write = fixture.Stage(agent, long_token);
+  assert(::setrlimit(RLIMIT_FSIZE, &saved_limit) == 0);
+  assert(::sigaction(SIGXFSZ, &saved_action, nullptr) == 0);
+  assert(!failed_write.ok());
+  assert(*ReadFile(fixture.environment) == before_failure);
+  fixture.NoTemporaries();
+  if (::geteuid() != 0) {
+    assert(::chmod(fixture.link.parent_path().c_str(), 0500) == 0);
+    const Status failed_link = fixture.Stage(agent);
+    assert(::chmod(fixture.link.parent_path().c_str(), 0700) == 0);
+    assert(!failed_link.ok());
+    assert(*ReadFile(fixture.environment) == before_failure);
+    fixture.NoTemporaries();
+  }
+  SecretString consumed("test-token");
+  assert(!StageK3s(fixture.root / "missing", agent, std::move(consumed)).ok());
+  assert(consumed.Empty());
+  SecretString noop_token("test-token");
+  assert(
+      StageK3s(fixture.root / "missing", server, std::move(noop_token)).ok());
+  assert(noop_token.Empty());
+  bool checked_default_step = false;
+  for (const Step& step : Steps()) {
+    if (step.title == "Configure k3s cluster") {
+      Runner runner{Context{}};
+      runner.GetContext().k3s_token.Assign("test-token");
+      assert(step.run(runner).ok());
+      assert(runner.GetContext().k3s_token.Empty());
+      checked_default_step = true;
+    }
+  }
+  assert(checked_default_step);
+}
+
 void CheckSecretString() {
   SecretString empty;
   assert(empty.Empty());
@@ -461,6 +821,7 @@ int main() {
   puu::engine::CheckBlockProbing();
   puu::engine::CheckEfiGuid();
   puu::engine::CheckSecretString();
+  puu::engine::CheckK3sStaging();
   std::puts("selfcheck: ok");
   return 0;
 }

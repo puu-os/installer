@@ -24,6 +24,7 @@ set(installer_core_sources
   engine/firmware.cc
   engine/guid.cc
   engine/image.cc
+  engine/k3s.cc
   engine/partition.cc
   engine/passwd.cc
   engine/pipeline.cc
@@ -70,4 +71,5 @@ install(TARGETS puu-installer RUNTIME)
 add_executable(puu-selfcheck selfcheck.cc)
 target_compile_options(puu-selfcheck PRIVATE -UNDEBUG)
 target_link_libraries(puu-selfcheck PRIVATE puu-installer-core)
+target_link_options(puu-selfcheck PRIVATE -Wl,--wrap=renameat -Wl,--wrap=fsync)
 add_test(NAME selfcheck COMMAND puu-selfcheck)
