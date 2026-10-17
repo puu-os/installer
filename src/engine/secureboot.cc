@@ -881,6 +881,18 @@ std::vector<uint8_t> BuildSignatureList(std::span<const uint8_t> cert_der,
   return out;
 }
 
+std::string_view KeyKindName(KeyKind kind) {
+  switch (kind) {
+    case KeyKind::kPlatform:
+      return "PK";
+    case KeyKind::kKeyExchange:
+      return "KEK";
+    case KeyKind::kDatabase:
+      return "db";
+  }
+  return "";
+}
+
 }  // namespace
 
 StatusOr<std::vector<std::pair<size_t, size_t>>> AuthenticodeSkippedRanges(
@@ -898,18 +910,6 @@ StatusOr<std::vector<std::pair<size_t, size_t>>> AuthenticodeSkippedRanges(
         layout.certificate_table_offset + layout.certificate_table_size);
   }
   return ranges;
-}
-
-std::string_view KeyKindName(KeyKind kind) {
-  switch (kind) {
-    case KeyKind::kPlatform:
-      return "PK";
-    case KeyKind::kKeyExchange:
-      return "KEK";
-    case KeyKind::kDatabase:
-      return "db";
-  }
-  return "";
 }
 
 KeyStore::KeyStore(std::filesystem::path root) : root_(std::move(root)) {}
@@ -997,9 +997,9 @@ Status KeyStore::EnsureKeys() {
   return absl::OkStatus();
 }
 
-Status SignPeBinary(const std::filesystem::path& binary, const KeyPair& key) {
+Status KeyPair::Sign(const std::filesystem::path& binary) const {
   PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> image, ReadFileBytes(binary));
-  PUU_ASSIGN_OR_RETURN(const KeyAndCert signer, LoadKeyAndCert(key));
+  PUU_ASSIGN_OR_RETURN(const KeyAndCert signer, LoadKeyAndCert(*this));
   StatusOr<std::vector<uint8_t>> signed_image = SignPeImage(image, signer);
   if (!signed_image.ok()) {
     return WithContext(signed_image.status(),
@@ -1008,10 +1008,9 @@ Status SignPeBinary(const std::filesystem::path& binary, const KeyPair& key) {
   return ReplaceFileBytes(binary, *signed_image);
 }
 
-StatusOr<bool> VerifyPeBinary(const std::filesystem::path& binary,
-                              const KeyPair& key) {
+StatusOr<bool> KeyPair::Verify(const std::filesystem::path& binary) const {
   PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> image, ReadFileBytes(binary));
-  StatusOr<X509Ptr> certificate = LoadCertificate(key.certificate_path);
+  StatusOr<X509Ptr> certificate = LoadCertificate(certificate_path);
 
   if (!certificate.ok()) {
     return false;
@@ -1083,12 +1082,11 @@ StatusOr<std::vector<std::vector<uint8_t>>> SplitSignatureLists(
 
 }  // namespace
 
-Status EnrollKeys(const KeyStore& store) {
-  PUU_ASSIGN_OR_RETURN(const EfiGuid owner, store.OwnerGuid());
-  PUU_ASSIGN_OR_RETURN(const KeyPair pk_paths, store.Get(KeyKind::kPlatform));
-  PUU_ASSIGN_OR_RETURN(const KeyPair kek_paths,
-                       store.Get(KeyKind::kKeyExchange));
-  PUU_ASSIGN_OR_RETURN(const KeyPair db_paths, store.Get(KeyKind::kDatabase));
+Status KeyStore::Enroll() const {
+  PUU_ASSIGN_OR_RETURN(const EfiGuid owner, OwnerGuid());
+  PUU_ASSIGN_OR_RETURN(const KeyPair pk_paths, Get(KeyKind::kPlatform));
+  PUU_ASSIGN_OR_RETURN(const KeyPair kek_paths, Get(KeyKind::kKeyExchange));
+  PUU_ASSIGN_OR_RETURN(const KeyPair db_paths, Get(KeyKind::kDatabase));
   PUU_ASSIGN_OR_RETURN(const KeyAndCert pk, LoadKeyAndCert(pk_paths));
   PUU_ASSIGN_OR_RETURN(const KeyAndCert kek, LoadKeyAndCert(kek_paths));
   PUU_ASSIGN_OR_RETURN(const KeyAndCert db, LoadKeyAndCert(db_paths));
@@ -1118,7 +1116,6 @@ Status EnrollKeys(const KeyStore& store) {
         }
       }
     }
-
     PUU_ASSIGN_OR_RETURN(
         const std::vector<uint8_t> payload,
         AuthenticatedPayload("db", image_security_db, esl, kek.key.get(),

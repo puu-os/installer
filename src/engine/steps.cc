@@ -741,12 +741,12 @@ Status StepSign(Runner& /*runner*/) {
   size_t signed_count = 0;
   size_t skipped_count = 0;
   for (const std::filesystem::path& binary : binaries) {
-    PUU_ASSIGN_OR_RETURN(const bool already, VerifyPeBinary(binary, database));
+    PUU_ASSIGN_OR_RETURN(const bool already, database.Verify(binary));
     if (already) {
       ++skipped_count;
       continue;
     }
-    PUU_RETURN_IF_ERROR(SignPeBinary(binary, database));
+    PUU_RETURN_IF_ERROR(database.Sign(binary));
     ++signed_count;
   }
   InstallationLogger()->info(
@@ -754,7 +754,7 @@ Status StepSign(Runner& /*runner*/) {
       skipped_count);
 
   for (const std::filesystem::path& binary : binaries) {
-    PUU_ASSIGN_OR_RETURN(const bool valid, VerifyPeBinary(binary, database));
+    PUU_ASSIGN_OR_RETURN(const bool valid, database.Verify(binary));
     if (!valid) {
       return InternalError("signature verification failed for {}",
                            binary.string());
@@ -768,7 +768,7 @@ Status StepEnrollKeys(Runner& /*runner*/) {
   KeyStore store(state / "var");
   PUU_RETURN_IF_ERROR(store.EnsureKeys());
 
-  Status status = EnrollKeys(store);
+  Status status = store.Enroll();
   if (status.ok()) {
     InstallationLogger()->info("enrolled Secure Boot db, KEK and PK");
     return absl::OkStatus();

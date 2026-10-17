@@ -26,11 +26,16 @@ enum class KeyKind : std::uint8_t {
   kDatabase,
 };
 
-std::string_view KeyKindName(KeyKind kind);
-
 struct KeyPair {
   std::filesystem::path key_path;
   std::filesystem::path certificate_path;
+
+  // Signs `binary` in place with an Authenticode SHA-256 signature from this
+  // key.
+  Status Sign(const std::filesystem::path& binary) const;
+
+  // Verifies that `binary` carries a valid signature from this key.
+  StatusOr<bool> Verify(const std::filesystem::path& binary) const;
 };
 
 // The key store written under the target root, compatible with sbctl's layout.
@@ -49,27 +54,20 @@ class KeyStore {
 
   [[nodiscard]] StatusOr<EfiGuid> OwnerGuid() const;
 
+  // Enrols the key hierarchy into firmware.
+  //
+  // Order matters and is not configurable: db and KEK must be in place before
+  // the platform key, because enrolling PK closes Setup Mode and refuses any
+  // further unsigned update.
+  Status Enroll() const;
+
  private:
   std::filesystem::path root_;
 };
 
-// Signs `binary` in place with an Authenticode SHA-256 signature from the
-// database key.
-Status SignPeBinary(const std::filesystem::path& binary, const KeyPair& key);
-
-StatusOr<bool> VerifyPeBinary(const std::filesystem::path& binary,
-                              const KeyPair& key);
-
 // Every *.efi file under `esp`, sorted, so signing order is reproducible.
 StatusOr<std::vector<std::filesystem::path>> TargetEfiBinaries(
     const std::filesystem::path& esp);
-
-// Enrols the key hierarchy into firmware.
-//
-// Order matters and is not configurable: db and KEK must be in place before the
-// platform key, because enrolling PK closes Setup Mode and refuses any further
-// unsigned update.
-Status EnrollKeys(const KeyStore& store);
 
 StatusOr<std::vector<std::pair<size_t, size_t>>> AuthenticodeSkippedRanges(
     std::span<const uint8_t> image);
