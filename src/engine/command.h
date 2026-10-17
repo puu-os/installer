@@ -51,6 +51,12 @@ class Command {
   // redacted from the logged command line.
   Status Run();
 
+  // Runs an interactive command with stdin, stdout, and stderr connected
+  // directly to the controlling terminal, without background session
+  // detachment.
+  static Status RunInteractive(const std::filesystem::path& program,
+                               const std::vector<std::string>& args = {});
+
  private:
   std::string program_;
   std::vector<std::string> args_;
@@ -62,16 +68,6 @@ class Command {
   ProgressSource* progress_source_ = nullptr;
   std::function<void(double)> progress_emit_;
 };
-
-// Runs `program` with `args` and returns its trimmed standard output. Used for
-// short queries such as reading a filesystem UUID.
-StatusOr<std::string> CaptureOutput(std::string_view program,
-                                    const std::vector<std::string>& args);
-
-// Runs an interactive command with stdin, stdout, and stderr connected directly
-// to the controlling terminal, without background session detachment.
-Status RunInteractive(const std::filesystem::path& program,
-                      const std::vector<std::string>& args = {});
 
 }  // namespace puu::engine
 

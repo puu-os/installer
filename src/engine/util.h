@@ -82,8 +82,6 @@ std::string HumanSize(uint64_t bytes);
 // Reduces a raw command output line for display: keeps only the text after the
 // last carriage return, strips CSI escape sequences and drops control
 // characters.
-std::string CleanLogLine(std::string_view line);
-
 // The user's preferred shell from $SHELL, or /bin/sh.
 std::filesystem::path DefaultShell();
 

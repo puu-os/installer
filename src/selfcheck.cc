@@ -260,13 +260,14 @@ void CheckNewPidNamespace() {
 }
 
 void CheckRunInteractive() {
-  const Status ok_status = RunInteractive("/bin/true");
+  const Status ok_status = Command::RunInteractive("/bin/true");
   assert(ok_status.ok());
 
-  const Status fail_status = RunInteractive("/bin/false");
+  const Status fail_status = Command::RunInteractive("/bin/false");
   assert(!fail_status.ok());
 
-  const Status missing_status = RunInteractive("/nonexistent/puu-test-missing");
+  const Status missing_status =
+      Command::RunInteractive("/nonexistent/puu-test-missing");
   assert(!missing_status.ok());
 }
 

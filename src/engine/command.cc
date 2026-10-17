@@ -52,6 +52,40 @@ constexpr size_t kOutputTailLines = 12;
 
 constexpr int kSpawnFailureStatus = 127;
 
+std::string CleanLogLine(std::string_view line) {
+  const size_t carriage = line.rfind('\r');
+  const std::string_view visible =
+      carriage == std::string_view::npos ? line : line.substr(carriage + 1);
+
+  std::string out;
+  out.reserve(visible.size());
+  for (size_t i = 0; i < visible.size(); ++i) {
+    const auto character = static_cast<unsigned char>(visible[i]);
+    if (character == 0x1b) {
+      if (i + 1 < visible.size() && visible[i + 1] == '[') {
+        i += 2;
+        while (i < visible.size() && (visible[i] < '@' || visible[i] > '~')) {
+          ++i;
+        }
+      }
+      continue;
+    }
+    if (character == '\t') {
+      out.push_back(' ');
+      continue;
+    }
+
+    if (character < 0x20 || character == 0x7f) {
+      continue;
+    }
+    out.push_back(visible[i]);
+  }
+
+  const size_t last = out.find_last_not_of(" \t");
+  out.resize(last == std::string::npos ? 0 : last + 1);
+  return out;
+}
+
 // A step the child performs between fork and exec. Its failure is reported to
 // the parent over a dedicated pipe, because a forked child of a threaded
 // process may not allocate and so cannot format a message itself.
@@ -552,33 +586,8 @@ Status Command::Run() {
                        absl::StrJoin(tail, "\n"), command_line);
 }
 
-StatusOr<std::string> CaptureOutput(std::string_view program,
-                                    const std::vector<std::string>& args) {
-  const std::string program_name(program);
-  PUU_ASSIGN_OR_RETURN(Child child,
-                       Spawn(program_name, args, {}, ChildSetup{}));
-
-  std::string output;
-  const Status pumped = PumpOutput(
-      child.output_fd.Get(),
-      [&output](std::string_view line) { output.append(line).push_back('\n'); },
-      [] {});
-  if (!pumped.ok()) {
-    KillSession(child.pid);
-  }
-  PUU_ASSIGN_OR_RETURN(const std::optional<std::string> failure,
-                       WaitForChild(child.pid, program_name));
-  PUU_RETURN_IF_ERROR(WithContext(pumped, program_name));
-
-  if (failure) {
-    return InternalError("{} failed ({}): {}", program_name, *failure,
-                         Trim(output));
-  }
-  return std::string(Trim(output));
-}
-
-Status RunInteractive(const std::filesystem::path& program,
-                      const std::vector<std::string>& args) {
+Status Command::RunInteractive(const std::filesystem::path& program,
+                               const std::vector<std::string>& args) {
   const std::string resolved = ResolveProgram(program.string());
   const std::vector<std::string> environment = MakeEnvironment({});
   const std::vector<char*> envp = BuildEnvp(environment);
