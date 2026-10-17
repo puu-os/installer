@@ -303,28 +303,29 @@ StatusOr<X509Ptr> LoadCertificate(const std::filesystem::path& path) {
 
 StatusOr<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> IssuerAndSerial(
     std::span<const uint8_t> cert_der) {
-  PUU_ASSIGN_OR_RETURN(const der::Parsed certificate, der::ReadAt(cert_der, 0));
+  PUU_ASSIGN_OR_RETURN(const der::Element certificate,
+                       der::ReadAt(cert_der, 0));
   if (certificate.tag != 0x30) {
     return InvalidArgumentError("certificate is not a SEQUENCE");
   }
-  PUU_ASSIGN_OR_RETURN(const der::Parsed tbs,
+  PUU_ASSIGN_OR_RETURN(const der::Element tbs,
                        der::ReadAt(certificate.contents, 0));
   if (tbs.tag != 0x30) {
     return InvalidArgumentError("tbsCertificate is not a SEQUENCE");
   }
   const std::span<const uint8_t> body = tbs.contents;
 
-  PUU_ASSIGN_OR_RETURN(const der::Parsed first, der::ReadAt(body, 0));
+  PUU_ASSIGN_OR_RETURN(const der::Element first, der::ReadAt(body, 0));
 
   const size_t serial_offset = first.tag == 0xa0 ? first.next : 0;
-  PUU_ASSIGN_OR_RETURN(const der::Parsed serial,
+  PUU_ASSIGN_OR_RETURN(const der::Element serial,
                        der::ReadAt(body, serial_offset));
   if (serial.tag != 0x02) {
     return InvalidArgumentError("serialNumber is not an INTEGER");
   }
-  PUU_ASSIGN_OR_RETURN(const der::Parsed signature,
+  PUU_ASSIGN_OR_RETURN(const der::Element signature,
                        der::ReadAt(body, serial.next));
-  PUU_ASSIGN_OR_RETURN(const der::Parsed issuer,
+  PUU_ASSIGN_OR_RETURN(const der::Element issuer,
                        der::ReadAt(body, signature.next));
   if (issuer.tag != 0x30) {
     return InvalidArgumentError("issuer is not a Name SEQUENCE");
@@ -350,7 +351,7 @@ StatusOr<std::vector<uint8_t>> BuildPkcs7(std::span<const uint8_t> digest,
   const std::vector<uint8_t> spc =
       der::Sequence(Concat({spc_attr, spc_digest}));
 
-  PUU_ASSIGN_OR_RETURN(const der::Parsed spc_tlv, der::ReadAt(spc, 0));
+  PUU_ASSIGN_OR_RETURN(const der::Element spc_tlv, der::ReadAt(spc, 0));
   if (spc_tlv.tag != 0x30 || spc_tlv.next != spc.size()) {
     return InternalError("invalid SpcIndirectDataContent encoding");
   }

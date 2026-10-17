@@ -35,21 +35,9 @@ std::vector<uint8_t> Set(std::span<const uint8_t> contents);
 // "1.2.840.113549.1.7.2".
 StatusOr<std::vector<uint8_t>> Oid(std::string_view dotted);
 
-// One parsed element.
-struct Element {
-  uint8_t tag = 0;
-  // Borrowed from the buffer passed to Read; valid only while it lives.
-  std::span<const uint8_t> contents;
-  // Total encoded size, for advancing to the next element.
-  size_t total_size = 0;
-};
-
-// Parses the element at the start of `input`.
-StatusOr<Element> Read(std::span<const uint8_t> input);
-
 // One parsed element together with the offset just past it, mirroring the
 // (element, next) pair sequential parsing needs.
-struct Parsed {
+struct Element {
   uint8_t tag = 0;
   std::span<const uint8_t> contents;
   std::span<const uint8_t> total;
@@ -57,12 +45,7 @@ struct Parsed {
 };
 
 // Parses the element at `offset` within `data`.
-StatusOr<Parsed> ReadAt(std::span<const uint8_t> data, size_t offset);
-
-// As ReadAt, but nullopt instead of a Status on malformed input; for callers
-// that skip malformed elements rather than report them.
-std::optional<Parsed> TryReadAt(std::span<const uint8_t> data, size_t offset);
-
+StatusOr<Element> ReadAt(std::span<const uint8_t> data, size_t offset = 0);
 // The Authenticode digest plus signer certificates extracted from a PKCS#7
 // blob.
 struct EmbeddedSignature {
