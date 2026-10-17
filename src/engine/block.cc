@@ -340,7 +340,8 @@ StatusOr<std::vector<Device>> ListDisks() {
 
 StatusOr<BusySources> ReadBusySources() {
   BusySources sources;
-  PUU_ASSIGN_OR_RETURN(sources.mounts, MountedSources());
+  PUU_ASSIGN_OR_RETURN(const Mounts mounts, Mounts::Read());
+  sources.mounts = mounts.Sources();
   PUU_ASSIGN_OR_RETURN(sources.swaps, SwapDevices());
   return sources;
 }

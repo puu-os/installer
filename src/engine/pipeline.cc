@@ -9,7 +9,6 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/xattr.h>
 
 #include <algorithm>
 #include <array>
@@ -18,7 +17,6 @@
 #include <exception>
 #include <filesystem>
 #include <functional>
-#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -74,196 +72,9 @@ std::string_view FstabMountPoint(std::string_view line) {
   return field;
 }
 
-std::filesystem::perms PermissionBits(mode_t mode) {
-  return std::filesystem::perms{mode} & std::filesystem::perms::mask;
-}
-
 StatusOr<std::vector<std::filesystem::path>> TeardownMountPoints() {
   PUU_ASSIGN_OR_RETURN(const Mounts mounts, Mounts::Read());
   return mounts.Below(kTargetMount);
-}
-
-Status CopyXattrs(const std::filesystem::path& source,
-                  const std::filesystem::path& destination) {
-  ssize_t size = ::listxattr(source.c_str(), nullptr, 0);
-  if (size < 0) {
-    const int error = errno;
-
-    if (error == ENOTSUP) {
-      return absl::OkStatus();
-    }
-    return ErrnoToStatus(error, fmt::format("listxattr {}", source.string()));
-  }
-  std::string names(static_cast<size_t>(size), '\0');
-  size = ::listxattr(source.c_str(), names.data(), names.size());
-  if (size < 0) {
-    const int error = errno;
-    return ErrnoToStatus(error, fmt::format("listxattr {}", source.string()));
-  }
-  names.resize(static_cast<size_t>(size));
-
-  for (size_t start = 0; start < names.size();) {
-    const size_t end = names.find('\0', start);
-    const std::string name =
-        names.substr(start, end == std::string::npos ? end : end - start);
-    start = end == std::string::npos ? names.size() : end + 1;
-
-    if (!name.starts_with("user.")) {
-      continue;
-    }
-
-    ssize_t value_size = ::getxattr(source.c_str(), name.c_str(), nullptr, 0);
-    if (value_size < 0) {
-      const int error = errno;
-      if (error == ENODATA) {
-        continue;
-      }
-      return ErrnoToStatus(
-          error, fmt::format("getxattr {} {}", source.string(), name));
-    }
-    std::string value(static_cast<size_t>(value_size), '\0');
-    value_size =
-        ::getxattr(source.c_str(), name.c_str(), value.data(), value.size());
-    if (value_size < 0) {
-      const int error = errno;
-      if (error == ENODATA) {
-        continue;
-      }
-      return ErrnoToStatus(
-          error, fmt::format("getxattr {} {}", source.string(), name));
-    }
-    if (::setxattr(destination.c_str(), name.c_str(), value.data(),
-                   static_cast<size_t>(value_size), 0) != 0) {
-      const int error = errno;
-      return ErrnoToStatus(
-          error, fmt::format("setxattr {} {}", destination.string(), name));
-    }
-  }
-  return absl::OkStatus();
-}
-
-Status SetPermissions(const std::filesystem::path& path,
-                      std::filesystem::perms permissions) {
-  std::error_code error;
-  std::filesystem::permissions(path, permissions, error);
-  if (error) {
-    return FilesystemError(error, fmt::format("chmod {}", path.string()));
-  }
-  return absl::OkStatus();
-}
-
-using HardLinkMap = std::map<std::pair<dev_t, ino_t>, std::filesystem::path>;
-
-Status CopyTreeEntry(const std::filesystem::path& source,
-                     const std::filesystem::path& destination,
-                     HardLinkMap* hard_links);
-
-Status CopyDirectory(const std::filesystem::path& source,
-                     const std::filesystem::path& destination,
-                     const struct stat& info, HardLinkMap* hard_links) {
-  PUU_RETURN_IF_ERROR(CreateDirectories(destination));
-  std::error_code error;
-  std::filesystem::directory_iterator entries(source, error);
-  if (error) {
-    return FilesystemError(error, fmt::format("readdir {}", source.string()));
-  }
-  const std::filesystem::directory_iterator end;
-  for (; entries != end; entries.increment(error)) {
-    if (error) {
-      return FilesystemError(error, fmt::format("readdir {}", source.string()));
-    }
-    PUU_RETURN_IF_ERROR(CopyTreeEntry(
-        entries->path(), destination / entries->path().filename(), hard_links));
-  }
-
-  PUU_RETURN_IF_ERROR(
-      SetPermissions(destination, PermissionBits(info.st_mode)));
-  return CopyXattrs(source, destination);
-}
-
-Status CopySymlink(const std::filesystem::path& source,
-                   const std::filesystem::path& destination) {
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path target, ReadSymlink(source));
-  return CreateSymlink(target, destination);
-}
-
-Status CopyRegularFile(const std::filesystem::path& source,
-                       const std::filesystem::path& destination,
-                       const struct stat& info, HardLinkMap* hard_links) {
-  const std::pair<dev_t, ino_t> key{info.st_dev, info.st_ino};
-  if (info.st_nlink > 1) {
-    const auto existing = hard_links->find(key);
-    if (existing != hard_links->end()) {
-      std::error_code error;
-      std::filesystem::create_hard_link(existing->second, destination, error);
-      if (error) {
-        return FilesystemError(
-            error, fmt::format("link {} to {}", existing->second.string(),
-                               destination.string()));
-      }
-      return absl::OkStatus();
-    }
-  }
-  PUU_RETURN_IF_ERROR(CopyFile(source, destination));
-  PUU_RETURN_IF_ERROR(
-      SetPermissions(destination, PermissionBits(info.st_mode)));
-  PUU_RETURN_IF_ERROR(CopyXattrs(source, destination));
-  if (info.st_nlink > 1) {
-    hard_links->emplace(key, destination);
-  }
-  return absl::OkStatus();
-}
-
-Status CopyTreeEntry(const std::filesystem::path& source,
-                     const std::filesystem::path& destination,
-                     HardLinkMap* hard_links) {
-  struct stat info = {};
-  if (::lstat(source.c_str(), &info) != 0) {
-    const int error = errno;
-    return ErrnoToStatus(error, fmt::format("lstat {}", source.string()));
-  }
-  if (S_ISDIR(info.st_mode)) {
-    return CopyDirectory(source, destination, info, hard_links);
-  }
-  if (S_ISLNK(info.st_mode)) {
-    return CopySymlink(source, destination);
-  }
-  if (S_ISREG(info.st_mode)) {
-    return CopyRegularFile(source, destination, info, hard_links);
-  }
-
-  return InvalidArgumentError("unsupported file type at {}", source.string());
-}
-
-Status CopyTreeFilesEntries(const std::filesystem::path& source,
-                            const std::filesystem::path& destination) {
-  PUU_RETURN_IF_ERROR(CreateDirectories(destination));
-  std::error_code error;
-  std::filesystem::directory_iterator entries(source, error);
-  if (error) {
-    return FilesystemError(error, fmt::format("readdir {}", source.string()));
-  }
-  const std::filesystem::directory_iterator end;
-  for (; entries != end; entries.increment(error)) {
-    if (error) {
-      return FilesystemError(error, fmt::format("readdir {}", source.string()));
-    }
-    const std::filesystem::path child = entries->path();
-    const std::filesystem::path target = destination / child.filename();
-
-    struct stat info = {};
-    if (::lstat(child.c_str(), &info) != 0) {
-      const int errno_value = errno;
-      return ErrnoToStatus(errno_value,
-                           fmt::format("lstat {}", child.string()));
-    }
-    if (S_ISDIR(info.st_mode)) {
-      PUU_RETURN_IF_ERROR(CopyTreeFilesEntries(child, target));
-      continue;
-    }
-    PUU_RETURN_IF_ERROR(CopyFile(child, target));
-  }
-  return absl::OkStatus();
 }
 
 Status MountContextError(libmnt_context* cxt, int rc, std::string_view action,
@@ -546,46 +357,6 @@ StatusOr<std::filesystem::path> DeploymentRoot(
   }
   std::ranges::sort(found);
   return found.front();
-}
-
-StatusOr<std::vector<std::string>> FlatpakManifestRefs(
-    const std::filesystem::path& manifest) {
-  if (!Exists(manifest)) {
-    return std::vector<std::string>();
-  }
-
-  PUU_ASSIGN_OR_RETURN(const std::string content, ReadFile(manifest));
-  std::vector<std::string> refs;
-  std::string_view remaining(content);
-  while (!remaining.empty()) {
-    const size_t newline = remaining.find('\n');
-    std::string_view line = remaining.substr(0, newline);
-    remaining = newline == std::string_view::npos
-                    ? std::string_view()
-                    : remaining.substr(newline + 1);
-    const size_t comment = line.find('#');
-    if (comment != std::string_view::npos) {
-      line = line.substr(0, comment);
-    }
-    const std::string_view trimmed = Trim(line);
-    if (!trimmed.empty()) {
-      refs.emplace_back(trimmed);
-    }
-  }
-  return refs;
-}
-
-Status CopyTree(const std::filesystem::path& source,
-                const std::filesystem::path& destination) {
-  PUU_RETURN_IF_ERROR(RemoveTree(destination));
-  HardLinkMap hard_links;
-  return CopyTreeEntry(source, destination, &hard_links);
-}
-
-Status CopyTreeFiles(const std::filesystem::path& source,
-                     const std::filesystem::path& destination) {
-  PUU_RETURN_IF_ERROR(RemoveTree(destination));
-  return CopyTreeFilesEntries(source, destination);
 }
 
 }  // namespace puu::engine

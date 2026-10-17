@@ -7,6 +7,7 @@
 #include <libmount/libmount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -23,6 +24,7 @@
 #include <ios>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <optional>
 #include <set>
 #include <span>
@@ -186,6 +188,210 @@ Status RemoveTree(const std::filesystem::path& path) {
   return absl::OkStatus();
 }
 
+namespace {
+
+std::filesystem::perms PermissionBits(mode_t mode) {
+  return std::filesystem::perms{mode} & std::filesystem::perms::mask;
+}
+
+Status CopyXattrs(const std::filesystem::path& source,
+                  const std::filesystem::path& destination) {
+  ssize_t size = ::listxattr(source.c_str(), nullptr, 0);
+  if (size < 0) {
+    const int error = errno;
+
+    if (error == ENOTSUP) {
+      return absl::OkStatus();
+    }
+    return ErrnoToStatus(error, fmt::format("listxattr {}", source.string()));
+  }
+  std::string names(static_cast<size_t>(size), '\0');
+  size = ::listxattr(source.c_str(), names.data(), names.size());
+  if (size < 0) {
+    const int error = errno;
+    return ErrnoToStatus(error, fmt::format("listxattr {}", source.string()));
+  }
+  names.resize(static_cast<size_t>(size));
+
+  for (size_t start = 0; start < names.size();) {
+    const size_t end = names.find('\0', start);
+    const std::string name =
+        names.substr(start, end == std::string_view::npos ? end : end - start);
+    start = end == std::string_view::npos ? names.size() : end + 1;
+
+    if (!name.starts_with("user.")) {
+      continue;
+    }
+
+    ssize_t value_size = ::getxattr(source.c_str(), name.c_str(), nullptr, 0);
+    if (value_size < 0) {
+      const int error = errno;
+      if (error == ENODATA) {
+        continue;
+      }
+      return ErrnoToStatus(
+          error, fmt::format("getxattr {} {}", source.string(), name));
+    }
+    std::string value(static_cast<size_t>(value_size), '\0');
+    value_size =
+        ::getxattr(source.c_str(), name.c_str(), value.data(), value.size());
+    if (value_size < 0) {
+      const int error = errno;
+      if (error == ENODATA) {
+        continue;
+      }
+      return ErrnoToStatus(
+          error, fmt::format("getxattr {} {}", source.string(), name));
+    }
+    if (::setxattr(destination.c_str(), name.c_str(), value.data(),
+                   static_cast<size_t>(value_size), 0) != 0) {
+      const int error = errno;
+      return ErrnoToStatus(
+          error, fmt::format("setxattr {} {}", destination.string(), name));
+    }
+  }
+  return absl::OkStatus();
+}
+
+Status SetPermissions(const std::filesystem::path& path,
+                      std::filesystem::perms permissions) {
+  std::error_code error;
+  std::filesystem::permissions(path, permissions, error);
+  if (error) {
+    return FilesystemError(error, fmt::format("chmod {}", path.string()));
+  }
+  return absl::OkStatus();
+}
+
+using HardLinkMap = std::map<std::pair<dev_t, ino_t>, std::filesystem::path>;
+
+Status CopyTreeEntry(const std::filesystem::path& source,
+                     const std::filesystem::path& destination,
+                     HardLinkMap* hard_links);
+
+Status CopyDirectory(const std::filesystem::path& source,
+                     const std::filesystem::path& destination,
+                     const struct stat& info, HardLinkMap* hard_links) {
+  PUU_RETURN_IF_ERROR(CreateDirectories(destination));
+  std::error_code error;
+  std::filesystem::directory_iterator entries(source, error);
+  if (error) {
+    return FilesystemError(error, fmt::format("readdir {}", source.string()));
+  }
+  const std::filesystem::directory_iterator end;
+  for (; entries != end; entries.increment(error)) {
+    if (error) {
+      return FilesystemError(error, fmt::format("readdir {}", source.string()));
+    }
+    PUU_RETURN_IF_ERROR(CopyTreeEntry(
+        entries->path(), destination / entries->path().filename(), hard_links));
+  }
+
+  PUU_RETURN_IF_ERROR(
+      SetPermissions(destination, PermissionBits(info.st_mode)));
+  return CopyXattrs(source, destination);
+}
+
+Status CopySymlink(const std::filesystem::path& source,
+                   const std::filesystem::path& destination) {
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path target, ReadSymlink(source));
+  return CreateSymlink(target, destination);
+}
+
+Status CopyRegularFile(const std::filesystem::path& source,
+                       const std::filesystem::path& destination,
+                       const struct stat& info, HardLinkMap* hard_links) {
+  const std::pair<dev_t, ino_t> key{info.st_dev, info.st_ino};
+  if (info.st_nlink > 1) {
+    const auto existing = hard_links->find(key);
+    if (existing != hard_links->end()) {
+      std::error_code error;
+      std::filesystem::create_hard_link(existing->second, destination, error);
+      if (error) {
+        return FilesystemError(
+            error, fmt::format("link {} to {}", existing->second.string(),
+                               destination.string()));
+      }
+      return absl::OkStatus();
+    }
+  }
+  PUU_RETURN_IF_ERROR(CopyFile(source, destination));
+  PUU_RETURN_IF_ERROR(
+      SetPermissions(destination, PermissionBits(info.st_mode)));
+  PUU_RETURN_IF_ERROR(CopyXattrs(source, destination));
+  if (info.st_nlink > 1) {
+    hard_links->emplace(key, destination);
+  }
+  return absl::OkStatus();
+}
+
+Status CopyTreeEntry(const std::filesystem::path& source,
+                     const std::filesystem::path& destination,
+                     HardLinkMap* hard_links) {
+  struct stat info = {};
+  if (::lstat(source.c_str(), &info) != 0) {
+    const int error = errno;
+    return ErrnoToStatus(error, fmt::format("lstat {}", source.string()));
+  }
+  if (S_ISDIR(info.st_mode)) {
+    return CopyDirectory(source, destination, info, hard_links);
+  }
+  if (S_ISLNK(info.st_mode)) {
+    return CopySymlink(source, destination);
+  }
+  if (S_ISREG(info.st_mode)) {
+    return CopyRegularFile(source, destination, info, hard_links);
+  }
+
+  return InvalidArgumentError("unsupported file type at {}", source.string());
+}
+
+Status CopyTreeFilesEntries(const std::filesystem::path& source,
+                            const std::filesystem::path& destination) {
+  PUU_RETURN_IF_ERROR(CreateDirectories(destination));
+  std::error_code error;
+  std::filesystem::directory_iterator entries(source, error);
+  if (error) {
+    return FilesystemError(error, fmt::format("readdir {}", source.string()));
+  }
+  const std::filesystem::directory_iterator end;
+  for (; entries != end; entries.increment(error)) {
+    if (error) {
+      return FilesystemError(error, fmt::format("readdir {}", source.string()));
+    }
+    const std::filesystem::path child = entries->path();
+    const std::filesystem::path target = destination / child.filename();
+
+    struct stat info = {};
+    if (::lstat(child.c_str(), &info) != 0) {
+      const int errno_value = errno;
+      return ErrnoToStatus(errno_value,
+                           fmt::format("lstat {}", child.string()));
+    }
+    if (S_ISDIR(info.st_mode)) {
+      PUU_RETURN_IF_ERROR(CopyTreeFilesEntries(child, target));
+      continue;
+    }
+    PUU_RETURN_IF_ERROR(CopyFile(child, target));
+  }
+  return absl::OkStatus();
+}
+
+}  // namespace
+
+Status CopyTree(const std::filesystem::path& source,
+                const std::filesystem::path& destination) {
+  PUU_RETURN_IF_ERROR(RemoveTree(destination));
+  HardLinkMap hard_links;
+  return CopyTreeEntry(source, destination, &hard_links);
+}
+
+Status CopyTreeFiles(const std::filesystem::path& source,
+                     const std::filesystem::path& destination) {
+  PUU_RETURN_IF_ERROR(RemoveTree(destination));
+  return CopyTreeFilesEntries(source, destination);
+}
+
 Status WriteBytes(const std::filesystem::path& path,
                   std::span<const uint8_t> data, mode_t mode, int extra_flags) {
   const UniqueFd fd(
@@ -275,26 +481,6 @@ Status ReplaceFile(const std::filesystem::path& path,
                                content.size()));
 }
 
-StatusOr<std::set<std::filesystem::path>> MountedSources() {
-  PUU_ASSIGN_OR_RETURN(const UniqueMountTable table, ReadProcMountTable());
-  UniqueMountIter itr(mnt_new_iter(MNT_ITER_FORWARD));
-  if (!itr) {
-    return InternalError("failed to allocate mount iterator");
-  }
-  std::set<std::filesystem::path> sources;
-  libmnt_fs* fs = nullptr;
-  while (mnt_table_next_fs(table.get(), itr.get(), &fs) == 0) {
-    const char* src = mnt_fs_get_srcpath(fs);
-    if (src == nullptr) {
-      src = mnt_fs_get_source(fs);
-    }
-    if (src != nullptr && std::string_view(src).starts_with("/dev/")) {
-      sources.insert(Canonical(src));
-    }
-  }
-  return sources;
-}
-
 UniqueFd::UniqueFd(int fd) : fd_(fd) {}
 
 UniqueFd::~UniqueFd() { Reset(); }
@@ -377,40 +563,6 @@ std::string HumanSize(uint64_t bytes) {
     ++unit;
   }
   return fmt::format("{:.1f} {}", size, kUnits[unit]);
-}
-
-std::string CleanLogLine(std::string_view line) {
-  const size_t carriage = line.rfind('\r');
-  const std::string_view visible =
-      carriage == std::string_view::npos ? line : line.substr(carriage + 1);
-
-  std::string out;
-  out.reserve(visible.size());
-  for (size_t i = 0; i < visible.size(); ++i) {
-    const auto character = static_cast<unsigned char>(visible[i]);
-    if (character == 0x1b) {
-      if (i + 1 < visible.size() && visible[i + 1] == '[') {
-        i += 2;
-        while (i < visible.size() && (visible[i] < '@' || visible[i] > '~')) {
-          ++i;
-        }
-      }
-      continue;
-    }
-    if (character == '\t') {
-      out.push_back(' ');
-      continue;
-    }
-
-    if (character < 0x20 || character == 0x7f) {
-      continue;
-    }
-    out.push_back(visible[i]);
-  }
-
-  const size_t last = out.find_last_not_of(" \t");
-  out.resize(last == std::string::npos ? 0 : last + 1);
-  return out;
 }
 
 std::filesystem::path DefaultShell() {
@@ -604,6 +756,13 @@ StatusOr<Mounts> Mounts::Read() {
     const char* target = mnt_fs_get_target(fs);
     if (target != nullptr && *target != '\0') {
       mounts.mount_points_.emplace_back(target);
+    }
+    const char* src = mnt_fs_get_srcpath(fs);
+    if (src == nullptr) {
+      src = mnt_fs_get_source(fs);
+    }
+    if (src != nullptr && std::string_view(src).starts_with("/dev/")) {
+      mounts.sources_.insert(Canonical(src));
     }
   }
   return mounts;

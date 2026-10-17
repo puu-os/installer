@@ -276,8 +276,7 @@ void CheckMounts() {
   const auto mounts = Mounts::Read();
   assert(mounts.ok());
   assert(mounts->IsMountPoint("/") || mounts->IsMountPoint("/proc"));
-  const auto sources = MountedSources();
-  assert(sources.ok());
+  assert(!mounts->Sources().empty() || mounts->MountPoints().empty());
 }
 
 void CheckFileUtils() {
@@ -329,6 +328,21 @@ void CheckFileUtils() {
   assert(Exists(dir_path / "subdir" / "leaf.txt"));
   assert(RemoveTree(dir_path).ok());
   assert(!Exists(dir_path));
+
+  const std::filesystem::path tree_src =
+      std::filesystem::temp_directory_path() / "puu-selfcheck-treesrc.tmp";
+  const std::filesystem::path tree_dst =
+      std::filesystem::temp_directory_path() / "puu-selfcheck-treedst.tmp";
+  RemoveTree(tree_src).IgnoreError();
+  RemoveTree(tree_dst).IgnoreError();
+  assert(CreateDirectories(tree_src / "sub").ok());
+  assert(WriteFile(tree_src / "sub" / "f.txt", "abc", 0644).ok());
+  assert(CopyTree(tree_src, tree_dst).ok());
+  assert(Exists(tree_dst / "sub" / "f.txt"));
+  assert(CopyTreeFiles(tree_src, tree_dst).ok());
+  assert(Exists(tree_dst / "sub" / "f.txt"));
+  assert(RemoveTree(tree_src).ok());
+  assert(RemoveTree(tree_dst).ok());
 
   assert(RemoveFile(symlink_path).ok());
   assert(!Exists(symlink_path));

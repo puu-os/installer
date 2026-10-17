@@ -630,6 +630,33 @@ Status StepStageHomedIdentity(Runner& runner) {
   return absl::OkStatus();
 }
 
+StatusOr<std::vector<std::string>> ParseManifestRefs(
+    const std::filesystem::path& manifest) {
+  if (!Exists(manifest)) {
+    return std::vector<std::string>();
+  }
+
+  PUU_ASSIGN_OR_RETURN(const std::string content, ReadFile(manifest));
+  std::vector<std::string> refs;
+  std::string_view remaining(content);
+  while (!remaining.empty()) {
+    const size_t newline = remaining.find('\n');
+    std::string_view line = remaining.substr(0, newline);
+    remaining = newline == std::string_view::npos
+                    ? std::string_view()
+                    : remaining.substr(newline + 1);
+    const size_t comment = line.find('#');
+    if (comment != std::string_view::npos) {
+      line = line.substr(0, comment);
+    }
+    const std::string_view trimmed = Trim(line);
+    if (!trimmed.empty()) {
+      refs.emplace_back(trimmed);
+    }
+  }
+  return refs;
+}
+
 Status StepFlatpakSeed(Runner& runner) {
   const FlatpakConfig& flatpak = runner.GetContext().config.flatpak;
   if (!IsDirectory(flatpak.live_store)) {
@@ -638,7 +665,7 @@ Status StepFlatpakSeed(Runner& runner) {
     PUU_ASSIGN_OR_RETURN(const std::filesystem::path manifest,
                          InDeployment(flatpak.manifest_path));
     PUU_ASSIGN_OR_RETURN(const std::vector<std::string> refs,
-                         FlatpakManifestRefs(manifest));
+                         ParseManifestRefs(manifest));
     if (refs.empty()) {
       InstallationLogger()->info("flatpak-seed: no refs listed in {}",
                                  flatpak.manifest_path.string());

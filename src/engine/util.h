@@ -42,6 +42,16 @@ Status CreateSymlink(const std::filesystem::path& target,
 Status RemoveFile(const std::filesystem::path& path);
 Status RemoveTree(const std::filesystem::path& path);
 
+// Recursively copies `source` to `destination`, preserving permissions,
+// hard links and user.* extended attributes.
+Status CopyTree(const std::filesystem::path& source,
+                const std::filesystem::path& destination);
+
+// Copies regular files only, without extended attributes or hard-link
+// preservation. `destination` is removed first.
+Status CopyTreeFiles(const std::filesystem::path& source,
+                     const std::filesystem::path& destination);
+
 // Writes, fsyncs and chmods a file. `extra_flags` may add O_NOFOLLOW.
 Status WriteBytes(const std::filesystem::path& path,
                   std::span<const uint8_t> data, mode_t mode,
@@ -51,9 +61,6 @@ Status WriteFile(const std::filesystem::path& path, std::string_view content,
 Status ReplaceFileBytes(const std::filesystem::path& path,
                         std::span<const uint8_t> data);
 Status ReplaceFile(const std::filesystem::path& path, std::string_view content);
-
-// Device nodes backing mounts in /proc/self/mountinfo.
-StatusOr<std::set<std::filesystem::path>> MountedSources();
 
 // Fills `buffer` with cryptographically secure random bytes.
 Status RandomBytes(std::span<uint8_t> buffer);
@@ -79,9 +86,6 @@ Status WaitUntil(const std::function<bool()>& predicate,
 // "465.8 GiB".
 std::string HumanSize(uint64_t bytes);
 
-// Reduces a raw command output line for display: keeps only the text after the
-// last carriage return, strips CSI escape sequences and drops control
-// characters.
 // The user's preferred shell from $SHELL, or /bin/sh.
 std::filesystem::path DefaultShell();
 
@@ -153,8 +157,14 @@ class Mounts {
     return mount_points_;
   }
 
+  [[nodiscard]] const std::set<std::filesystem::path>& Sources() const {
+    return sources_;
+  }
+
  private:
   std::vector<std::filesystem::path> mount_points_;
+
+  std::set<std::filesystem::path> sources_;
 };
 
 }  // namespace puu::engine

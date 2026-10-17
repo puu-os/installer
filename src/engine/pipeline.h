@@ -102,24 +102,6 @@ StatusOr<std::vector<KernelArg>> InstallKernelArgs(std::string_view root_uuid,
 StatusOr<std::filesystem::path> DeploymentRoot(
     const std::filesystem::path& target);
 
-// Parses a Flatpak manifest: one ref per line, '#' comments and blank lines
-// ignored.
-StatusOr<std::vector<std::string>> FlatpakManifestRefs(
-    const std::filesystem::path& manifest);
-
-// Recursively copies `source` to `destination`, preserving permissions,
-// hard links and user.* extended attributes.
-//
-// Fails on anything that is not a regular file, directory or symlink, rather
-// than silently skipping it.
-Status CopyTree(const std::filesystem::path& source,
-                const std::filesystem::path& destination);
-
-// Copies regular files only, without extended attributes or hard-link
-// preservation. `destination` is removed first.
-Status CopyTreeFiles(const std::filesystem::path& source,
-                     const std::filesystem::path& destination);
-
 }  // namespace puu::engine
 
 #endif  // PUU_ENGINE_PIPELINE_H_
