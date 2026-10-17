@@ -30,6 +30,7 @@
 #include "engine/context.h"
 #include "engine/firmware.h"
 #include "engine/guid.h"
+#include "engine/image.h"
 #include "engine/k3s.h"
 #include "engine/le_bytes.h"
 #include "engine/partition.h"
@@ -802,6 +803,28 @@ void CheckSecretString() {
   WipeString(nullptr);
 }
 
+void CheckImageManifest() {
+  ImageManifest manifest;
+  Config config;
+  assert(!manifest.TargetImgRef(config).ok());
+
+  config.image.target_imgref =
+      ImageRef::Parse("quay.io/example/test:v1").value();
+  auto target = manifest.TargetImgRef(config);
+  assert(target.ok());
+  assert(target->Value() == "quay.io/example/test:v1");
+
+  manifest.target_imgref =
+      ImageRef::Parse("docker.io/override/test:v2").value();
+  target = manifest.TargetImgRef(config);
+  assert(target.ok());
+  assert(target->Value() == "docker.io/override/test:v2");
+
+  const auto loaded = ImageManifest::Load("/nonexistent/source.tar");
+  assert(loaded.ok());
+  assert(!loaded->target_imgref.has_value());
+}
+
 }  // namespace
 }  // namespace puu::engine
 
@@ -823,6 +846,7 @@ int main() {
   puu::engine::CheckEfiGuid();
   puu::engine::CheckSecretString();
   puu::engine::CheckK3sStaging();
+  puu::engine::CheckImageManifest();
   std::puts("selfcheck: ok");
   return 0;
 }

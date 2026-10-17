@@ -323,8 +323,8 @@ Status StepVerifyImage(Runner& runner) {
         "source");
   }
   InstallationLogger()->info("expected image digest: {}", expected->Value());
-  PUU_RETURN_IF_ERROR(VerifyImageDigest(*context.source_image,
-                                        context.image_manifest, *expected));
+  PUU_RETURN_IF_ERROR(
+      context.image_manifest.VerifyDigest(*context.source_image, *expected));
   InstallationLogger()->info("image digest verified: {}", expected->Value());
   return absl::OkStatus();
 }
@@ -465,7 +465,7 @@ Status StepBootcInstall(Runner& runner) {
   std::optional<DiskWriteProgress> progress;
   if (context.source_image.has_value()) {
     const StatusOr<uint64_t> expected =
-        EstimatedInstallBytes(*context.source_image, context.image_manifest);
+        context.image_manifest.EstimatedInstallBytes(*context.source_image);
     if (expected.ok()) {
       std::error_code error;
       const uintmax_t archive_bytes =

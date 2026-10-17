@@ -338,10 +338,43 @@ StatusOr<uint64_t> LayerTotalBytes(std::span<const uint8_t> raw_manifest,
   }
   return total;
 }
+StatusOr<std::vector<uint8_t>> RawManifest(
+    const std::filesystem::path& source_image, const ImageManifest& manifest) {
+  if (IsDirectory(source_image)) {
+    return ReadFileBytes(source_image / "manifest.json");
+  }
+
+  PUU_ASSIGN_OR_RETURN(const std::optional<std::vector<uint8_t>> index,
+                       ReadArchiveEntry(source_image, "index.json"));
+  if (!index.has_value()) {
+    if (manifest.archive_image_name.has_value()) {
+      return InvalidArgumentError("{} has no index.json for image '{}'",
+                                  source_image.string(),
+                                  *manifest.archive_image_name);
+    }
+    PUU_ASSIGN_OR_RETURN(std::optional<std::vector<uint8_t>> legacy_manifest,
+                         ReadArchiveEntry(source_image, "manifest.json"));
+    if (legacy_manifest.has_value()) {
+      return *std::move(legacy_manifest);
+    }
+    return InvalidArgumentError("{} has neither index.json nor manifest.json",
+                                source_image.string());
+  }
+  PUU_ASSIGN_OR_RETURN(
+      const std::string blob,
+      ManifestBlobPath(*index, source_image, manifest.archive_image_name));
+  PUU_ASSIGN_OR_RETURN(std::optional<std::vector<uint8_t>> blob_data,
+                       ReadArchiveEntry(source_image, blob));
+  if (!blob_data.has_value()) {
+    return NotFoundError("{} is missing manifest blob {}",
+                         source_image.string(), blob);
+  }
+  return *std::move(blob_data);
+}
 
 }  // namespace
 
-StatusOr<ImageManifest> LoadImageManifest(
+StatusOr<ImageManifest> ImageManifest::Load(
     const std::filesystem::path& source_image) {
   ImageManifest manifest;
   PUU_ASSIGN_OR_RETURN(const std::optional<nlohmann::json> json,
@@ -448,10 +481,9 @@ StatusOr<std::optional<std::filesystem::path>> DefaultSourceImage(
   return image;
 }
 
-StatusOr<ImageRef> LoadTargetImgRef(const ImageManifest& manifest,
-                                    const Config& config) {
-  if (manifest.target_imgref.has_value()) {
-    return *manifest.target_imgref;
+StatusOr<ImageRef> ImageManifest::TargetImgRef(const Config& config) const {
+  if (target_imgref.has_value()) {
+    return *target_imgref;
   }
   if (!config.image.target_imgref.Empty()) {
     return config.image.target_imgref;
@@ -459,48 +491,14 @@ StatusOr<ImageRef> LoadTargetImgRef(const ImageManifest& manifest,
   return InvalidArgumentError("target image reference is empty");
 }
 
-StatusOr<std::vector<uint8_t>> RawManifest(
-    const std::filesystem::path& source_image, const ImageManifest& manifest) {
-  if (IsDirectory(source_image)) {
-    return ReadFileBytes(source_image / "manifest.json");
-  }
-
-  PUU_ASSIGN_OR_RETURN(const std::optional<std::vector<uint8_t>> index,
-                       ReadArchiveEntry(source_image, "index.json"));
-  if (!index.has_value()) {
-    if (manifest.archive_image_name.has_value()) {
-      return InvalidArgumentError("{} has no index.json for image '{}'",
-                                  source_image.string(),
-                                  *manifest.archive_image_name);
-    }
-    PUU_ASSIGN_OR_RETURN(std::optional<std::vector<uint8_t>> legacy_manifest,
-                         ReadArchiveEntry(source_image, "manifest.json"));
-    if (legacy_manifest.has_value()) {
-      return *std::move(legacy_manifest);
-    }
-    return InvalidArgumentError("{} has neither index.json nor manifest.json",
-                                source_image.string());
-  }
-  PUU_ASSIGN_OR_RETURN(
-      const std::string blob,
-      ManifestBlobPath(*index, source_image, manifest.archive_image_name));
-  PUU_ASSIGN_OR_RETURN(std::optional<std::vector<uint8_t>> blob_data,
-                       ReadArchiveEntry(source_image, blob));
-  if (!blob_data.has_value()) {
-    return NotFoundError("{} is missing manifest blob {}",
-                         source_image.string(), blob);
-  }
-  return *std::move(blob_data);
-}
-
-StatusOr<uint64_t> EstimatedInstallBytes(
-    const std::filesystem::path& source_image, const ImageManifest& manifest) {
-  if (manifest.install_size.has_value()) {
-    return *manifest.install_size;
+StatusOr<uint64_t> ImageManifest::EstimatedInstallBytes(
+    const std::filesystem::path& source_image) const {
+  if (install_size.has_value()) {
+    return *install_size;
   }
 
   PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> raw,
-                       RawManifest(source_image, manifest));
+                       RawManifest(source_image, *this));
   PUU_ASSIGN_OR_RETURN(const uint64_t total,
                        LayerTotalBytes(raw, source_image));
   if (total > std::numeric_limits<uint64_t>::max() / kLayerExpansionNumerator) {
@@ -509,11 +507,10 @@ StatusOr<uint64_t> EstimatedInstallBytes(
   return total * kLayerExpansionNumerator / kLayerExpansionDenominator;
 }
 
-Status VerifyImageDigest(const std::filesystem::path& source_image,
-                         const ImageManifest& manifest,
-                         const Digest& expected) {
+Status ImageManifest::VerifyDigest(const std::filesystem::path& source_image,
+                                   const Digest& expected) const {
   PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> raw,
-                       RawManifest(source_image, manifest));
+                       RawManifest(source_image, *this));
   PUU_ASSIGN_OR_RETURN(const std::string actual, Sha256Hex(raw));
   const std::string_view expected_hex = expected.Hex();
   if (!absl::EqualsIgnoreCase(actual, absl::string_view(expected_hex.data(),

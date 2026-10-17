@@ -79,10 +79,10 @@ StatusOr<engine::Context> BuildContext(const CommandLine& options) {
   engine::ImageManifest image_manifest;
   if (source_image.has_value()) {
     PUU_ASSIGN_OR_RETURN(image_manifest,
-                         engine::LoadImageManifest(*source_image));
+                         engine::ImageManifest::Load(*source_image));
   }
   PUU_ASSIGN_OR_RETURN(ImageRef target_imgref,
-                       engine::LoadTargetImgRef(image_manifest, config));
+                       image_manifest.TargetImgRef(config));
 
   engine::Context context;
   context.config = std::move(config);
