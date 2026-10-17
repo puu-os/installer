@@ -287,35 +287,40 @@ std::string StatusText(const Status& status) {
 
 }  // namespace
 
-Status WriteEfiVariable(const std::filesystem::path& path, uint32_t attributes,
-                        std::span<const uint8_t> payload) {
+EfiVariable::EfiVariable(std::string_view name, const EfiGuid& guid)
+    : path_(std::filesystem::path(kEfiVarsDir) /
+            fmt::format("{}-{}", name, guid.ToString())) {}
+
+bool EfiVariable::Exists() const { return puu::engine::Exists(path_); }
+
+StatusOr<std::vector<uint8_t>> EfiVariable::Read() const {
+  return ReadFileBytes(path_);
+}
+
+Status EfiVariable::Write(uint32_t attributes,
+                          std::span<const uint8_t> payload) const {
   std::vector<uint8_t> buffer;
   buffer.reserve(4 + payload.size());
   AppendLe<uint32_t>(buffer, attributes);
   buffer.insert(buffer.end(), payload.begin(), payload.end());
 
-  ClearImmutable(path);
-  UniqueFd const fd(::open(path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644));
+  ClearImmutable(path_);
+  UniqueFd const fd(
+      ::open(path_.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644));
   if (!fd) {
     const int error = errno;
-    return ErrnoToStatus(error, fmt::format("open {}", path.string()));
+    return ErrnoToStatus(error, fmt::format("open {}", path_.string()));
   }
   const ssize_t written = ::write(fd.Get(), buffer.data(), buffer.size());
   if (written < 0) {
     const int error = errno;
-    return ErrnoToStatus(error, fmt::format("write {}", path.string()));
+    return ErrnoToStatus(error, fmt::format("write {}", path_.string()));
   }
   if (static_cast<size_t>(written) != buffer.size()) {
-    return InternalError("short write to {}: {} of {} bytes", path.string(),
+    return InternalError("short write to {}: {} of {} bytes", path_.string(),
                          written, buffer.size());
   }
   return absl::OkStatus();
-}
-
-std::filesystem::path EfiVariablePath(std::string_view name,
-                                      const EfiGuid& guid) {
-  return std::filesystem::path(kEfiVarsDir) /
-         fmt::format("{}-{}", name, guid.ToString());
 }
 
 SetupMode DetectSetupMode() {
@@ -349,14 +354,12 @@ Status ManageBootEntry(const EfiPartitionLayout& layout, Arch arch,
   }
 
   const EfiGuid global = EfiGuid::Global();
-  const std::filesystem::path boot_order_path =
-      EfiVariablePath("BootOrder", global);
-  const bool had_boot_order = Exists(boot_order_path);
+  const EfiVariable boot_order("BootOrder", global);
+  const bool had_boot_order = boot_order.Exists();
 
   std::vector<uint16_t> previous_order;
   if (had_boot_order) {
-    PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> raw,
-                         ReadFileBytes(boot_order_path));
+    PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> raw, boot_order.Read());
     previous_order = DecodeBootOrder(raw);
   }
 
@@ -384,11 +387,10 @@ Status ManageBootEntry(const EfiPartitionLayout& layout, Arch arch,
   PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> load_option,
                        BuildLoadOption(description, device_path));
 
-  const std::filesystem::path boot_path =
-      EfiVariablePath(fmt::format("Boot{:04X}", *boot_id), global);
-  PUU_RETURN_IF_ERROR(WithContext(
-      WriteEfiVariable(boot_path, kBootVariableAttributes, load_option),
-      fmt::format("failed to write Boot{:04X}", *boot_id)));
+  const EfiVariable boot_var(fmt::format("Boot{:04X}", *boot_id), global);
+  PUU_RETURN_IF_ERROR(
+      WithContext(boot_var.Write(kBootVariableAttributes, load_option),
+                  fmt::format("failed to write Boot{:04X}", *boot_id)));
 
   std::vector<uint16_t> new_order{*boot_id};
   for (const uint16_t id : previous_order) {
@@ -396,19 +398,19 @@ Status ManageBootEntry(const EfiPartitionLayout& layout, Arch arch,
       new_order.push_back(id);
     }
   }
-  const Status wrote_order = WriteEfiVariable(
-      boot_order_path, kBootVariableAttributes, EncodeBootOrder(new_order));
+  const Status wrote_order =
+      boot_order.Write(kBootVariableAttributes, EncodeBootOrder(new_order));
   if (wrote_order.ok()) {
     return absl::OkStatus();
   }
 
-  const Status removed_entry = DeleteEfiVariable(boot_path);
+  const Status removed_entry = DeleteEfiVariable(boot_var.Path());
   Status restored_order;
   if (had_boot_order) {
-    restored_order = WriteEfiVariable(boot_order_path, kBootVariableAttributes,
+    restored_order = boot_order.Write(kBootVariableAttributes,
                                       EncodeBootOrder(previous_order));
-  } else if (Exists(boot_order_path)) {
-    restored_order = DeleteEfiVariable(boot_order_path);
+  } else if (boot_order.Exists()) {
+    restored_order = DeleteEfiVariable(boot_order.Path());
   }
   return InternalError(
       "failed to update BootOrder: {}; rollback Boot{:04X}: {}; "
@@ -418,12 +420,11 @@ Status ManageBootEntry(const EfiPartitionLayout& layout, Arch arch,
 }
 
 Status RequestRebootToFirmware() {
-  const EfiGuid global = EfiGuid::Global();
-  const std::filesystem::path path = EfiVariablePath("OsIndications", global);
+  const EfiVariable var("OsIndications", EfiGuid::Global());
 
   uint64_t indications = 0x0000'0000'0000'0001ULL;
-  if (Exists(path)) {
-    const StatusOr<std::vector<uint8_t>> raw = ReadFileBytes(path);
+  if (var.Exists()) {
+    const StatusOr<std::vector<uint8_t>> raw = var.Read();
     if (raw.ok() && raw->size() >= 4 + sizeof(uint64_t)) {
       indications |= ReadLe<uint64_t>(*raw, 4);
     }
@@ -431,7 +432,7 @@ Status RequestRebootToFirmware() {
 
   std::vector<uint8_t> payload;
   AppendLe<uint64_t>(payload, indications);
-  return WriteEfiVariable(path, kBootVariableAttributes, payload);
+  return var.Write(kBootVariableAttributes, payload);
 }
 
 }  // namespace puu::engine

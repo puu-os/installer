@@ -755,12 +755,6 @@ StatusOr<std::vector<uint8_t>> AuthenticatedPayload(
   return out;
 }
 
-Status WriteAuthVariable(std::string_view name, const EfiGuid& guid,
-                         std::span<const uint8_t> payload) {
-  return WriteEfiVariable(EfiVariablePath(name, guid), kAuthVariableAttributes,
-                          payload);
-}
-
 Status GenerateKeyPair(std::string_view common_name,
                        const std::filesystem::path& key_path,
                        const std::filesystem::path& certificate_path) {
@@ -1111,11 +1105,9 @@ Status EnrollKeys(const KeyStore& store) {
 
   {
     std::vector<uint8_t> esl = BuildSignatureList(db_der, owner);
-    const std::filesystem::path current_path =
-        EfiVariablePath("db", image_security_db);
-    if (Exists(current_path)) {
-      PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> raw,
-                           ReadFileBytes(current_path));
+    const EfiVariable db_var("db", image_security_db);
+    if (db_var.Exists()) {
+      PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> raw, db_var.Read());
 
       if (raw.size() >= 4) {
         PUU_ASSIGN_OR_RETURN(
@@ -1126,12 +1118,13 @@ Status EnrollKeys(const KeyStore& store) {
         }
       }
     }
+
     PUU_ASSIGN_OR_RETURN(
         const std::vector<uint8_t> payload,
         AuthenticatedPayload("db", image_security_db, esl, kek.key.get(),
                              kek.certificate.get()));
     PUU_RETURN_IF_ERROR(
-        WithContext(WriteAuthVariable("db", image_security_db, payload),
+        WithContext(db_var.Write(kAuthVariableAttributes, payload),
                     "failed to enrol the Secure Boot signature database"));
   }
 
@@ -1140,8 +1133,9 @@ Status EnrollKeys(const KeyStore& store) {
     PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> payload,
                          AuthenticatedPayload("KEK", global, esl, pk.key.get(),
                                               pk.certificate.get()));
-    PUU_RETURN_IF_ERROR(WithContext(WriteAuthVariable("KEK", global, payload),
-                                    "failed to enrol the key exchange key"));
+    PUU_RETURN_IF_ERROR(WithContext(
+        EfiVariable("KEK", global).Write(kAuthVariableAttributes, payload),
+        "failed to enrol the key exchange key"));
   }
 
   {
@@ -1149,8 +1143,9 @@ Status EnrollKeys(const KeyStore& store) {
     PUU_ASSIGN_OR_RETURN(const std::vector<uint8_t> payload,
                          AuthenticatedPayload("PK", global, esl, pk.key.get(),
                                               pk.certificate.get()));
-    PUU_RETURN_IF_ERROR(WithContext(WriteAuthVariable("PK", global, payload),
-                                    "failed to enrol the platform key"));
+    PUU_RETURN_IF_ERROR(WithContext(
+        EfiVariable("PK", global).Write(kAuthVariableAttributes, payload),
+        "failed to enrol the platform key"));
   }
   return absl::OkStatus();
 }

@@ -451,6 +451,13 @@ void CheckEfiGuid() {
   assert(!EfiGuid::Parse("8be4df61-93ca-11d2-aa0d-00e098032b8").ok());
   assert(!EfiGuid::Parse("8be4df61-93ca-11d2-aa0d-00e098032b8ccc").ok());
   assert(!EfiGuid::Parse("8be4df61-93ca-11d2-aa0d-00e098032b8g").ok());
+
+  const EfiVariable var("BootOrder", global);
+  assert(var.Path() ==
+         "/sys/firmware/efi/efivars/"
+         "BootOrder-8be4df61-93ca-11d2-aa0d-00e098032b8c");
+  const EfiVariable non_existent("PuuNonExistentVar", global);
+  assert(!non_existent.Exists());
 }
 
 struct K3sFixture {
@@ -816,7 +823,6 @@ void CheckSecretString() {
   assert(regular.size() == 0);
   WipeString(nullptr);
 }
-
 void CheckImageManifest() {
   ImageManifest manifest;
   Config config;
