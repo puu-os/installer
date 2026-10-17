@@ -69,12 +69,14 @@ StatusOr<uint64_t> DriveSizeBytes(const std::filesystem::path& drive);
 // exposes no WWN or serial for the device.
 StatusOr<std::string> DriveIdentity(const std::filesystem::path& drive);
 
-StatusOr<std::string> CaptureUuid(const std::filesystem::path& partition);
+enum class BlockTag : std::uint8_t {
+  kUuid,
+  kPartUuid,
+  kFilesystemType,
+};
 
-// GPT PARTUUID of `partition`. The ESP is referenced this way because FAT has
-// no stable filesystem UUID.
-StatusOr<std::string> CapturePartUuid(const std::filesystem::path& partition);
-StatusOr<std::string> ProbeFilesystemType(const std::filesystem::path& device);
+StatusOr<std::string> ProbeBlockTag(const std::filesystem::path& device,
+                                    BlockTag tag);
 StatusOr<std::optional<std::filesystem::path>> FindDeviceByLabel(
     std::string_view label);
 

@@ -436,7 +436,7 @@ StatusOr<std::optional<std::filesystem::path>> DefaultSourceImage(
         config.image.source_label->Value());
   }
   PUU_ASSIGN_OR_RETURN(const std::string filesystem_type,
-                       ProbeFilesystemType(*device));
+                       ProbeBlockTag(*device, BlockTag::kFilesystemType));
 
   PUU_RETURN_IF_ERROR(MountTarget(*device, mount_point, filesystem_type,
                                   "ro,nosuid,nodev,noexec"));

@@ -240,32 +240,6 @@ StatusOr<std::optional<std::string>> FirstHolder(std::string_view sysname) {
   return entry->path().filename().string();
 }
 
-StatusOr<std::string> ProbeValue(const std::filesystem::path& device,
-                                 const char* field, bool partitions) {
-  const BlkidProbePtr probe(blkid_new_probe_from_filename(device.c_str()));
-  if (probe == nullptr) {
-    const int error = errno;
-    return ErrnoToStatus(error == 0 ? EIO : error,
-                         fmt::format("probe {}", device.string()));
-  }
-  if (partitions) {
-    blkid_probe_enable_partitions(probe.get(), 1);
-    blkid_probe_set_partitions_flags(probe.get(), BLKID_PARTS_ENTRY_DETAILS);
-  }
-  if (blkid_do_safeprobe(probe.get()) < 0) {
-    return InternalError("failed to probe {}", device.string());
-  }
-  const char* value = nullptr;
-  size_t length = 0;
-  if (blkid_probe_lookup_value(probe.get(), field, &value, &length) != 0 ||
-      value == nullptr || length == 0) {
-    return NotFoundError("unable to determine {} for {}", field,
-                         device.string());
-  }
-
-  return std::string(value, length - 1);
-}
-
 bool OpensSuccessfully(const std::filesystem::path& path) {
   const UniqueFd fd(::open(path.c_str(), O_RDONLY | O_CLOEXEC));
   return static_cast<bool>(fd);
@@ -444,15 +418,44 @@ StatusOr<uint64_t> DriveSizeBytes(const std::filesystem::path& drive) {
   return *size;
 }
 
-StatusOr<std::string> CaptureUuid(const std::filesystem::path& partition) {
-  return ProbeValue(partition, "UUID", /*partitions=*/false);
-}
+StatusOr<std::string> ProbeBlockTag(const std::filesystem::path& device,
+                                    BlockTag tag) {
+  const char* field = nullptr;
+  bool partitions = false;
+  switch (tag) {
+    case BlockTag::kUuid:
+      field = "UUID";
+      break;
+    case BlockTag::kPartUuid:
+      field = "PART_ENTRY_UUID";
+      partitions = true;
+      break;
+    case BlockTag::kFilesystemType:
+      field = "TYPE";
+      break;
+  }
+  const BlkidProbePtr probe(blkid_new_probe_from_filename(device.c_str()));
+  if (probe == nullptr) {
+    const int error = errno;
+    return ErrnoToStatus(error == 0 ? EIO : error,
+                         fmt::format("probe {}", device.string()));
+  }
+  if (partitions) {
+    blkid_probe_enable_partitions(probe.get(), 1);
+    blkid_probe_set_partitions_flags(probe.get(), BLKID_PARTS_ENTRY_DETAILS);
+  }
+  if (blkid_do_safeprobe(probe.get()) < 0) {
+    return InternalError("failed to probe {}", device.string());
+  }
+  const char* value = nullptr;
+  size_t length = 0;
+  if (blkid_probe_lookup_value(probe.get(), field, &value, &length) != 0 ||
+      value == nullptr || length == 0) {
+    return NotFoundError("unable to determine {} for {}", field,
+                         device.string());
+  }
 
-StatusOr<std::string> CapturePartUuid(const std::filesystem::path& partition) {
-  return ProbeValue(partition, "PART_ENTRY_UUID", /*partitions=*/true);
-}
-StatusOr<std::string> ProbeFilesystemType(const std::filesystem::path& device) {
-  return ProbeValue(device, "TYPE", /*partitions=*/false);
+  return std::string(value, length - 1);
 }
 
 StatusOr<std::optional<std::filesystem::path>> FindDeviceByLabel(

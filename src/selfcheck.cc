@@ -368,7 +368,7 @@ void CheckBlockProbing() {
   assert(!missing_device->has_value());
 
   const StatusOr<std::string> missing_type =
-      ProbeFilesystemType("/nonexistent/puu-test-block");
+      ProbeBlockTag("/nonexistent/puu-test-block", BlockTag::kFilesystemType);
   assert(!missing_type.ok());
 }
 

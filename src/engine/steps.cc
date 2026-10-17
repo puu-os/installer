@@ -353,7 +353,8 @@ Status StepFormatEfi(Runner& runner) {
   Command command("mkfs.fat");
   PUU_RETURN_IF_ERROR(command.Args({"-F32", "-n", "EFI", part.string()}).Run());
 
-  PUU_ASSIGN_OR_RETURN(context.parts.efi_uuid, CapturePartUuid(part));
+  PUU_ASSIGN_OR_RETURN(context.parts.efi_uuid,
+                       ProbeBlockTag(part, BlockTag::kPartUuid));
   return absl::OkStatus();
 }
 
@@ -365,7 +366,8 @@ Status StepFormatRoot(Runner& runner) {
                              label);
   Command command("mkfs.xfs");
   PUU_RETURN_IF_ERROR(command.Args({"-f", "-L", label, part.string()}).Run());
-  PUU_ASSIGN_OR_RETURN(context.parts.root_uuid, CaptureUuid(part));
+  PUU_ASSIGN_OR_RETURN(context.parts.root_uuid,
+                       ProbeBlockTag(part, BlockTag::kUuid));
   return absl::OkStatus();
 }
 
@@ -381,7 +383,8 @@ Status StepFormatHome(Runner& runner) {
                           .Args({"-t", "ext4", "-O", "encrypt", "-F", "-L",
                                  label, part.string()})
                           .Run());
-  PUU_ASSIGN_OR_RETURN(context.parts.home_uuid, CaptureUuid(part));
+  PUU_ASSIGN_OR_RETURN(context.parts.home_uuid,
+                       ProbeBlockTag(part, BlockTag::kUuid));
   return absl::OkStatus();
 }
 
