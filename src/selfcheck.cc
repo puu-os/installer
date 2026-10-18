@@ -456,6 +456,10 @@ void CheckEfiGuid() {
   assert(var.Path() ==
          "/sys/firmware/efi/efivars/"
          "BootOrder-8be4df61-93ca-11d2-aa0d-00e098032b8c");
+  const EfiVariable boot_next("BootNext", global);
+  assert(boot_next.Path() ==
+         "/sys/firmware/efi/efivars/"
+         "BootNext-8be4df61-93ca-11d2-aa0d-00e098032b8c");
   const EfiVariable non_existent("PuuNonExistentVar", global);
   assert(!non_existent.Exists());
 }

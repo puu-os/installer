@@ -26,6 +26,7 @@
 
 #include <absl/status/status.h>
 #include <fmt/format.h>
+#include <spdlog/spdlog.h>
 
 #include "base/status.h"
 #include "config.h"
@@ -401,6 +402,16 @@ Status ManageBootEntry(const EfiPartitionLayout& layout, Arch arch,
   const Status wrote_order =
       boot_order.Write(kBootVariableAttributes, EncodeBootOrder(new_order));
   if (wrote_order.ok()) {
+    const EfiVariable boot_next("BootNext", global);
+    std::vector<uint8_t> next_payload;
+    next_payload.reserve(sizeof(uint16_t));
+    AppendLe<uint16_t>(next_payload, *boot_id);
+    const Status wrote_next =
+        boot_next.Write(kBootVariableAttributes, next_payload);
+    if (!wrote_next.ok()) {
+      spdlog::warn("failed to set BootNext to {:04X}: {}", *boot_id,
+                   wrote_next.message());
+    }
     return absl::OkStatus();
   }
 
